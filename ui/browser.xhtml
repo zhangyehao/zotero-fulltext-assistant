@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet href="chrome://global/skin/" type="text/css"?>
+<window xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul" xmlns:html="http://www.w3.org/1999/xhtml" title="科研通 · 全文助手内置窗口" width="1100" height="800" orient="vertical" persist="screenX screenY width height">
+  <html:style>
+    .ft-bar { display:flex;gap:12px;align-items:center;padding:10px 14px;background:#f2f3f5;color:#292d34;font:13px 'Segoe UI','Microsoft YaHei',sans-serif; }
+    #ft-address { flex:1;overflow-wrap:anywhere;font-size:12px; }
+    #ft-read { padding:7px 12px; }
+    #ft-status { padding:8px 14px;font:12px 'Segoe UI','Microsoft YaHei',sans-serif;background:#fff8dc;color:#4c431e; }
+    #ft-browser-holder { min-height:0; }
+  </html:style>
+  <html:div class="ft-bar"><html:strong>科研通</html:strong><html:span id="ft-address">正在打开…</html:span><html:button id="ft-read" type="button">完成登录</html:button></html:div>
+  <html:div id="ft-status" role="status">在科研通网页完成登录或验证码。登录成功后会自动绑定，重启 Zotero 后保留会话。</html:div>
+  <vbox id="ft-browser-holder" flex="1" />
+  <script src="chrome://fulltext-assistant/content/ui/browser.js" />
+</window>

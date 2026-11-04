@@ -1,0 +1,48 @@
+name: Prepare release draft
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - name: Verify tag and package versions
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          version = json.loads(Path('manifest.json').read_text())['version']
+          package_version = json.loads(Path('package.json').read_text())['version']
+          if os.environ['RELEASE_TAG'] != 'v' + version or package_version != version:
+              raise SystemExit('Tag, manifest.json and package.json versions must match.')
+          PY
+      - name: Install test dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Run tests
+        run: npm test
+      - name: Build release files
+        run: python build.py --output dist
+      - name: Create a prerelease draft for review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" dist/*.xpi dist/*-source.zip \
+            --verify-tag --draft --prerelease --title "$RELEASE_TAG" --generate-notes

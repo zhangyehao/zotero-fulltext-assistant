@@ -1,0 +1,65 @@
+#fta-preferences{display:flex;flex-direction:column;gap:0;min-width:0;font:message-box;color:var(--fill-primary,currentColor);max-width:900px}
+#fta-preferences *{box-sizing:border-box}
+#fta-preferences [hidden]{display:none!important}
+#fta-preferences p{margin:0}
+#fta-preferences h2{font-size:1.05em;font-weight:600;margin:0;display:flex;align-items:center;gap:8px}
+#fta-preferences button,#fta-preferences input,#fta-preferences select{font:inherit}
+#fta-preferences button{min-height:28px;max-width:100%;padding:4px 10px;border:1px solid light-dark(#c2c7ce,#59616c);border-radius:4px;color:inherit;background:light-dark(#fbfbfc,#3a414c);white-space:normal;cursor:pointer}
+#fta-preferences button:hover:enabled{background:light-dark(#edf0f5,#485260)}
+#fta-preferences button:disabled{opacity:.5;cursor:default}
+#fta-preferences button.fta-primary{color:#fff;background:light-dark(#166077,#246c83);border-color:transparent}
+#fta-preferences button.fta-primary:hover:enabled{background:light-dark(#124d60,#317d95)}
+#fta-preferences input[type=text],#fta-preferences input[type=password],#fta-preferences input[type=number],#fta-preferences input[type=url],#fta-preferences select{min-height:30px;min-width:0;width:100%;padding:5px 7px;border:1px solid light-dark(#b8bec8,#667181);border-radius:3px;color:inherit;background:light-dark(#fff,#252c36)}
+#fta-preferences input:disabled{opacity:.65}
+#fta-preferences button:focus-visible,#fta-preferences input:focus-visible,#fta-preferences select:focus-visible,#fta-preferences summary:focus-visible{outline:2px solid light-dark(#4e88c5,#9ac2ec);outline-offset:2px}
+#fta-preferences .fta-intro{display:flex;align-items:center;gap:12px;margin:0 0 20px}
+#fta-preferences .fta-intro img{flex:none;object-fit:contain}
+#fta-preferences .fta-intro>div{min-width:0;flex:1}
+#fta-preferences .fta-intro .fta-secondary{margin-top:4px}
+#fta-preferences .fta-version{font-size:.85em;color:light-dark(#7a8491,#a8b7ca);align-self:flex-start}
+#fta-preferences .fta-section{margin:0 0 22px;padding:0 0 20px;border-bottom:1px solid light-dark(#dfe3e9,#47515f)}
+#fta-preferences .fta-section:last-of-type{margin-bottom:8px;padding-bottom:0;border-bottom:0}
+#fta-preferences .fta-section-heading{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px}
+#fta-preferences .fta-account-identity{font-size:.92em;margin-bottom:12px;color:light-dark(#38684a,#b8dfc8);overflow-wrap:anywhere}
+#fta-preferences .fta-fields{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;max-width:660px}
+#fta-preferences .fta-fields>label{display:flex;flex-direction:column;gap:6px}
+#fta-preferences .fta-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:12px 0 9px}
+#fta-preferences .fta-secondary{font-size:.92em;color:light-dark(#667487,#b5c4d8);overflow-wrap:anywhere}
+#fta-preferences .fta-note{font-size:.88em;color:light-dark(#7a8595,#a7b7cd);margin-top:6px;line-height:1.5}
+#fta-preferences .fta-check{display:flex;gap:8px;align-items:flex-start;margin:12px 0 8px;line-height:1.5}
+#fta-preferences .fta-check input{flex:none;margin:3px 0 0;accent-color:light-dark(#166077,#81b8cf)}
+#fta-preferences .fta-status-badge{padding:2px 7px;border-radius:4px;background:light-dark(#e9edf2,#3c4858);color:light-dark(#617086,#c7d5e7);font-size:.86em;white-space:nowrap}
+#fta-preferences .fta-status-badge[data-tone=success]{background:light-dark(#e6f1e9,#2d483e);color:light-dark(#38684a,#b8dfc8)}
+#fta-preferences .fta-status-badge[data-tone=warning]{background:light-dark(#fbefd9,#51442e);color:light-dark(#82612c,#ead2a2)}
+#fta-preferences .fta-status-badge[data-tone=error]{background:light-dark(#f6e6e9,#4f343e);color:light-dark(#9c4151,#e8adbb)}
+#fta-preferences .fta-count{font-size:.78em;font-weight:400;padding:0 5px;min-width:18px;text-align:center;border-radius:3px;background:light-dark(#edf0f4,#3c4859);color:light-dark(#6a788d,#c1cfe3)}
+#fta-preferences .fta-list{display:flex;flex-direction:column;gap:0}
+#fta-preferences .fta-task-filters{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 10px}
+#fta-preferences .fta-task-filters button{font-size:.92em}
+#fta-preferences .fta-task-filters button[aria-pressed=true]{background:light-dark(#e1eef2,#304d5b);border-color:light-dark(#5b91a1,#83b4c6);color:light-dark(#15526a,#c5e8f5)}
+#fta-preferences .fta-bulk-actions{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center}
+#fta-preferences .fta-bulk-actions .fta-check{margin:0;font-size:.92em}
+#fta-preferences .fta-bulk-actions button{font-size:.92em}
+#fta-preferences #fta-pref-task-list{margin-top:14px}
+#fta-preferences .fta-task-select{flex:none;margin:2px 0 0;accent-color:light-dark(#166077,#81b8cf)}
+#fta-preferences .fta-row{padding:12px 0;border-top:1px solid light-dark(#e7eaf0,#445060)}
+#fta-preferences .fta-row:first-child{border-top:0;padding-top:0}
+#fta-preferences .fta-row-main{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
+#fta-preferences .fta-row-title{font-weight:500;overflow-wrap:anywhere;min-width:0;flex:1}
+#fta-preferences .fta-row-meta{font-size:.88em;margin-top:5px;color:light-dark(#78869a,#aebfd5);overflow-wrap:anywhere}
+#fta-preferences .fta-row-note{font-size:.92em;margin-top:6px;color:light-dark(#765e38,#dfc89f);white-space:pre-wrap;overflow-wrap:anywhere}
+#fta-preferences .fta-row-actions{display:flex;flex-wrap:wrap;gap:7px;margin-top:8px}
+#fta-preferences .fta-row-actions button{font-size:.9em;min-height:26px;padding:3px 9px}
+#fta-preferences .fta-empty{padding:10px 0 14px;color:light-dark(#7e8999,#a5b6ce);font-size:.92em}
+#fta-preferences .fta-existing{margin-top:10px;font-size:.92em}
+#fta-preferences .fta-existing summary{cursor:pointer;color:light-dark(#3c6b8f,#a0c5e2)}
+#fta-preferences .fta-existing form{margin-top:10px}
+#fta-preferences .fta-existing label{display:block;margin-bottom:6px}
+#fta-preferences .fta-existing .fta-target-label{margin-top:12px}
+#fta-preferences .fta-inline-field{display:flex;gap:8px}
+#fta-preferences .fta-inline-field input{flex:1}
+#fta-preferences .fta-inline-field button{flex:none}
+#fta-preferences .fta-message-summary{font-size:.92em;color:light-dark(#6c7a8e,#b8c6da);white-space:pre-wrap;overflow-wrap:anywhere;margin-top:5px}
+#fta-preferences .fta-page-status{min-height:1.4em;font-size:.92em;color:light-dark(#567083,#b6cada);white-space:pre-wrap;overflow-wrap:anywhere}
+#fta-preferences [data-error=true]{color:light-dark(#a12b41,#f2a9bb)}
+@media(max-width:650px){#fta-preferences .fta-fields{grid-template-columns:1fr;gap:10px}#fta-preferences .fta-intro{align-items:flex-start}#fta-preferences .fta-version{display:none}#fta-preferences .fta-section-heading{flex-wrap:wrap}#fta-preferences .fta-row-main{flex-wrap:wrap}#fta-preferences .fta-row-title{flex-basis:calc(100% - 110px)}}

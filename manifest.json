@@ -1,0 +1,17 @@
+{
+  "manifest_version": 2,
+  "name": "全文助手",
+  "version": "0.2.0",
+  "description": "批量从论文网页获取全文，跟踪科研通文献求助并将 PDF 保存到原条目。",
+  "author": "zhangyehao",
+  "homepage_url": "https://github.com/zhangyehao/zotero-fulltext-assistant",
+  "icons": {"16":"assets/icon-16.png","32":"assets/icon-32.png","48":"assets/icon-48.png","96":"assets/icon-96.png","128":"assets/icon-128.png"},
+  "applications": {
+    "zotero": {
+      "id": "fulltext-assistant@local.invalid",
+      "update_url": "https://fulltext-assistant.invalid/updates.json",
+      "strict_min_version": "10.0.7",
+      "strict_max_version": "10.0.*"
+    }
+  }
+}

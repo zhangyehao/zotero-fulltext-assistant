@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet href="chrome://global/skin/" type="text/css"?>
+<window xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul" xmlns:html="http://www.w3.org/1999/xhtml"
+  id="fulltext-publisher-window" windowtype="fulltext-assistant:publisher" title="出版社与机构登录 · 全文助手"
+  width="1160" height="850" orient="vertical" persist="screenX screenY width height sizemode">
+  <script src="chrome://zotero/content/include.js" />
+  <script src="chrome://zotero/content/browserWindowShim.js" />
+  <script src="chrome://fulltext-assistant/content/src/publisher-window.js" />
+  <html:style>
+    .publisher-toolbar { display:flex;align-items:center;gap:8px;padding:10px 12px;background:#edf1f5;font:13px 'Segoe UI','Microsoft YaHei',sans-serif; }
+    .publisher-toolbar button { padding:6px 11px;white-space:nowrap; }
+    #publisher-address { flex:1;min-width:120px;padding:7px 9px;border:1px solid #bbc4cf;border-radius:4px;font:12px 'Segoe UI',sans-serif; }
+    #publisher-retry { color:white;background:#1767b8;border:1px solid #145ca4;border-radius:4px; }
+    #publisher-status { padding:8px 12px;background:#fff7db;color:#514314;font:12px 'Segoe UI','Microsoft YaHei',sans-serif; }
+    #publisher-tabs { display:flex;gap:5px;padding:5px 9px;background:#e3e8ef;overflow-x:auto; }
+    .publisher-tab { display:flex;max-width:270px;border:1px solid #bdc7d3;border-radius:4px;background:#f4f6f9; }
+    .publisher-tab.selected { background:white;border-color:#297ac3; }
+    .publisher-tab button { border:0;background:transparent;padding:6px 9px;color:#25384b; }
+    .publisher-tab .publisher-tab-title { overflow:hidden;white-space:nowrap;text-overflow:ellipsis;max-width:230px; }
+    #publisher-pages { min-height:0; }
+    browser[data-publisher-tab] { min-height:0; }
+  </html:style>
+  <html:div class="publisher-toolbar">
+    <html:button type="button" id="publisher-back">后退</html:button>
+    <html:button type="button" id="publisher-forward">前进</html:button>
+    <html:button type="button" id="publisher-reload">刷新</html:button>
+    <html:input id="publisher-address" type="text" readonly="readonly" aria-label="当前网页地址" value="正在打开…" />
+    <html:button type="button" id="publisher-home">返回论文</html:button>
+    <html:button type="button" id="publisher-retry">完成登录并重试此文献</html:button>
+  </html:div>
+  <html:div id="publisher-status" role="status">请在下方网页完成出版社或机构登录。认证页面和弹窗都留在此窗口；登录后点击右上方重试。</html:div>
+  <html:div id="publisher-tabs" role="tablist" aria-label="出版社及机构网页" />
+  <vbox id="publisher-pages" flex="1">
+    <browser id="publisher-main-browser" type="content" flex="1" remote="false" maychangeremoteness="true"
+      disableglobalhistory="true" usercontextid="0" messagemanagergroup="fulltext-publisher-browser" data-publisher-tab="true" />
+  </vbox>
+  <script src="chrome://fulltext-assistant/content/ui/publisher-browser.js" />
+</window>
