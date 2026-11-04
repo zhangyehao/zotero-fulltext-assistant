@@ -74,7 +74,7 @@ function create({Zotero,Services,IOUtils,PathUtils,rootURI,pluginID,version}){
     if(task.doi&&result.doi&&MODEL.normalizeDOI(task.doi)!==MODEL.normalizeDOI(result.doi))throw new Error("求助页面 DOI 与原条目不一致，已停止下载，请核对关联。");
     await linkedItem(task,result.doi||task.doi);abortIf(id,ticket);
     const files=(result.files||[]).filter(f=>!["reject","withdraw"].includes(f.status));const available=result.state==="available"&&files.length>0;
-    await update(id,{state:available?"available":result.state==="closed"?"closed":"waiting",doi:task.doi||result.doi||"",attempts:0,lastCheckedAt:now(),nextCheckAt:result.state==="closed"?null:new Date(Date.now()+settings.pollSeconds*1000).toISOString(),lastError:result.state==="closed"?"历史求助已关闭或文件已过期，请打开求助网页处理；插件不会自动重复发布。":""});
+    await update(id,{state:available?"available":result.state==="closed"?"closed":"waiting",doi:task.doi||result.doi||"",title:!task.itemID&&result.title?result.title:task.title,attempts:0,lastCheckedAt:now(),nextCheckAt:result.state==="closed"?null:new Date(Date.now()+settings.pollSeconds*1000).toISOString(),lastError:result.state==="closed"?"历史求助已关闭或文件已过期，请打开求助网页处理；插件不会自动重复发布。":""});
     if(!available||(!settings.autoDownload&&!forceDownload)||!task.itemID)return;
     if(account.status!=="authenticated"){await update(id,{state:"pending_login",lastError:"已有人应助；登录科研通后可下载。"});return;}
     await update(id,{state:"downloading"});abortIf(id,ticket);let lastError;
@@ -146,7 +146,24 @@ function create({Zotero,Services,IOUtils,PathUtils,rootURI,pluginID,version}){
       }
       schedulePump();return {accepted:accepted.length,skipped:skipped.length,acceptedIDs:accepted,skippedIDs:skipped};
     },
-    async checkTask(id){const task=taskById(id);if(task.state==="submission_unknown"){const previous=await adapter.findExistingRequest(task.doi);if(!previous)throw new Error("尚未找到匹配的已发布求助。请在网站核对，不会自动重复提交。");await bindRequest(id,previous,{state:"waiting"});}if(taskById(id).requestID)await runTask(id);else await api.retryTask(id);},
+    async checkTask(id){
+      let task=taskById(id);if(active.has(id))return;const cancellation=cancellations.get(id);
+      if(task.state==="submission_unknown"){
+        const previous=await adapter.findExistingRequest(task.doi);
+        if(stopped||active.has(id)||cancellations.get(id)!==cancellation)return;
+        if(!previous)throw new Error("尚未找到匹配的已发布求助。请在网站核对，不会自动重复提交。");
+        await bindRequest(id,previous,{state:"waiting"});
+      }
+      task=taskById(id);
+      if(task.requestID){
+        if(stopped||active.has(id)||cancellations.get(id)!==cancellation)return;
+        if(task.state==="paused"){
+          await update(id,{state:"ready_to_check",lastError:"",nextCheckAt:null});
+          if(stopped||active.has(id)||cancellations.get(id)!==cancellation||taskById(id).state==="paused")return;
+        }
+        await runTask(id);
+      }else await api.retryTask(id);
+    },
     async downloadTask(id){const task=taskById(id);if(!task.requestID||!task.itemID)throw new Error("请先将可下载求助关联到文库条目。");if(!(await api.refreshAccount()).authenticated)throw new Error("请先登录科研通。");await runTask(id,{forceDownload:true});},
     async retryTask(id,{points}={}){const t=taskById(id);if(t.state==="submission_unknown")return api.checkTask(id);if(active.has(id))return;const patch={state:"queued",lastError:""};if(points!==undefined&&!t.requestID){if(hasProtectedIntent(t))throw new Error("此文献已有提交记录，请先检查已发布求助，不能更改其悬赏积分。");patch.requestedPoints=MODEL.validatePoints(points);}await update(id,patch);schedulePump();},
     async pauseTask(id){cancellations.set(id,(cancellations.get(id)||0)+1);await update(id,{state:"paused",nextCheckAt:null,lastError:"本地已暂停，网站上的求助保持原状态。"});},

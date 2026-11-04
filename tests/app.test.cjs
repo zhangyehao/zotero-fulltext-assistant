@@ -379,3 +379,38 @@ test('retryable login and uncertain errors do not enter the ordinary remote poll
     const current=env.app.getSnapshot().tasks[0];assert.equal(current.state,code==='LOGIN_REQUIRED'?'pending_login':'submission_unknown');assert.equal(current.nextCheckAt,null);assert.equal(env.submissions.length,0);await env.app.stop();
   }
 });
+
+test('manual check resumes a paused remote task without publishing or replacing its parent title',async()=>{
+  const task=MODEL.updateTask(remoteFixture('paused'),{title:'User chosen title',lastError:'Previously paused',nextCheckAt:'2099-01-01T00:00:00Z'}),env=environment({initialTasks:[task]});env.addItem(item(1));
+  env.adapter.getRequest=async id=>{env.remoteRequests.push(id);const current=env.app.getSnapshot().tasks[0];assert.equal(current.state,'ready_to_check');assert.equal(current.lastError,'');assert.equal(current.nextCheckAt,null);return {requestID:id,doi:task.doi,title:'Title from request detail',state:'waiting',files:[]};};
+  await env.app.start();await env.app.checkTask(task.id);const current=env.app.getSnapshot().tasks[0];
+  assert.equal(current.state,'waiting');assert.ok(current.lastCheckedAt);assert.ok(current.nextCheckAt);assert.equal(current.title,task.title);assert.equal(env.remoteRequests.length,1);assert.equal(env.submissions.length,0);assert.equal(env.publisherCalls.length,0);await env.app.stop();
+});
+
+test('manual check refreshes the real title of an unbound tracked request',async()=>{
+  const task=MODEL.createTask({requestURL:'https://www.ablesci.com/assist/detail?id=Request1',state:'paused',title:'Legacy request placeholder'}),env=environment({initialTasks:[task]});
+  env.adapter.getRequest=async id=>({requestID:id,doi:'10.1234/paper1',title:'Actual request title',state:'waiting',files:[]});
+  await env.app.start();await env.app.checkTask(task.id);const current=env.app.getSnapshot().tasks[0];
+  assert.equal(current.state,'waiting');assert.equal(current.title,'Actual request title');assert.equal(current.doi,'10.1234/paper1');assert.equal(current.itemID,null);assert.equal(env.submissions.length,0);await env.app.stop();
+});
+
+test('a resumed manual check cannot overwrite a newer pause when its response arrives',async()=>{
+  const task=remoteFixture('paused'),gate=deferred(),env=environment({initialTasks:[task]});env.addItem(item(1));
+  env.adapter.getRequest=async id=>{env.remoteRequests.push(id);await gate.promise;return {requestID:id,doi:task.doi,title:'Late title',state:'waiting',files:[]};};
+  await env.app.start();const check=env.app.checkTask(task.id);await until(()=>env.remoteRequests.length===1);await env.app.pauseTask(task.id);const paused=env.app.getSnapshot().tasks[0];gate.resolve();await check;
+  assert.deepEqual(env.app.getSnapshot().tasks[0],paused);assert.equal(paused.state,'paused');assert.equal(paused.nextCheckAt,null);assert.equal(env.submissions.length,0);await env.app.stop();
+});
+
+test('manual check leaves an already active task unchanged and does not start another read',async()=>{
+  const task=remoteFixture('waiting'),gate=deferred(),env=environment({initialTasks:[task]});env.addItem(item(1));
+  env.adapter.getRequest=async id=>{env.remoteRequests.push(id);await gate.promise;return {requestID:id,doi:task.doi,state:'waiting',files:[]};};
+  await env.app.start();const first=env.app.checkTask(task.id);await until(()=>env.remoteRequests.length===1);const before=env.app.getSnapshot().tasks[0];await env.app.checkTask(task.id);
+  assert.deepEqual(env.app.getSnapshot().tasks[0],before);assert.equal(env.remoteRequests.length,1);gate.resolve();await first;assert.equal(env.submissions.length,0);await env.app.stop();
+});
+
+test('pausing while a resumed check is being persisted prevents the remote read',async()=>{
+  const task=remoteFixture('paused'),gate=deferred(),env=environment({initialTasks:[task]});env.addItem(item(1));let held=false;
+  await env.app.start();env.setWriteHook(async(file,value)=>{if(!held&&file===queuePath&&JSON.parse(value).tasks[0].state==='ready_to_check'){held=true;await gate.promise;}});
+  const check=env.app.checkTask(task.id);await until(()=>held);const pause=env.app.pauseTask(task.id);gate.resolve();await Promise.all([check,pause]);
+  assert.equal(env.app.getSnapshot().tasks[0].state,'paused');assert.equal(env.remoteRequests.length,0);assert.equal(env.submissions.length,0);assert.equal(JSON.parse(env.files.get(queuePath)).tasks[0].state,'paused');await env.app.stop();
+});
