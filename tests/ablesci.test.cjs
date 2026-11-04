@@ -408,9 +408,9 @@ test("default contract cancels during metadata polling without claiming a public
   assert.equal(harness.calls.filter(call => new URL(call.url).pathname === "/assist/paper-lookup-status").length, 0);
 });
 
-function downloadPageHTML({ fileID = "File1", channel = "highspeed", host = "filehub2.ablesci.com" } = {}) {
-  const config = { tokenUrl: "/file/request-download-token", hashid: fileID, userId: "12345", defaultServerId: "2", defaultChannel: channel, expectedSize: 1000, allowedNodeHosts: [host, "filehub11vip.ablesci.com"], normalServers: [{ id: "2", name: "线路1" }] };
-  return `${modernAccountHTML()}<meta name="csrf-param" content="_csrf"><meta name="csrf-token" content="fixture-download-token"><div class="download-progress-page" data-download-blob-check="chunked-v1"><div class="download-progress-file-name">000448372.pdf</div><p>普通下载线路始终保持免积分（免费）。</p><button class="download-progress-normal-button" data-server-id="2">线路1</button></div><script>const config = ${JSON.stringify(config)};</script>`;
+function downloadPageHTML({ fileID = "File1", channel = "highspeed", host = "filehub2.ablesci.com", servers = [{ id: "2", name: "线路1" }], defaultServerId = "2", expectedSize = 1000, highspeedAvailable = true } = {}) {
+  const config = { tokenUrl: "/file/request-download-token", hashid: fileID, userId: "12345", defaultServerId, defaultChannel: channel, expectedSize, allowedNodeHosts: [host, ...servers.slice(1).map(server => `filehub${server.id}.ablesci.com`), "filehub11vip.ablesci.com"], normalServers: servers };
+  return `${modernAccountHTML()}<meta name="csrf-param" content="_csrf"><meta name="csrf-token" content="fixture-download-token"><div class="download-progress-page" data-download-blob-check="chunked-v1"><div class="download-progress-file-name">000448372.pdf</div><p>普通下载线路始终保持免积分（免费）。</p>${servers.map(server => `<button class="download-progress-normal-button" data-server-id="${server.id}">${server.name}</button>`).join("")}${highspeedAvailable ? '<button id="download-highspeed-direct">高速通道</button>' : ""}</div><script>const config = ${JSON.stringify(config)};</script>`;
 }
 function downloadHarness({ data = {}, pageOptions = {} } = {}) {
   const calls = [];
@@ -559,4 +559,101 @@ test("a retry after rejection still reconciles a request that became visible mea
   assert.equal(result.reused, true);
   assert.equal(harness.calls.filter(call => call.method === "POST").length, 0);
   assert.equal(harness.store.values.get("Account1:" + DOI).state, "confirmed");
+});
+
+function downloadSettingsHTML({ free = true, accountID = "Account1", currentNoticeOutsideForm = false } = {}) {
+  const notice = '<div><span>注</span>：本设置将对您不起作用，因为您当前的积分≥500，享有免积分高速下载权益，系统会自动使用高速模式。</div>';
+  return `${modernAccountHTML(accountID)}<form id="post-form" method="post"><input type="radio" name="file_highspeed" value="1"><input type="radio" name="file_highspeed" value="0" checked>${free && !currentNoticeOutsideForm ? notice : ""}</form>${currentNoticeOutsideForm ? notice : ""}<p>用户积分≥500：不扣积分，享有免积分高速下载权益。用户积分＜500：每个文件高速下载扣除2积分。</p>`;
+}
+
+function freeDownloadHarness({ free = true, settingsAccount = "Account1", tokenData = {}, pageOptions = {}, settingsFailure = null, onSettings = null } = {}) {
+  const calls = [], state = { free, settingsAccount, tokenData, settingsFailure }, servers = [{ id: "2", name: "线路1" }, { id: "3", name: "线路2" }, { id: "4", name: "线路3" }];
+  const request = async spec => {
+    calls.push(spec);
+    const path = new URL(spec.url).pathname;
+    if (path === "/my/assist-my") return response(spec.url, ownListHTML());
+    if (path === "/assist/detail") return response(spec.url, detailHTML().replace("/fixture-file?file=File1", "/assist/download?id=File1"));
+    if (path === "/assist/download") return response(spec.url, downloadPageHTML({ servers, defaultServerId: "3", ...pageOptions }));
+    if (path === "/my/assist-my-set") {
+      if (onSettings) onSettings();
+      if (state.settingsFailure === "network") throw new Error("fixture temporary network failure");
+      if (state.settingsFailure === "login") return response(ORIGIN + "/site/login", '<div class="able-head-user-guest"></div>');
+      return response(spec.url, state.settingsFailure === "structure" ? modernAccountHTML() : downloadSettingsHTML({ free: state.free, accountID: state.settingsAccount }));
+    }
+    assert.equal(path, "/file/request-download-token");assert.equal(spec.method, "POST");
+    const form = new URLSearchParams(spec.body), channel = form.get("channel"), fallback = form.get("fallback") === "1", transport = channel === "normal" ? "normal" : fallback ? "cdn" : "vip";
+    assert.equal(form.get("highspeed"), channel === "normal" ? "0" : "1");assert.equal(form.get("type"), "assistFile");assert.equal(form.get("id"), "File1");assert.equal(form.get("remove_sensitive"), "1");
+    if (channel === "highspeed") assert.equal(form.get("file_server"), "0");
+    return response(spec.url, JSON.stringify({ code: 0, data: { host: transport === "cdn" ? "/file/download" : `https://filehub${transport === "normal" ? form.get("file_server") : "11vip"}.ablesci.com/download`, channel, transport, token: "fixture-short-lived-token", output_filename: "000448372.pdf", expected_size: pageOptions.expectedSize || 1000, ...state.tokenData } }));
+  };
+  return { calls, state, client: adapter.create({ request, parseHTML: parser, model }), tokens() { return calls.filter(call => call.method === "POST").map(call => Object.fromEntries(new URLSearchParams(call.body))); } };
+}
+
+test("free-highspeed parser requires the current account notice, not generic rules, VIP icons or the smart setting", () => {
+  const account = { accountID: "Account1", points: null };
+  assert.equal(adapter.parseDownloadSettings(parser(downloadSettingsHTML()), ORIGIN + adapter.PATHS.downloadSettings, account).freeHighspeed, true);
+  assert.equal(adapter.parseDownloadSettings(parser(downloadSettingsHTML({ free: false })), ORIGIN + adapter.PATHS.downloadSettings, account).freeHighspeed, false);
+  assert.equal(adapter.parseDownloadSettings(parser(downloadSettingsHTML({ currentNoticeOutsideForm: true })), ORIGIN + adapter.PATHS.downloadSettings, account).freeHighspeed, false);
+  assert.equal(adapter.parseDownloadSettings(parser(downloadSettingsHTML()), ORIGIN + adapter.PATHS.downloadSettings, { ...account, points: 499 }).freeHighspeed, false);
+  assert.throws(() => adapter.parseDownloadSettings(parser(downloadSettingsHTML({ accountID: "OtherAccount" })), ORIGIN + adapter.PATHS.downloadSettings, account), { code: "ACCOUNT_MISMATCH" });
+});
+
+test("auto-free verifies live entitlement on every call and drops to ordinary download if entitlement is lost", async () => {
+  const harness = freeDownloadHarness();
+  const fast = await harness.client.getDownload("Request1", "File1", { route: "auto-free" });
+  assert.equal(fast.route, "highspeed");assert.equal(fast.transport, "vip");assert.equal(fast.costPoints, 0);assert.equal(fast.canFallback, true);assert.equal(fast.entitlement, "current-account-free-highspeed");assert.equal(fast.timeoutMs, 180000);assert.equal(fast.retryable, true);
+  assert.deepEqual(harness.tokens()[0], { type: "assistFile", id: "File1", channel: "highspeed", highspeed: "1", fallback: "0", file_server: "0", remove_sensitive: "1", _csrf: "fixture-download-token" });
+  harness.state.free = false;
+  const normal = await harness.client.getDownload("Request1", "File1", { route: "auto-free" });
+  assert.equal(normal.route, "normal");assert.equal(normal.transport, "normal");assert.equal(normal.serverID, "3");assert.equal(normal.canFallback, false);assert.equal(harness.tokens()[1].channel, "normal");
+  assert.equal(harness.calls.filter(call => new URL(call.url).pathname === adapter.PATHS.downloadSettings).length, 2);
+  assert.ok(harness.calls.every(call => call.method !== "POST" || new URL(call.url).pathname === "/file/request-download-token"));
+});
+
+test("unverified or unavailable high-speed rights use a free ordinary token without purchasing or changing settings", async () => {
+  for (const options of [{ free: false }, { settingsFailure: "network" }, { settingsFailure: "structure" }, { pageOptions: { highspeedAvailable: false } }]) {
+    const harness = freeDownloadHarness(options), descriptor = await harness.client.getDownload("Request1", "File1", { route: "auto-free" });
+    assert.equal(descriptor.route, "normal");assert.equal(harness.tokens().length, 1);assert.equal(harness.tokens()[0].highspeed, "0");assert.equal(harness.tokens()[0].fallback, "0");
+  }
+});
+
+test("account mismatch or login expiry during entitlement verification never requests a token", async () => {
+  for (const [options, code] of [[{ settingsAccount: "OtherAccount" }, "ACCOUNT_MISMATCH"], [{ settingsFailure: "login" }, "LOGIN_REQUIRED"]]) {
+    const harness = freeDownloadHarness(options);await assert.rejects(harness.client.getDownload("Request1", "File1", { route: "auto-free" }), { code });assert.equal(harness.tokens().length, 0);
+  }
+});
+
+test("free VIP fallback explicitly requests the CDN route and returns a bounded redirect policy", async () => {
+  const harness = freeDownloadHarness(), result = await harness.client.getDownload("Request1", "File1", { route: "auto-free", fallback: true });
+  assert.equal(harness.tokens()[0].fallback, "1");assert.equal(result.route, "highspeed");assert.equal(result.transport, "cdn");assert.equal(result.canFallback, false);assert.equal(new URL(result.url).pathname, "/file/download");assert.deepEqual(result.allowedOrigins, [ORIGIN]);assert.equal(result.allowedRedirectDomain, "ablesci.com");
+  for (const tokenData of [{ transport: "vip" }, { host: "https://evil.example/file/download" }, { host: "/my/point-donate" }]) {
+    const invalid = freeDownloadHarness({ tokenData });await assert.rejects(invalid.client.getDownload("Request1", "File1", { route: "auto-free", fallback: true }));
+  }
+});
+
+test("ordinary retries select observed alternate servers and reject exhausted routes before requesting another token", async () => {
+  const harness = freeDownloadHarness();
+  for (const [normalServerIndex, serverID] of [[0, "3"], [1, "2"], [2, "4"]]) {
+    const result = await harness.client.getDownload("Request1", "File1", { route: "normal", normalServerIndex });
+    assert.equal(result.route, "normal");assert.equal(result.serverID, serverID);assert.equal(result.normalServerIndex, normalServerIndex);assert.equal(result.normalServerCount, 3);assert.equal(result.allowedRedirectDomain, undefined);
+  }
+  await assert.rejects(harness.client.getDownload("Request1", "File1", { route: "normal", normalServerIndex: 3 }), { code: "DOWNLOAD_NOT_AVAILABLE" });
+  assert.equal(harness.tokens().length, 3);assert.equal(harness.calls.some(call => new URL(call.url).pathname === adapter.PATHS.downloadSettings), false);
+});
+
+test("cancellation during the entitlement read prevents both high-speed and ordinary token requests", async () => {
+  let cancelled = false;const harness = freeDownloadHarness({ onSettings() { cancelled = true; } });
+  await assert.rejects(harness.client.getDownload("Request1", "File1", { route: "auto-free", isCancelled: () => cancelled }), { name: "AbortError" });assert.equal(harness.tokens().length, 0);
+});
+
+test("download route validation is local and larger files receive a capped timeout budget", async () => {
+  const harness = freeDownloadHarness({ pageOptions: { expectedSize: 100 * 1024 * 1024 } });
+  for (const options of [{ route: "paid" }, { route: "normal", fallback: true }, { normalServerIndex: -1 }, { normalServerIndex: 0.5 }, { isCancelled: true }]) await assert.rejects(harness.client.getDownload("Request1", "File1", options), { code: "INVALID_DOWNLOAD_OPTIONS" });
+  assert.equal(harness.calls.length, 0);const result = await harness.client.getDownload("Request1", "File1");assert.equal(result.timeoutMs, 600000);assert.equal(result.route, "normal");
+});
+
+test("high-speed tokens with an unexpected node, route or explicit extra cost are rejected", async () => {
+  for (const tokenData of [{ host: "https://filehub999vip.ablesci.com/download" }, { host: "https://filehub11vip.ablesci.com:8443/download" }, { channel: "normal", transport: "normal" }, { charged_points: 2 }]) {
+    const harness = freeDownloadHarness({ tokenData });await assert.rejects(harness.client.getDownload("Request1", "File1", { route: "auto-free" }));
+  }
 });

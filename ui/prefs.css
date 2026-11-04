@@ -35,6 +35,7 @@
 #fta-preferences .fta-count{font-size:.78em;font-weight:400;padding:0 5px;min-width:18px;text-align:center;border-radius:3px;background:light-dark(#edf0f4,#3c4859);color:light-dark(#6a788d,#c1cfe3)}
 #fta-preferences .fta-list{display:flex;flex-direction:column;gap:0}
 #fta-preferences .fta-task-filters{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 10px}
+#fta-preferences .fta-history-note{margin:0 0 12px}
 #fta-preferences .fta-task-filters button{font-size:.92em}
 #fta-preferences .fta-task-filters button[aria-pressed=true]{background:light-dark(#e1eef2,#304d5b);border-color:light-dark(#5b91a1,#83b4c6);color:light-dark(#15526a,#c5e8f5)}
 #fta-preferences .fta-bulk-actions{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center}
@@ -50,6 +51,10 @@
 #fta-preferences .fta-row-note{font-size:.92em;margin-top:6px;color:light-dark(#765e38,#dfc89f);white-space:pre-wrap;overflow-wrap:anywhere}
 #fta-preferences .fta-row-actions{display:flex;flex-wrap:wrap;gap:7px;margin-top:8px}
 #fta-preferences .fta-row-actions button{font-size:.9em;min-height:26px;padding:3px 9px}
+#fta-preferences .fta-binding-panel{margin-top:10px;padding:12px;border:1px solid light-dark(#d7e1e8,#526577);border-radius:5px;background:light-dark(#f5f8fa,#2b3744)}
+#fta-preferences .fta-binding-panel label{display:block;font-size:.92em;margin-bottom:7px}
+#fta-preferences .fta-binding-panel .fta-actions{margin-bottom:0}
+#fta-preferences .fta-binding-panel select{margin-bottom:6px}
 #fta-preferences .fta-empty{padding:10px 0 14px;color:light-dark(#7e8999,#a5b6ce);font-size:.92em}
 #fta-preferences .fta-existing{margin-top:10px;font-size:.92em}
 #fta-preferences .fta-existing summary{cursor:pointer;color:light-dark(#3c6b8f,#a0c5e2)}
@@ -60,6 +65,10 @@
 #fta-preferences .fta-inline-field input{flex:1}
 #fta-preferences .fta-inline-field button{flex:none}
 #fta-preferences .fta-message-summary{font-size:.92em;color:light-dark(#6c7a8e,#b8c6da);white-space:pre-wrap;overflow-wrap:anywhere;margin-top:5px}
+#fta-preferences .fta-message-tools{display:flex;flex-wrap:wrap;justify-content:flex-end;align-items:center;gap:6px 10px;margin-inline-start:auto;min-width:0;text-align:right}
+#fta-preferences .fta-message-tools button{flex:none}
+#fta-preferences #fta-pref-messages-refreshed{white-space:normal}
+#fta-preferences #fta-pref-messages-state{margin-bottom:8px}
 #fta-preferences .fta-page-status{min-height:1.4em;font-size:.92em;color:light-dark(#567083,#b6cada);white-space:pre-wrap;overflow-wrap:anywhere}
 #fta-preferences [data-error=true]{color:light-dark(#a12b41,#f2a9bb)}
 @media(max-width:650px){#fta-preferences .fta-fields{grid-template-columns:1fr;gap:10px}#fta-preferences .fta-intro{align-items:flex-start}#fta-preferences .fta-version{display:none}#fta-preferences .fta-section-heading{flex-wrap:wrap}#fta-preferences .fta-row-main{flex-wrap:wrap}#fta-preferences .fta-row-title{flex-basis:calc(100% - 110px)}}

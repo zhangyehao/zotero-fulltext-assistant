@@ -20,7 +20,7 @@
     if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) throw new Error("出版社窗口仅支持普通 HTTP(S) 网页地址。");
     return url.href;
   }
-  function create({ Zotero, Services, rootURI }) {
+  function create({ Zotero, Services, rootURI, publisherSession }) {
     if (!Zotero || !Services || !rootURI) throw new Error("出版社窗口缺少 Zotero 运行环境。");
     const windows = new Set();
     let destroyed = false;
@@ -32,7 +32,7 @@
           if (entry.win.closed) { windows.delete(entry); continue; }
           if ((taskId && entry.taskId === taskId) || (!taskId && entry.url === checked)) { entry.win.focus(); return entry.win; }
         }
-        const args = { url: checked, taskId, app }; args.wrappedJSObject = args;
+        const args = { url: checked, taskId, app, publisherSession }; args.wrappedJSObject = args;
         const win = Zotero.getMainWindow().openDialog(WINDOW_URL, "", "chrome,centerscreen,resizable,dialog=no,width=1160,height=850", args);
         const entry = { win, url: checked, taskId }; windows.add(entry);
         onChromeDocumentEvent(win, "unload", () => windows.delete(entry), true);

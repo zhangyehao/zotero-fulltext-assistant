@@ -60,14 +60,34 @@
     for (const node of doc.querySelectorAll("script,style,template,noscript")) node.remove();
     const text = (doc.body?.textContent || "").replace(/\s+/g, " ").slice(0, 120000);
     const password = [...doc.querySelectorAll('input[type="password"]')].some(node => !node.closest('[hidden],[aria-hidden="true"]'));
-    const challenge = /verify (?:that )?you are human|checking your browser|unusual traffic|complete the captcha|验证您是真人|请输入验证码|安全验证/i.test(text);
+    const challenge = /verify (?:that )?you are human|verifying you are human|checking your browser|performing security verification|unusual traffic|complete the captcha|验证您是真人|请输入验证码|安全验证/i.test(text);
+    const cloudflare = challenge && (!!doc.querySelector('[id^="cf-chl"],#challenge-running,#challenge-stage,.cf-turnstile,iframe[src*="challenges.cloudflare.com"]') || /cloudflare|ray id/i.test(text));
     const loginGate = /(?:sign|log)\s*in to (?:access|download|view)|access through your institution|institutional login|登录后(?:下载|查看)|请先登录/i.test(text);
-    return { candidates: candidates.slice(0, MAX_CANDIDATES), needsLogin: password || challenge || loginGate, mismatch: false };
+    return { candidates: candidates.slice(0, MAX_CANDIDATES), needsLogin: password || challenge || loginGate,
+      challenge: challenge ? (cloudflare ? "cloudflare" : "verification") : null, mismatch: false };
   }
 
-  function create({ Zotero, Services, IOUtils, PathUtils, parseHTML, HiddenBrowser: BrowserClass }) {
+  function create({ Zotero, Services, IOUtils, PathUtils, parseHTML, HiddenBrowser: BrowserClass, publisherSession }) {
     if (!Zotero || !Services || !IOUtils || !PathUtils || typeof parseHTML !== "function") throw new Error("出版社获取模块缺少运行依赖。");
     const inFlight = new Map();
+    const siteQueues = new Map();
+    const accessGates = new Map();
+    const GATE_COOLDOWN = 10 * 60 * 1000;
+    function siteKey(url) {
+      try {
+        const host = new URL(url).hostname;
+        try { return Services.eTLD?.getBaseDomainFromHost(host) || host; } catch (_) { return host; }
+      } catch (_) { return ""; }
+    }
+    function gateFor(url) {
+      const key = siteKey(url), gate = accessGates.get(key);
+      if (gate && Date.now() - gate.at < GATE_COOLDOWN) return gate;
+      if (gate) accessGates.delete(key);
+      return null;
+    }
+    function rememberGate(url, kind) {
+      const key = siteKey(url); if (key) accessGates.set(key, { url, kind, at: Date.now() });
+    }
     const parse = (html, url) => {
       const parsed = parseHTML(html, url);
       const doc = parsed?.document || parsed;
@@ -109,6 +129,7 @@
       const oldID = await existingPDF(item);
       check();
       if (oldID) return { attachmentID: oldID, source: "existing", sourceURL: null };
+      if (publisherSession) await publisherSession.initialize().catch(() => {});
       const expectedDOI = doi(item.getField("DOI"));
       const articleURL = httpURL(item.getField("url"));
       const starts = [...new Set([articleURL, expectedDOI ? "https://doi.org/" + expectedDOI : null].filter(Boolean))];
@@ -116,10 +137,13 @@
       const visitedPages = new Set();
       let needsLogin = false;
       let loginURL = null;
+      let challengeKind = null;
       let lastURL = articleURL || starts[0] || null;
 
       async function request(url, referrer) {
         check();
+        const gate = gateFor(url);
+        if (gate) { const error = new Error("此站点正在等待人工验证，暂缓重复请求。"); error.name = "PublisherAccessGate"; error.gate = gate; throw error; }
         let cancel = () => {};
         let exceeded = false;
         const headers = { Accept: "application/pdf,text/html;q=0.9,application/xhtml+xml;q=0.8,*/*;q=0.5" };
@@ -139,7 +163,11 @@
         if (exceeded) throw new Error("文件超过 100 MiB 上限。");
         const bytes = asBytes(response.response);
         if (bytes.length > MAX_PDF_BYTES) throw new Error("文件超过 100 MiB 上限。");
-        return { response, bytes, url: httpURL(response.responseURL) || url, type: response.getResponseHeader?.("Content-Type") || "" };
+        const result = { response, bytes, url: httpURL(response.responseURL) || url, type: response.getResponseHeader?.("Content-Type") || "" };
+        if (response.getResponseHeader?.("cf-mitigated") === "challenge") {
+          challengeKind = "cloudflare"; needsLogin = true; loginURL ||= result.url; rememberGate(result.url, challengeKind);
+        }
+        return result;
       }
       async function importPDF(bytes, sourceURL, source) {
         check();
@@ -175,7 +203,19 @@
           throw error;
         }
       }
-      function noteGate(result, url) { if (result.needsLogin) { needsLogin = true; loginURL ||= url; } }
+      function noteGate(result, url) {
+        if (result.needsLogin) { needsLogin = true; loginURL ||= url; }
+        if (result.challenge) { challengeKind = result.challenge; rememberGate(url, result.challenge); }
+      }
+      function cachedGate(url) {
+        const gate = gateFor(url);
+        if (!gate) return false;
+        needsLogin = true; loginURL ||= gate.url; challengeKind ||= gate.kind;
+        return true;
+      }
+      function caughtGate(error) {
+        if (error.name === "PublisherAccessGate") { needsLogin = true; loginURL ||= error.gate.url; challengeKind ||= error.gate.kind; }
+      }
       async function tryCandidates(candidates, source, depth = 0) {
         for (const candidate of candidates.slice(0, MAX_CANDIDATES)) {
           check();
@@ -183,12 +223,17 @@
           // failed before rendering may be retried once with that new session.
           const attemptKey = source + ":" + candidate.url;
           if (triedDownloads.has(attemptKey) || triedDownloads.size >= 24) continue;
+          if (cachedGate(candidate.url)) continue;
           triedDownloads.add(attemptKey);
           progress("downloading", "正在检查网页提供的 PDF 下载入口…", candidate.url);
           try {
             const result = await request(candidate.url, candidate.referrer);
             lastURL = result.url;
-            if ([401,403,429].includes(result.response.status)) { needsLogin = true; loginURL ||= candidate.referrer || result.url; continue; }
+            if ([401,403,429].includes(result.response.status)) {
+              needsLogin = true; loginURL ||= candidate.referrer || result.url;
+              if (result.bytes.length <= MAX_PAGE_BYTES && /html/i.test(result.type)) noteGate(discover(parse(decode(result.bytes, result.type), result.url), result.url, expectedDOI), result.url);
+              continue;
+            }
             if (result.response.status < 200 || result.response.status >= 300) continue;
             const imported = await importPDF(result.bytes, result.url, source);
             if (imported) return imported;
@@ -202,12 +247,13 @@
               }
             }
           }
-          catch (error) { if (["AbortError", "AttachmentImportError"].includes(error.name)) throw error; }
+          catch (error) { if (["AbortError", "AttachmentImportError"].includes(error.name)) throw error; caughtGate(error); }
         }
         return null;
       }
       async function renderedPage(url, source) {
         check();
+        if (cachedGate(url)) return null;
         progress("rendering", "正在用 Zotero 浏览器渲染网页并识别下载按钮…", url);
         const HiddenBrowser = BrowserClass || ChromeUtils.importESModule("chrome://zotero/content/HiddenBrowser.mjs").HiddenBrowser;
         const browser = new HiddenBrowser({ allowJavaScript: true });
@@ -233,6 +279,7 @@
       async function visitPage(url, source = "publisher") {
         check();
         if (visitedPages.has(url)) return null;
+        if (cachedGate(url)) return null;
         visitedPages.add(url);
         progress("discovering", "正在读取论文网页中的 PDF 元数据和下载链接…", url);
         let renderURL = url;
@@ -241,7 +288,10 @@
           renderURL = result.url;
           visitedPages.add(renderURL);
           lastURL = renderURL;
-          if ([401,403,429].includes(result.response.status)) { needsLogin = true; loginURL ||= renderURL; }
+          if ([401,403,429].includes(result.response.status)) {
+            needsLogin = true; loginURL ||= renderURL;
+            if (result.bytes.length <= MAX_PAGE_BYTES && /html/i.test(result.type)) noteGate(discover(parse(decode(result.bytes, result.type), result.url), result.url, expectedDOI), result.url);
+          }
           if (result.response.status >= 200 && result.response.status < 300) {
             const direct = await importPDF(result.bytes, result.url, source);
             if (direct) return direct;
@@ -254,11 +304,12 @@
             }
           }
         }
-        catch (error) { if (["AbortError", "AttachmentImportError"].includes(error.name)) throw error; }
+        catch (error) { if (["AbortError", "AttachmentImportError"].includes(error.name)) throw error; caughtGate(error); }
         return renderedPage(renderURL, source === "open_access" ? source : "rendered_publisher");
       }
 
       for (const url of starts) {
+        if (challengeKind && new URL(url).hostname === "doi.org") continue;
         const found = await visitPage(url);
         if (found) return found;
       }
@@ -288,14 +339,32 @@
       }
       check();
       return needsLogin
-        ? { state: "needs_login", message: "网页提示登录、访问验证或请求限制。请在 Zotero 网页窗口完成后重试；仍不可得的条目可进入科研通兜底。", url: loginURL || lastURL }
+        ? { state: "needs_login", challenge: challengeKind, message: challengeKind === "cloudflare"
+          ? "该网站返回 Cloudflare 真人验证。Zotero 内嵌浏览器可能不被支持；若手动验证仍循环，请使用系统浏览器下载 PDF 后选择“导入本地 PDF”。同一站点已暂缓重复请求，也可继续科研通兜底。"
+          : challengeKind ? "该网站要求人工验证，同一站点已暂缓重复请求。请在网页窗口完成后手动重试；无法完成时可用系统浏览器下载后导入 PDF。"
+          : "网页提示登录、访问验证或请求限制。请在 Zotero 网页窗口完成后重试；仍不可得的条目可进入科研通兜底。", url: loginURL || lastURL }
         : { state: "not_found", message: "网页、渲染后的下载入口和开放获取来源均未取得有效 PDF，可进入科研通兜底。", url: lastURL };
     }
     return {
+      clearAccessGate(url) { accessGates.delete(siteKey(url)); },
       acquire(item, options) {
         const key = item?.libraryID + ":" + item?.id;
         if (inFlight.has(key)) return inFlight.get(key);
-        const promise = run(item, options).finally(() => inFlight.delete(key));
+        const site = siteKey(httpURL(item?.getField?.("url")) || "https://doi.org/");
+        const previous = siteQueues.get(site) || Promise.resolve();
+        let started = false, finished = false;
+        const operation = previous.catch(() => {}).then(() => { started = true; return run(item, options); }).finally(() => {
+          if (siteQueues.get(site) === operation) siteQueues.delete(site);
+        });
+        const waitingCancellation = (async () => {
+          while (!started && !finished) {
+            if (options?.isCancelled?.()) throw abort();
+            await Zotero.Promise.delay(150);
+          }
+          return new Promise(() => {});
+        })();
+        const promise = Promise.race([operation, waitingCancellation]).finally(() => { finished = true; if (inFlight.get(key) === promise) inFlight.delete(key); });
+        siteQueues.set(site, operation);
         inFlight.set(key, promise);
         return promise;
       },

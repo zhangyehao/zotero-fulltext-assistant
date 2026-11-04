@@ -1,16 +1,33 @@
 "use strict";
 FulltextPublisherWindow.onChromeDocumentEvent(window, "load", async () => {
-  const {url, taskId, app} = window.arguments[0].wrappedJSObject;
+  const {url, taskId, app, publisherSession} = window.arguments[0].wrappedJSObject;
   const status = document.getElementById("publisher-status");
   const address = document.getElementById("publisher-address");
   const pages = document.getElementById("publisher-pages");
   const tabBar = document.getElementById("publisher-tabs");
   const retry = document.getElementById("publisher-retry");
+  const remember = document.getElementById("publisher-remember");
+  const rememberedHosts = document.getElementById("publisher-remembered-hosts");
+  const visitedHosts = new Set();
   const entries = [];
   let selected, closing = false;
   window.FulltextPublisherOriginalURL = url;
   window.FulltextPublisherTaskID = taskId;
   function errorText(error) { return String(error?.message || error).replace(/https?:\/\/\S+/g, "[网页地址]").slice(0, 350); }
+  function observeLocation(browser) {
+    try {
+      const location = new URL(browser.currentURI?.spec);
+      if (["https:", "http:"].includes(location.protocol)) visitedHosts.add(location.hostname);
+      rememberedHosts.textContent = [...visitedHosts].join("、");
+    } catch (_) {}
+  }
+  function showCompatibility(browser) {
+    let text = browser.contentTitle || "";
+    try { text += " " + (browser.contentDocument?.body?.innerText || "").slice(0, 4000); } catch (_) {}
+    if (/just a moment|verify (?:that )?you are human|verifying you are human|performing security verification|checking your browser|验证您是真人/i.test(text)) {
+      status.textContent = "网站正在进行真人验证。Cloudflare 等验证可能不支持 Zotero 内嵌浏览器；若手动点击后仍循环，请点“系统浏览器打开”，下载后用“导入本地 PDF”。插件不会自动操作验证码。";
+    }
+  }
   function updateAddress() {
     if (!selected || closing) return;
     const browser = selected.browser;
@@ -20,6 +37,7 @@ FulltextPublisherWindow.onChromeDocumentEvent(window, "load", async () => {
     const title = browser.contentTitle || (() => {try {return new URL(address.value).hostname;} catch (_) {return "机构登录";}})();
     selected.title.textContent = title || "机构登录";
     window.document.title = (title || "出版社与机构登录") + " · 全文助手";
+    showCompatibility(browser);
   }
   function select(entry) {
     selected = entry;
@@ -45,10 +63,10 @@ FulltextPublisherWindow.onChromeDocumentEvent(window, "load", async () => {
     browser.addEventListener("DOMWindowClose", event => {event.preventDefault();close(entry);});
     entry.listener = {
       QueryInterface: ChromeUtils.generateQI(["nsIWebProgressListener", "nsISupportsWeakReference"]),
-      onLocationChange(progress) {if (progress.isTopLevel && selected === entry) updateAddress();},
-      onStateChange() {}, onProgressChange() {}, onStatusChange() {}, onSecurityChange() {},
+      onLocationChange(progress) {if (progress.isTopLevel) {observeLocation(browser);if (selected === entry) updateAddress();}},
+      onStateChange(progress, request, flags) {if (progress.isTopLevel && flags & Components.interfaces.nsIWebProgressListener.STATE_STOP) {observeLocation(browser);if (selected === entry) showCompatibility(browser);}}, onProgressChange() {}, onStatusChange() {}, onSecurityChange() {},
     };
-    browser.addProgressListener(entry.listener, Components.interfaces.nsIWebProgress.NOTIFY_LOCATION);
+    browser.addProgressListener(entry.listener, Components.interfaces.nsIWebProgress.NOTIFY_LOCATION | Components.interfaces.nsIWebProgress.NOTIFY_STATE_WINDOW);
     select(entry);return browser;
   }
   function createBrowser({openWindowInfo, remoteType} = {}) {
@@ -86,10 +104,33 @@ FulltextPublisherWindow.onChromeDocumentEvent(window, "load", async () => {
   document.getElementById("publisher-forward").addEventListener("click", () => {if (selected.browser.canGoForward) selected.browser.goForward();});
   document.getElementById("publisher-reload").addEventListener("click", () => selected.browser.reload());
   document.getElementById("publisher-home").addEventListener("click", () => navigate(selected.browser, url));
+  remember.disabled = !publisherSession;
+  document.getElementById("publisher-external").addEventListener("click", async () => {
+    try {
+      if (taskId && app?.openExternalTask) await app.openExternalTask(taskId);
+      else Zotero.launchURL(FulltextPublisherWindow.httpURL(url));
+      status.textContent = "已在系统浏览器打开论文。两个浏览器的登录状态相互独立；下载 PDF 后可直接导入此文献。";
+    } catch (error) {status.textContent = errorText(error);}
+  });
+  const importButton = document.getElementById("publisher-import");
+  importButton.disabled = !taskId || !app?.importLocalPDF;
+  importButton.addEventListener("click", async () => {
+    importButton.disabled = true;
+    try {const result = await app.importLocalPDF(taskId);if (result && !result.cancelled) status.textContent = "PDF 已导入原文献，请在全文助手任务列表查看结果。";}
+    catch (error) {status.textContent = errorText(error);}
+    finally {if (!closing) importButton.disabled = false;}
+  });
   retry.disabled = !taskId || !app?.retryTask;
   retry.addEventListener("click", async () => {
     retry.disabled = true;
-    try {await app.retryTask(taskId);status.textContent = "已重新开始获取此文献，请在全文助手任务列表查看结果。";}
+    try {
+      let storageWarning = "";
+      if (remember.checked && publisherSession) {
+        try {await publisherSession.grantHosts([...visitedHosts]);}
+        catch (error) {storageWarning = " " + errorText(error);}
+      }
+      await app.retryTask(taskId);status.textContent = "已重新开始获取此文献，请在全文助手任务列表查看结果。" + storageWarning;
+    }
     catch (error) {status.textContent = errorText(error);}
     finally {if (!closing) retry.disabled = false;}
   });

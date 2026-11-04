@@ -26,30 +26,34 @@
       </html:div>
       <html:label class="fta-check" for="fta-pref-auto-download"><html:input id="fta-pref-auto-download" type="checkbox" checked="checked"/><html:span>收到应助文件后，自动下载并添加到原文献</html:span></html:label>
       <html:p class="fta-note">默认悬赏 10 积分。网站最低要求超过设置值时暂停，不自动加价；修改设置不会改变已发布的求助。</html:p>
+      <html:p class="fta-note">科研通下载优先使用账号当前的免积分高速权益，否则使用普通免费线路；不自动购买高速下载。</html:p>
       <html:div class="fta-actions"><html:button id="fta-pref-save-settings" type="submit">保存设置</html:button><html:span id="fta-pref-save-state" class="fta-secondary" role="status" aria-live="polite"></html:span></html:div>
     </html:form>
+    <html:p id="fta-pref-publisher-session" class="fta-note" hidden="hidden"></html:p>
   </html:section>
   <html:section class="fta-section" aria-labelledby="fta-tasks-heading">
     <html:div class="fta-section-heading"><html:h2 id="fta-tasks-heading">任务<html:span id="fta-pref-task-count" class="fta-count">0</html:span></html:h2><html:span id="fta-pref-task-summary" class="fta-secondary"></html:span></html:div>
+    <html:p class="fta-note fta-history-note">任务和已获取记录保存在本机，重启后仍可查看。列表随任务进度自动更新；Zotero 运行时按设置间隔检查等待应助的任务，关闭 Zotero 后停止检查。</html:p>
     <html:div id="fta-pref-task-filters" class="fta-task-filters" role="group" aria-label="任务结果筛选">
-      <html:button type="button" data-filter="all" aria-pressed="true">全部</html:button>
+      <html:button type="button" data-filter="unfinished" aria-pressed="true">未完成</html:button>
       <html:button type="button" data-filter="success" aria-pressed="false">已获取</html:button>
       <html:button type="button" data-filter="login" aria-pressed="false">需网页登录</html:button>
       <html:button type="button" data-filter="fallback" aria-pressed="false">待兜底</html:button>
       <html:button type="button" data-filter="active" aria-pressed="false">进行中</html:button>
+      <html:button type="button" data-filter="all" aria-pressed="false">全部历史</html:button>
     </html:div>
-    <html:div class="fta-bulk-actions">
+    <html:div id="fta-pref-bulk-actions" class="fta-bulk-actions">
       <html:label class="fta-check" for="fta-pref-select-tasks"><html:input id="fta-pref-select-tasks" type="checkbox"/><html:span>选择当前列表可求助项</html:span></html:label>
       <html:button id="fta-pref-bulk-assist" type="button">为所选文献发起科研通求助</html:button>
       <html:span id="fta-pref-selection-summary" class="fta-secondary" role="status" aria-live="polite">未选择文献</html:span>
     </html:div>
-    <html:p class="fta-note">仅选择有 DOI、尚未获取全文且没有关联求助的任务。切换筛选会清除选择；本次求助和未发布任务的重试按按钮所示的当前默认积分，已有求助保持发布时积分。</html:p>
+    <html:p id="fta-pref-bulk-note" class="fta-note">仅选择有 DOI、尚未获取全文且没有关联求助的任务。切换筛选会清除选择；本次求助和未发布任务的重试按按钮所示的当前默认积分，已有求助保持发布时积分。</html:p>
     <html:div id="fta-pref-task-list" class="fta-list" aria-live="polite"></html:div>
     <html:p id="fta-pref-task-empty" class="fta-empty">还没有任务。在文库多选文献，右击“全文助手：批量获取全文”开始批量获取。</html:p>
     <html:details class="fta-existing"><html:summary>关联已有求助</html:summary><html:form id="fta-pref-add-form"><html:label for="fta-pref-request-url">自己的科研通求助详情页链接</html:label><html:input id="fta-pref-request-url" type="url" placeholder="https://www.ablesci.com/assist/detail?id=…" required="required"/><html:label for="fta-pref-request-target" class="fta-target-label">关联文献</html:label><html:select id="fta-pref-request-target"><html:option value="">只跟踪，不关联文献</html:option></html:select><html:p class="fta-note">只跟踪不会保存附件到文库；需要入库时，请明确选择对应文献。可选文献来自上方尚未关联求助的任务。</html:p><html:div class="fta-actions"><html:button id="fta-pref-add-request" type="submit">添加</html:button></html:div></html:form></html:details>
   </html:section>
   <html:section class="fta-section" aria-labelledby="fta-messages-heading">
-    <html:div class="fta-section-heading"><html:h2 id="fta-messages-heading">消息<html:span id="fta-pref-message-count" class="fta-count">0</html:span></html:h2><html:button id="fta-pref-refresh-messages" type="button">刷新消息</html:button></html:div>
+    <html:div class="fta-section-heading fta-message-heading"><html:h2 id="fta-messages-heading">消息</html:h2><html:div class="fta-message-tools"><html:span id="fta-pref-messages-refreshed" class="fta-secondary">尚未刷新</html:span><html:button id="fta-pref-refresh-messages" type="button">刷新消息</html:button></html:div></html:div>
     <html:p id="fta-pref-messages-state" class="fta-secondary">登录后可查看科研通应助提醒。</html:p>
     <html:div id="fta-pref-message-list" class="fta-list" aria-live="polite"></html:div>
     <html:p id="fta-pref-message-empty" class="fta-empty">暂无消息。</html:p>

@@ -20,7 +20,7 @@ function setup({url='https://publisher.test/article/one',doi='',pages={},rendere
       let value=pages[address];if(typeof value==='function')value=await value({renderedOnce,options});
       if(typeof value==='string')value={body:value};
       const bytes=value.bytes||new TextEncoder().encode(value.body||'');
-      return {status:value.status??200,response:bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength),responseURL:value.url||address,getResponseHeader(){return value.type||'text/html; charset=utf-8';}};
+      return {status:value.status??200,response:bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength),responseURL:value.url||address,getResponseHeader(name){return name==='Content-Type'?(value.type||'text/html; charset=utf-8'):(value.headers?.[name]||null);}};
     } finally {active--;}
   }},Attachments:{async createTemporaryStorageDirectory(){return {path:'/tmp/publisher-'+(++tempID)};},async importFromFile(options){imports.push(options);assert.equal(options.parentItemID,1);assert.equal(options.libraryID,1);assert.equal(options.contentType,'application/pdf');assert(files.has(options.file));const attachment={id:++nextID,attachmentContentType:'application/pdf',async getFilePathAsync(){return '/storage/'+this.id+'.pdf';},setField(){},async saveTx(){}};files.set('/storage/'+attachment.id+'.pdf',files.get(options.file));attachments.push(attachment);return attachment;},getFileResolvers(_item,methods){assert.deepEqual(Array.from(methods),['oa']);return [async()=>oa];}}};
   class HiddenBrowser {
@@ -111,4 +111,41 @@ test('PDF validation rejects tiny, truncated and HTML payloads',()=>{
   assert.equal(env.api.validPDF(new TextEncoder().encode('%PDF-1.7\n%%EOF')),false);
   assert.equal(env.api.validPDF(new TextEncoder().encode('%PDF-1.7\n'+'0'.repeat(1400))),false);
   assert.equal(env.api.validPDF(new TextEncoder().encode(html('0'.repeat(1500)+'%PDF-1.7 %%EOF'))),false);
+});
+
+test('Cloudflare response header stops repeated rendering and same-domain attempts until manual retry',async()=>{
+  const address='https://publisher.test/article/one';
+  const env=setup({pages:{[address]:{status:403,headers:{'cf-mitigated':'challenge'},body:html('Just a moment')}}});
+  const result=await env.publisher.acquire(env.item);assert.equal(result.state,'needs_login');assert.equal(result.challenge,'cloudflare');assert.match(result.message,/系统浏览器/);assert.equal(env.hidden.length,0);
+  await env.publisher.acquire({...env.item,id:2});assert.equal(env.requests.length,1);
+  env.publisher.clearAccessGate(address);await env.publisher.acquire({...env.item,id:3});assert.equal(env.requests.length,2);
+});
+
+test('visible challenge detection ignores script-only CAPTCHA strings and gives a manual fallback',async()=>{
+  const env=setup({doi:'10.1234/one',pages:{'https://publisher.test/article/one':{status:403,body:html('<div id="challenge-stage">Verify you are human. Cloudflare Ray ID</div>')}}});
+  const result=await env.publisher.acquire(env.item);assert.equal(result.challenge,'cloudflare');assert.equal(env.requests.length,1);assert.equal(env.hidden.length,0);
+  const ordinary=parseHTML(html('<script>const label="Verify you are human Cloudflare";</script><p>Article</p>')).document;
+  assert.equal(env.api.discover(ordinary,'https://publisher.test/article/one','').challenge,null);
+});
+
+test('a challenge pauses its publisher but still allows an independent open-access PDF',async()=>{
+  const env=setup({doi:'10.1234/one',pages:{'https://publisher.test/article/one':{status:403,headers:{'cf-mitigated':'challenge'}},'https://repository.test/one.pdf':{bytes:pdf(),type:'application/pdf'}},oa:[{url:'https://repository.test/one.pdf'}]});
+  const result=await env.publisher.acquire(env.item);assert.equal(result.source,'open_access');assert.equal(env.imports.length,1);assert.equal(env.hidden.length,0);
+});
+
+test('different items on the same site do not run publisher requests concurrently',async()=>{
+  const address='https://publisher.test/article/one';let release;
+  const env=setup({pages:{[address]:()=>new Promise(resolve=>{release=()=>resolve({status:403,headers:{'cf-mitigated':'challenge'}});})}});
+  const one=env.publisher.acquire(env.item);const two=env.publisher.acquire({...env.item,id:2});
+  await new Promise(resolve=>setTimeout(resolve,10));assert.equal(env.requests.length,1);release();
+  const results=await Promise.all([one,two]);assert(results.every(value=>value.state==='needs_login'));assert.equal(env.maxActive(),1);assert.equal(env.requests.length,1);
+});
+
+test('cancelling a queued same-site item returns promptly and never sends its later request',async()=>{
+  const address='https://publisher.test/article/one';let release,cancelled=false;
+  const env=setup({pages:{[address]:()=>new Promise(resolve=>{release=()=>resolve({status:403,headers:{'cf-mitigated':'challenge'}});})}});
+  const one=env.publisher.acquire(env.item);const two=env.publisher.acquire({...env.item,id:2},{isCancelled:()=>cancelled});
+  await new Promise(resolve=>setTimeout(resolve,10));cancelled=true;
+  await assert.rejects(two,error=>error.name==='AbortError');assert.equal(env.requests.length,1);release();await one;
+  await new Promise(resolve=>setTimeout(resolve,10));assert.equal(env.requests.length,1);
 });

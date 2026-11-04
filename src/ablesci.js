@@ -1,7 +1,8 @@
 /*
  * AbleSci adapter. Default DOM/API contracts were verified from public pages and
  * authenticated, locally redacted captures on 2026-11-04. Page scripts are parsed,
- * never executed; publication is journaled and download always selects normal.
+ * never executed; publication is journaled and high-speed download requires a
+ * freshly verified current-account entitlement. Ordinary download stays free.
  *
  * Evidence read 2026-11-04:
  * https://www.ablesci.com/assist/detail (public request detail contract)
@@ -20,6 +21,7 @@
   const REMOTE_STATES = ["waiting", "uploaded", "finished", "closed"];
   const FILE_STATES = ["waiting", "accept", "reject", "withdraw"];
   const NORMAL_DOWNLOAD_ORIGINS = Object.freeze(["https://filehub2.ablesci.com", "https://filehub3.ablesci.com", "https://filehub4.ablesci.com"]);
+  const HIGHSPEED_DOWNLOAD_ORIGINS = Object.freeze(["https://filehub11vip.ablesci.com", "https://filehub12vip.ablesci.com", "https://filehub13vip.ablesci.com", "https://filehub16vip.ablesci.com"]);
 
   class AbleSciError extends Error {
     constructor(code, message, options = {}) {
@@ -246,7 +248,32 @@
     if (!server) fail("DOWNLOAD_NOT_AVAILABLE", "页面没有提供可核实的普通下载线路。");
     const allowedOrigins = NORMAL_DOWNLOAD_ORIGINS.filter(origin => config.allowedNodeHosts.includes(new URL(origin).hostname));
     if (!allowedOrigins.length) fail("STRUCTURE_CHANGED", "页面没有列出已核实的普通下载服务器。");
-    return { tokenURL: siteURL(config.tokenUrl), fileID: file.fileID, serverID: String(server.id), expectedSize: integer(config.expectedSize, "文件字节数"), allowedOrigins };
+    const highspeedOrigins = HIGHSPEED_DOWNLOAD_ORIGINS.filter(origin => config.allowedNodeHosts.includes(new URL(origin).hostname));
+    const highspeedAvailable = !!page.querySelector("#download-highspeed-direct") && highspeedOrigins.length > 0;
+    const orderedServers = [server, ...normalServers.filter(value => String(value.id) !== String(server.id))].map(value => ({ id: String(value.id), name: shortText(value.name, 80) }));
+    return { tokenURL: siteURL(config.tokenUrl), fileID: file.fileID, serverID: String(server.id), normalServers: orderedServers, expectedSize: integer(config.expectedSize, "文件字节数"), allowedOrigins, highspeedOrigins, highspeedAvailable };
+  }
+
+  function parseDownloadSettings(doc, pageURL, account) {
+    const url = new URL(siteURL(pageURL));
+    if (url.pathname === PATHS.login) fail("LOGIN_REQUIRED", "核对免费高速权益时登录已失效。");
+    if (url.pathname !== PATHS.downloadSettings || accountScope(doc) !== account.accountID) fail("ACCOUNT_MISMATCH", "高速下载设置与当前登录账号不一致。");
+    const forms = doc.querySelectorAll("#post-form");
+    const form = forms.length === 1 ? forms[0] : null;
+    const choices = form ? Array.from(form.querySelectorAll('input[name="file_highspeed"][type="radio"]')) : [];
+    if (!form || choices.length !== 2 || !["0", "1"].every(value => choices.some(input => input.getAttribute("value") === value))) fail("STRUCTURE_CHANGED", "高速权益设置结构尚未核实，将保留普通免费线路。");
+    // The generic policy text and VIP icon do not prove this account is entitled.
+    // Only the server-rendered, account-specific notice directly inside the form
+    // confirms the current >=500-point benefit. No setting is changed here.
+    const notices = Array.from(form.children).filter(element => element.localName === "div" && /本设置将对您不起作用/.test(element.textContent));
+    if (notices.length > 1) fail("STRUCTURE_CHANGED", "页面包含不一致的高速权益提示。");
+    const freeHighspeed = notices.length === 1 && /您当前的积分\s*≥\s*500[\s\S]*享有免积分高速下载权益/.test(notices[0].textContent)
+      && !(Number.isFinite(account.points) && account.points < 500);
+    return { freeHighspeed, reason: freeHighspeed ? "current-account-free-highspeed" : "no-current-free-highspeed" };
+  }
+
+  function downloadTimeout(expectedSize) {
+    return Math.min(600000, Math.max(180000, Math.ceil((Number(expectedSize) || 0) / (32 * 1024)) * 1000 + 60000));
   }
 
   function defaultContracts(model) {
@@ -260,23 +287,43 @@
           return { messages: parseMessages(parseHTML(response.text), account) };
         },
       },
-      downloadOrigins: NORMAL_DOWNLOAD_ORIGINS,
-      async download({ file, account, page, query }) {
+      downloadOrigins: [...NORMAL_DOWNLOAD_ORIGINS, ...HIGHSPEED_DOWNLOAD_ORIGINS],
+      async download({ file, account, page, query, options }) {
         const target = new URL(siteURL(file.downloadURL));
         if (target.pathname !== "/assist/download" || target.search !== "?id=" + file.fileID || target.hash) fail("DOWNLOAD_MISMATCH", "应助文件入口不是已核实的下载页面。");
         // This GET renders configuration only. No page scripts run here, so smart
         // high-speed preferences cannot silently choose a paid token request.
         const document = await page(target.href);
         const config = parseDownloadPage(document.doc, document.response.url, file, account);
-        const result = await query(document.doc, config.tokenURL, { type: "assistFile", id: file.fileID, channel: "normal", highspeed: "0", fallback: "0", file_server: config.serverID, remove_sensitive: "1" });
+        let entitlement = { freeHighspeed: false, reason: "normal-requested" };
+        if (options.route === "auto-free" && config.highspeedAvailable) {
+          try {
+            const settings = await page(PATHS.downloadSettings);
+            entitlement = parseDownloadSettings(settings.doc, settings.response.url, account);
+          } catch (error) {
+            if (["LOGIN_REQUIRED", "ACCOUNT_MISMATCH", "ACCOUNT_UNVERIFIED"].includes(error.code) || error.name === "AbortError") throw error;
+            entitlement = { freeHighspeed: false, reason: "free-highspeed-unverified" };
+          }
+        } else if (options.route === "auto-free") entitlement.reason = "highspeed-unavailable";
+        const route = entitlement.freeHighspeed ? "highspeed" : "normal";
+        const normalServer = config.normalServers[options.normalServerIndex];
+        if (!normalServer) fail("DOWNLOAD_NOT_AVAILABLE", "没有更多已核实的普通免费线路。");
+        const serverID = route === "normal" ? normalServer.id : "0";
+        const fallback = route === "highspeed" && options.fallback;
+        options.checkCancelled();
+        const result = await query(document.doc, config.tokenURL, { type: "assistFile", id: file.fileID, channel: route, highspeed: route === "highspeed" ? "1" : "0", fallback: fallback ? "1" : "0", file_server: serverID, remove_sensitive: "1" });
         const data = result.data;
-        if (Number(result.code) !== 0 || !data) fail("DOWNLOAD_NOT_AVAILABLE", "普通下载令牌获取失败，请稍后重试。", { retryable: true });
-        if (data.channel !== "normal" || data.transport !== "normal" || typeof data.token !== "string" || !data.token || typeof data.output_filename !== "string" || !data.output_filename) fail("INVALID_DOWNLOAD_RESPONSE", "下载令牌未确认普通免费线路或缺少文件信息。");
+        if (Number(result.code) !== 0 || !data) fail("DOWNLOAD_NOT_AVAILABLE", "下载令牌获取失败，请稍后重试或切换普通免费线路。", { retryable: true });
+        const validTransport = route === "normal" ? data.transport === "normal" : fallback ? data.transport === "cdn" : ["vip", "cdn"].includes(data.transport);
+        if (data.channel !== route || !validTransport || typeof data.token !== "string" || !data.token || typeof data.output_filename !== "string" || !data.output_filename) fail("INVALID_DOWNLOAD_RESPONSE", "下载令牌未确认所选免费线路或缺少文件信息。");
+        if ([data.cost_points, data.charged_points, data.point_cost].some(value => value !== undefined && (!Number.isFinite(Number(value)) || Number(value) !== 0))) fail("UNVERIFIED_CONTRACT", "下载响应显示额外积分费用，已停止自动下载，请在网站核对。");
         let url;
         try { url = new URL(data.host, ORIGIN); } catch (_) { fail("INVALID_DOWNLOAD_URL", "下载服务器地址无效。"); }
-        if (url.protocol !== "https:" || url.username || url.password || !config.allowedOrigins.includes(url.origin)) fail("INVALID_DOWNLOAD_URL", "下载令牌指向未核实的普通下载服务器。");
+        const allowedOrigins = data.transport === "cdn" ? [ORIGIN] : route === "highspeed" ? config.highspeedOrigins : config.allowedOrigins;
+        if (url.protocol !== "https:" || url.username || url.password || !allowedOrigins.includes(url.origin) || (data.transport === "cdn" && url.pathname !== "/file/download")) fail("INVALID_DOWNLOAD_URL", "下载令牌指向未核实的下载服务器。");
         url.searchParams.set("token", data.token);
-        return { url: url.href, costPoints: 0, expectedSize: Number(data.expected_size) > 0 ? integer(data.expected_size, "下载文件字节数") : config.expectedSize, allowedOrigins: config.allowedOrigins, filename: shortText(data.output_filename, 255) };
+        const expectedSize = Number(data.expected_size) > 0 ? integer(data.expected_size, "下载文件字节数") : config.expectedSize;
+        return { url: url.href, costPoints: 0, expectedSize, allowedOrigins, filename: shortText(data.output_filename, 255), route, transport: data.transport, serverID, normalServerIndex: options.normalServerIndex, normalServerCount: config.normalServers.length, canFallback: route === "highspeed" && data.transport === "vip", timeoutMs: downloadTimeout(expectedSize), retryable: true, entitlement: entitlement.reason, ...(data.transport === "cdn" ? { allowedRedirectDomain: "ablesci.com" } : {}) };
       },
       submission: {
         async prepare({ doc, url, doi, points, account, query, delay, checkCancelled }) {
@@ -607,29 +654,39 @@
       try { return await operation; } finally { inFlight.delete(key); }
     }
 
-    async function getDownload(requestValue, fileValue) {
+    async function getDownload(requestValue, fileValue, { route = "normal", fallback = false, normalServerIndex = 0, isCancelled = () => false } = {}) {
+      if (!["normal", "auto-free"].includes(route) || typeof fallback !== "boolean" || !Number.isInteger(normalServerIndex) || normalServerIndex < 0 || normalServerIndex > 9 || typeof isCancelled !== "function" || (route === "normal" && fallback)) fail("INVALID_DOWNLOAD_OPTIONS", "下载线路参数无效。");
+      const checkCancelled = () => { if (isCancelled()) { const error = new Error("下载已暂停。"); error.name = "AbortError"; throw error; } };
+      checkCancelled();
       const account = await requireAccount();
+      checkCancelled();
       const detail = await getRequest(typeof requestValue === "string" ? requestValue : requestValue.requestID);
+      checkCancelled();
       if (detail.ownerID !== account.accountID) fail("ACCOUNT_MISMATCH", "该求助不属于当前登录账号，未下载文件。");
       if (detail.expired) fail("DOWNLOAD_EXPIRED", "页面提示文件已过期或删除。");
       const fileID = typeof fileValue === "string" ? fileValue : fileValue && (fileValue.fileID || fileValue.id);
       const file = detail.files.find(entry => entry.fileID === fileID);
       if (!file || !file.downloadURL || !["waiting", "accept"].includes(file.status)) fail("DOWNLOAD_NOT_AVAILABLE", "当前页面尚未提供本账号可用的文件下载入口。", { retryable: detail.remoteState === "waiting" });
-      // Even a file-record GET may select the site's paid smart/high-speed route.
-      // Do not expose a followable URL until ordinary zero-cost download is verified.
+      // Page scripts never run. High-speed is opt-in through auto-free and must
+      // be backed by a fresh current-account notice, never a remembered VIP icon.
       if (typeof contracts.download !== "function") fail("UNVERIFIED_CONTRACT", "尚未核实普通下载入口及额外扣分条件，未请求文件链接。");
-      const resolved = await contracts.download({ detail, file, account, page, query: postFormJSON });
-      if (!resolved || resolved.costPoints !== 0 || typeof resolved.url !== "string") fail("UNVERIFIED_CONTRACT", "普通下载地址或额外扣分条件尚未核实。");
+      const checkedPage = async url => { checkCancelled(); const result = await page(url); checkCancelled(); return result; };
+      const checkedQuery = async (...args) => { checkCancelled(); const result = await postFormJSON(...args); checkCancelled(); return result; };
+      const resolved = await contracts.download({ detail, file, account, page: checkedPage, query: checkedQuery, options: { route, fallback, normalServerIndex, checkCancelled } });
+      checkCancelled();
+      if (!resolved || resolved.costPoints !== 0 || typeof resolved.url !== "string") fail("UNVERIFIED_CONTRACT", "免费下载地址或额外扣分条件尚未核实。");
+      const selectedRoute = resolved.route || "normal", transport = resolved.transport || "normal";
+      if (!["normal", "highspeed"].includes(selectedRoute) || (selectedRoute === "normal" ? transport !== "normal" : !["vip", "cdn"].includes(transport)) || (selectedRoute === "highspeed" && (route !== "auto-free" || resolved.entitlement !== "current-account-free-highspeed"))) fail("UNVERIFIED_CONTRACT", "高速下载缺少当前账号免费权益依据。");
       const url = new URL(resolved.url);
       const allowed = new Set([ORIGIN, ...(contracts.downloadOrigins || [])]);
       if (url.protocol !== "https:" || url.username || url.password || !allowed.has(url.origin)) fail("INVALID_DOWNLOAD_URL", "下载地址不属于已核实的下载服务器。");
-      return { requestID: detail.requestID, fileID: file.fileID, filename: resolved.filename || file.filename, url: url.href, method: "GET", resolved: true, costPoints: 0, expectedSize: resolved.expectedSize || null, allowedOrigins: resolved.allowedOrigins || [url.origin] };
+      return { requestID: detail.requestID, fileID: file.fileID, filename: resolved.filename || file.filename, url: url.href, method: "GET", resolved: true, costPoints: 0, expectedSize: resolved.expectedSize || null, allowedOrigins: resolved.allowedOrigins || [url.origin], route: selectedRoute, transport, serverID: resolved.serverID || "", normalServerIndex: resolved.normalServerIndex ?? normalServerIndex, normalServerCount: resolved.normalServerCount || 1, timeoutMs: downloadTimeout(resolved.expectedSize), retryable: true, canFallback: selectedRoute === "highspeed" && transport === "vip" && resolved.canFallback === true, entitlement: resolved.entitlement || "normal-requested", ...(transport === "cdn" && resolved.allowedRedirectDomain === "ablesci.com" ? { allowedRedirectDomain: "ablesci.com" } : {}) };
     }
 
     return Object.freeze({ getAccount, listMessages, findExistingRequest, submitRequest, getRequest, getDownload });
   }
 
-  const api = Object.freeze({ ORIGIN, PATHS, AbleSciError, parseAccount, parseRequest, parseOwnRequests, parseMessages, parseDownloadPage, create });
+  const api = Object.freeze({ ORIGIN, PATHS, AbleSciError, parseAccount, parseRequest, parseOwnRequests, parseMessages, parseDownloadPage, parseDownloadSettings, create });
   root.FulltextAbleSci = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(globalThis);

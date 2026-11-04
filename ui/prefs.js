@@ -18,8 +18,9 @@
     let settingsDirty = false;
     let accountDirty = false;
     let destroyed = false;
-    let taskFilter = "all";
+    let taskFilter = "unfinished";
     let requestTarget = "";
+    let bindingState = null;
     const selectedTasks = new Set();
     const bindings = [];
     const taskLabels = {
@@ -32,13 +33,16 @@
       error: "需要处理", failed: "需要处理", captcha: "需要验证", closed: "求助已关闭"
     };
     const accountLabels = { authenticated: "已登录", logged_in: "已登录", signed_out: "未登录", logged_out: "未登录", pending_login: "需要登录", expired: "登录已过期", checking: "正在登录", logging_in: "正在登录", captcha: "需要验证", error: "登录失败", unknown: "待验证", unverified: "待验证" };
-    const filterLabels = { all: "全部", success: "已获取", login: "需网页登录", fallback: "待兜底", active: "进行中" };
+    const filterLabels = { unfinished: "未完成", all: "全部历史", success: "已获取", login: "需网页登录", fallback: "待兜底", active: "进行中" };
+    const sourceLabels = { publisher: "出版社网页", rendered_publisher: "出版社网页", open_access: "开放获取", existing: "已有附件", ablesci: "科研通", local_file: "本地 PDF" };
+    const isAcquired = task => ["imported", "completed"].includes(task.state);
     const currentTasks = () => Array.isArray(snapshot.tasks) ? snapshot.tasks : [];
     const currentPoints = () => Number.isSafeInteger(snapshot.settings?.points) && snapshot.settings.points >= 1 && snapshot.settings.points <= 10000 ? snapshot.settings.points : 10;
     const isFallback = task => !task.requestURL && !task.requestID && !task.attachmentID && ["not_found", "needs_login", "pending_login", "paused", "error"].includes(task.state);
     const canAssist = task => isFallback(task) && Boolean(String(task.doi || "").trim());
     function matchesFilter(task, filter) {
-      if (filter === "success") return ["imported", "completed"].includes(task.state);
+      if (filter === "unfinished") return !isAcquired(task);
+      if (filter === "success") return isAcquired(task);
       if (filter === "login") return ["needs_login", "pending_login", "captcha"].includes(task.state);
       if (filter === "fallback") return isFallback(task);
       if (filter === "active") return ["waiting", "submitting", "downloading", "queued", "finding", "searching", "resolving", "checking_account", "validating", "ready_to_check"].includes(task.state);
@@ -49,10 +53,10 @@
       $(target).textContent = String(message || "");
       $(target).dataset.error = String(error);
     }
-    function dateText(value) {
+    function dateText(value, includeYear = false) {
       if (!value) return "";
       const date = new Date(value);
-      return Number.isNaN(date.getTime()) ? "" : date.toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
+      return Number.isNaN(date.getTime()) ? "" : date.toLocaleString("zh-CN", { ...(includeYear ? { year: "numeric" } : {}), month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
     }
     function make(name, className, text) {
       const node = document.createElementNS("http://www.w3.org/1999/xhtml", name);
@@ -74,6 +78,8 @@
       return (accepted ? "已将 " + accepted + " 篇转入科研通求助流程。" : "没有新增求助任务。") + (skipped ? "已跳过 " + skipped + " 项，请查看当前任务状态。" : "进度见任务列表。");
     }
     function renderSelection() {
+      $("fta-pref-bulk-actions").hidden = taskFilter === "success";
+      $("fta-pref-bulk-note").hidden = taskFilter === "success";
       const eligible = currentTasks().filter(task => matchesFilter(task, taskFilter) && canAssist(task));
       const selected = eligible.filter(task => selectedTasks.has(task.id));
       const all = $("fta-pref-select-tasks");
@@ -103,18 +109,84 @@
         select.append(option);
       }
     }
+    function openBinding(task) {
+      bindingState = null;
+      return run(async () => {
+        const result = await app.getBindingCandidates(task.id);
+        if (destroyed) return;
+        const candidates = [];
+        const seen = new Set();
+        for (const candidate of Array.isArray(result) ? result : []) {
+          const itemID = Number(candidate?.itemID);
+          if (!Number.isSafeInteger(itemID) || itemID <= 0 || seen.has(itemID)) continue;
+          seen.add(itemID);
+          candidates.push({ ...candidate, itemID });
+        }
+        bindingState = { taskId: task.id, candidates, itemID: "" };
+      }, "请选择要保存全文的文献并确认关联。");
+    }
+    function renderBinding(task, row) {
+      if (bindingState?.taskId !== task.id) return;
+      const state = bindingState;
+      const panel = make("div", "fta-binding-panel");
+      panel.setAttribute("role", "group");
+      panel.setAttribute("aria-label", "关联文献");
+      const label = make("label", "", "选择保存全文的文献");
+      label.htmlFor = "fta-pref-binding-target";
+      const select = make("select");
+      select.id = "fta-pref-binding-target";
+      select.disabled = busy || !state.candidates.length;
+      const placeholder = make("option", "", "请选择文献（不自动关联）");
+      placeholder.value = "";
+      placeholder.selected = !state.itemID;
+      select.append(placeholder);
+      for (const candidate of state.candidates) {
+        const name = candidate.title || candidate.doi || "未命名文献";
+        const option = make("option", "", [name, candidate.doi && candidate.doi !== name ? candidate.doi : "", candidate.libraryName].filter(Boolean).join(" — "));
+        option.value = String(candidate.itemID);
+        option.selected = option.value === state.itemID;
+        select.append(option);
+      }
+      const note = make("p", "fta-note", state.candidates.length ? "请核对标题和 DOI。只有确认关联后，全文才能保存到这篇文献。" : "没有找到 DOI 相同且可写入附件的文献。请先在 Zotero 文库添加对应文献并补全 DOI，再重新打开关联选择。");
+      const actions = make("div", "fta-actions");
+      const confirm = make("button", "fta-primary", "确认关联");
+      confirm.type = "button";
+      confirm.disabled = busy || !state.itemID || typeof app.bindExistingTask !== "function";
+      select.addEventListener("change", () => {
+        if (busy || bindingState !== state) return;
+        const value = select.value || "";
+        state.itemID = state.candidates.some(candidate => String(candidate.itemID) === value) ? value : "";
+        confirm.disabled = !state.itemID || typeof app.bindExistingTask !== "function";
+      });
+      confirm.addEventListener("click", () => {
+        if (busy || bindingState !== state || !state.itemID) return;
+        const itemID = Number(state.itemID);
+        if (!state.candidates.some(candidate => candidate.itemID === itemID)) return;
+        const autoDownload = snapshot.settings?.autoDownload !== false;
+        run(async () => { await app.bindExistingTask(task.id, itemID); bindingState = null; }, autoDownload ? "文献已关联，下载进度见任务列表。" : "文献已关联，可点击“下载到文库”。");
+      });
+      const cancel = make("button", "", "取消");
+      cancel.type = "button";
+      cancel.disabled = busy;
+      cancel.addEventListener("click", () => { if (!busy) { bindingState = null; renderTasks(); } });
+      actions.append(confirm, cancel);
+      panel.append(label, select, note, actions);
+      row.append(panel);
+    }
     function renderTasks() {
       const tasks = currentTasks();
       const visible = tasks.filter(task => matchesFilter(task, taskFilter));
+      if (taskFilter === "success") visible.sort((a, b) => String(b.completedAt || b.importedAt || b.updatedAt || "").localeCompare(String(a.completedAt || a.importedAt || a.updatedAt || "")));
+      if (bindingState && !visible.some(task => task.id === bindingState.taskId && task.state === "available" && !task.itemID)) bindingState = null;
       const eligibleIDs = new Set(visible.filter(canAssist).map(task => task.id));
       for (const id of selectedTasks) if (!eligibleIDs.has(id)) selectedTasks.delete(id);
       const list = $("fta-pref-task-list");
       list.replaceChildren();
       $("fta-pref-task-count").textContent = String(tasks.length);
       $("fta-pref-task-empty").hidden = visible.length > 0;
-      $("fta-pref-task-empty").textContent = tasks.length ? "当前筛选没有任务。" : "还没有任务。在文库多选文献，右击“全文助手：批量获取全文”开始批量获取。";
+      $("fta-pref-task-empty").textContent = tasks.length ? taskFilter === "unfinished" ? "当前没有未完成任务。已获取的记录可在“已获取”中查看。" : "当前筛选没有任务。" : "还没有任务。在文库多选文献，右击“全文助手：批量获取全文”开始批量获取。";
       const waiting = tasks.filter(task => matchesFilter(task, "active")).length;
-      $("fta-pref-task-summary").textContent = (waiting ? waiting + " 项进行中" : "") + (taskFilter !== "all" ? (waiting ? " · " : "") + "显示 " + visible.length + "/" + tasks.length + " 项" : "");
+      $("fta-pref-task-summary").textContent = "显示 " + visible.length + "/" + tasks.length + " 项" + (waiting ? " · " + waiting + " 项进行中" : "");
       for (const node of $("fta-pref-task-filters").querySelectorAll("button")) {
         const filter = node.dataset.filter;
         node.textContent = filterLabels[filter] + " " + tasks.filter(task => matchesFilter(task, filter)).length;
@@ -140,33 +212,52 @@
           main.append(checkbox);
         }
         main.append(make("div", "fta-row-title", task.title || task.doi || "未命名文献"));
-        const badge = make("span", "fta-status-badge", taskLabels[task.state] || "待处理");
-        if (["imported", "completed"].includes(task.state)) badge.dataset.tone = "success";
+        const acquired = isAcquired(task);
+        const unboundAvailable = task.state === "available" && !task.itemID;
+        const badge = make("span", "fta-status-badge", unboundAvailable ? "待关联文献" : taskLabels[task.state] || "待处理");
+        if (acquired) badge.dataset.tone = "success";
         if (["error", "failed"].includes(task.state)) badge.dataset.tone = "error";
         if (["pending_login", "needs_login", "not_found", "needs_review", "captcha", "submission_unknown"].includes(task.state)) badge.dataset.tone = "warning";
+        if (unboundAvailable) badge.dataset.tone = "warning";
         main.append(badge);
         row.append(main);
-        const meta = [task.doi, task.requestID ? "求助 " + task.requestID : "", task.requestedPoints ? task.requestedPoints + " 积分" : "", task.lastCheckedAt ? "最近检查 " + dateText(task.lastCheckedAt) : ""].filter(Boolean);
+        const completedDate = acquired ? dateText(task.completedAt || task.importedAt || task.updatedAt, true) : "";
+        const routeLabel = task.downloadRoute === "highspeed" ? "免积分高速" : task.downloadRoute === "normal" ? "普通线路" : "";
+        const showRoute = acquired ? task.source === "ablesci" : ["downloading", "validating"].includes(task.state) && Boolean(task.source === "ablesci" || task.requestID || task.requestURL);
+        const route = showRoute ? routeLabel : "";
+        const meta = (acquired ? [completedDate ? "完成 " + completedDate : "完成日期未记录", "来源：" + (sourceLabels[task.source] || "未记录"), route, task.doi] : [task.doi, task.requestID ? "求助 " + task.requestID : "", task.requestedPoints ? task.requestedPoints + " 积分" : "", route ? "来源：科研通" : "", route, task.lastCheckedAt ? "最近检查 " + dateText(task.lastCheckedAt) : ""]).filter(Boolean);
         if (meta.length) row.append(make("div", "fta-row-meta", meta.join(" · ")));
-        const note = task.message || task.lastError;
+        const note = unboundAvailable ? "应助文件已就绪，但此任务仅跟踪求助，尚未关联 Zotero 文献。请先关联文献，才能下载到文库。" : acquired ? "" : task.message || task.lastError;
         if (note) row.append(make("p", "fta-row-note", note));
         const actions = make("div", "fta-row-actions");
         const done = ["imported", "completed", "closed"].includes(task.state);
-        actions.append(button("立即检查", "checkTask", [task.id], done));
+        if (!acquired) actions.append(button("立即检查", "checkTask", [task.id], done));
         if (task.state === "available" && task.itemID) actions.append(button("下载到文库", "downloadTask", [task.id], false, "下载结果已更新。"));
+        if (unboundAvailable) {
+          const bind = make("button", "", "关联文献");
+          bind.type = "button";
+          bind.disabled = busy || typeof app.getBindingCandidates !== "function" || typeof app.bindExistingTask !== "function";
+          bind.addEventListener("click", () => { if (!busy && !bind.disabled) openBinding(task); });
+          actions.append(bind);
+        }
         const openMethod = typeof app.openTask === "function" ? "openTask" : "openRequest";
         const canOpen = openMethod === "openTask" ? Boolean(task.attachmentID || task.requestURL || task.officialURL || task.doi) : Boolean(task.requestURL);
         actions.append(button(task.attachmentID ? "打开全文" : task.requestURL ? "打开" : "打开网页", openMethod, [task.id], !canOpen));
+        if (task.itemID && !acquired && ["needs_login", "needs_review", "error", "failed", "not_found", "pending_login", "captcha", "paused"].includes(task.state)) {
+          actions.append(button("在系统浏览器打开", "openExternalTask", [task.id]));
+          actions.append(button("选择已下载的PDF", "importLocalPDF", [task.id], false, result => result?.cancelled ? "已取消选择文件。" : "本地 PDF 处理结果已更新。"));
+        }
         if (["paused", "error", "failed", "not_found", "needs_login", "pending_login", "needs_review"].includes(task.state)) {
           const unsubmitted = !task.requestID && !task.requestURL;
           actions.append(button(unsubmitted ? "按 " + currentPoints() + " 积分重试" : "重试", "retryTask", unsubmitted ? [task.id, { points: currentPoints() }] : [task.id], false, "任务已恢复。"));
         }
-        else actions.append(button("暂停", "pauseTask", [task.id], done, task.requestURL ? "已暂停本地检查，网站上的求助仍然保留。" : "任务已暂停。"));
+        else if (!acquired) actions.append(button("暂停", "pauseTask", [task.id], done, task.requestURL ? "已暂停本地检查，网站上的求助仍然保留。" : "任务已暂停。"));
         if (isFallback(task)) {
           actions.append(button("科研通求助（" + currentPoints() + " 积分）", "requestAssist", [[task.id], { points: currentPoints() }], !canAssist(task), assistMessage));
           if (!canAssist(task)) actions.append(make("span", "fta-secondary", "补全 DOI 后可求助"));
         }
         row.append(actions);
+        if (unboundAvailable) renderBinding(task, row);
         list.append(row);
       }
       renderSelection();
@@ -176,10 +267,12 @@
       const info = snapshot.messagesStatus || {};
       const list = $("fta-pref-message-list");
       list.replaceChildren();
-      $("fta-pref-message-count").textContent = String(messages.filter(message => !message.read).length);
       $("fta-pref-message-empty").hidden = messages.length > 0;
       $("fta-pref-message-empty").textContent = info.state === "loaded" ? "暂无消息。" : "尚未读取科研通消息。";
-      $("fta-pref-messages-state").textContent = String(info.message || (info.state === "loading" ? "正在刷新消息…" : info.lastCheckedAt ? "最近刷新 " + dateText(info.lastCheckedAt) : "登录后可查看科研通应助提醒。"));
+      const lastRefreshed = dateText(info.lastCheckedAt);
+      $("fta-pref-messages-refreshed").textContent = lastRefreshed ? "最近刷新 " + lastRefreshed : "尚未刷新";
+      $("fta-pref-messages-state").textContent = String(info.message || (info.state === "loading" ? "正在刷新消息…" : info.state === "error" ? "消息刷新未完成，请稍后再试。" : info.state === "loaded" || lastRefreshed ? "" : "登录后可查看科研通应助提醒。"));
+      $("fta-pref-messages-state").hidden = !$("fta-pref-messages-state").textContent;
       $("fta-pref-messages-state").dataset.error = String(info.state === "error");
       for (const message of messages.slice(0, 30)) {
         const row = make("article", "fta-row");
@@ -200,6 +293,7 @@
       snapshot = app.getSnapshot() || {};
       const session = snapshot.session || {};
       const settings = snapshot.settings || {};
+      const publisherSession = snapshot.publisherSession || {};
       $("fta-pref-version").textContent = snapshot.version ? "v" + snapshot.version : "";
       $("fta-pref-account-state").textContent = accountLabels[session.status] || "待验证";
       $("fta-pref-account-state").dataset.tone = ["authenticated", "logged_in"].includes(session.status) ? "success" : ["captcha", "expired", "pending_login"].includes(session.status) ? "warning" : "";
@@ -207,6 +301,11 @@
       $("fta-pref-account-identity").hidden = !boundName;
       $("fta-pref-account-identity").textContent = boundName ? "当前绑定：" + boundName : "";
       $("fta-pref-account-message").textContent = String(session.message || "登录后可发起求助、查看应助进度并下载文件。");
+      const publisherStatus = $("fta-pref-publisher-session");
+      publisherStatus.hidden = typeof publisherSession.initialized !== "boolean";
+      publisherStatus.dataset.error = String(Boolean(publisherSession.error));
+      const savedAt = dateText(publisherSession.savedAt, true);
+      publisherStatus.textContent = publisherSession.error ? "机构登录：保存或恢复未完成，请在机构登录窗口重新登录。" : !publisherSession.initialized ? "机构登录：正在读取登录保存状态…" : publisherSession.hasBackup ? "机构登录：已在本机加密保存" + (savedAt ? "（" + savedAt + "）" : "") + "。网站会话过期后需重新登录。" : publisherSession.enabled ? "机构登录：已启用保存。网站会话过期后需重新登录。" : "机构登录：尚未保存。可在专用窗口保留“记住此窗口的机构登录”并完成登录。";
       if (!accountDirty) $("fta-pref-username").value = session.username || "";
       $("fta-pref-password").placeholder = session.hasSavedPassword ? "已保存密码；留空使用已保存的密码" : "输入密码";
       if (!settingsDirty) {
@@ -265,6 +364,7 @@
       if (busy) return;
       taskFilter = node.dataset.filter;
       selectedTasks.clear();
+      bindingState = null;
       renderTasks();
     });
     on($("fta-pref-select-tasks"), "change", () => {

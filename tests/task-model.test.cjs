@@ -10,6 +10,16 @@ function task(overrides = {}, id = "task-1") {
   return model.createTask({ ...input, ...overrides }, { now: () => T0, id: () => id });
 }
 
+test("completion date and known download route persist without changing on later updates", () => {
+  const pending=task({state:"waiting"}),done=model.updateTask(pending,{state:"imported",downloadRoute:"highspeed"},{now:()=>T1});
+  assert.equal(done.completedAt,T1);
+  const later=model.updateTask(done,{lastError:""},{now:()=>"2026-11-05T00:00:00.000Z"});
+  const restored=model.deserializeQueue(model.serializeQueue([later])).tasks[0];
+  assert.equal(restored.completedAt,T1);assert.equal(restored.downloadRoute,"highspeed");
+  const legacy={...done};delete legacy.completedAt;assert.equal(model.sanitizeTask(legacy).completedAt,T1);
+  assert.equal(model.sanitizeTask({...legacy,downloadRoute:"https://private.test/?token=secret"}).downloadRoute,"");
+});
+
 test("point settings accept only integers from 1 through 10000 without loose coercion", () => {
   assert.equal(model.DEFAULT_POINTS, 10);
   for (const value of [1, 10, 20, 10000, "1", "20", "10000", " 20 "]) {

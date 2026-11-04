@@ -14,7 +14,7 @@ const settle = () => new Promise(resolve=>setImmediate(resolve));
 async function until(condition) {const end=Date.now()+2000;while(!condition()){if(Date.now()>end)throw new Error('Fixture condition timed out');await settle();}}
 function item(id) {return {id,key:'ITEM'+id,libraryID:1,deleted:false,isRegularItem:()=>true,getAttachments:()=>[],async getBestAttachment(){return null;},getField(name){return {DOI:'10.1234/paper'+id,title:'Fixture paper '+id,url:'https://publisher.test/paper'+id}[name]||'';}};}
 
-function environment({acquire,initialTasks,initialIntents,realPublisher=false,writePDFError=false}={}) {
+function environment({acquire,initialTasks,initialIntents,realPublisher=false,writePDFError=false,pickPDF}={}) {
   const files=new Map(),prefs=new Map(),items=new Map(),menus=new Map(),publisherCalls=[],submissions=[],remoteRequests=[],errors=[],httpCalls=[],imports=[];
   let accountCalls=0,active=0,peak=0,writeHook=null,importCount=0,oaCalls=0;
   if(initialTasks)files.set(queuePath,MODEL.serializeQueue(initialTasks));
@@ -32,7 +32,9 @@ function environment({acquire,initialTasks,initialIntents,realPublisher=false,wr
   vm.runInNewContext(publisherWindowSource,scope);
   if(!realPublisher)scope.FulltextPublisher={validPDF:scope.FulltextPublisher.validPDF,create(){return {async acquire(value,options){publisherCalls.push({item:value,options});active++;peak=Math.max(peak,active);try{return await(acquire?acquire(value,options):{attachmentID:800+value.id,source:'publisher'});}finally{active--;}}};}};
   vm.runInNewContext(appSource,scope);
-  const app=scope.FulltextApp.create({Zotero,Services,IOUtils,PathUtils:path.win32,rootURI:'file:///fixture/',pluginID:'fixture@local.invalid',version:'0.2.0'});
+  Zotero.Search=class{addCondition(field,operator,value){this.doi=value;}async search(){return [...items.values()].filter(value=>value.getField&&value.getField('DOI').toLowerCase()===this.doi).map(value=>value.id);}};
+  IOUtils.stat=async file=>({type:'regular',size:files.get(file)?.length||0});IOUtils.read=async file=>files.get(file);
+  const app=scope.FulltextApp.create({Zotero,Services,IOUtils,PathUtils:path.win32,rootURI:'file:///fixture/',pluginID:'fixture@local.invalid',version:'0.3.0',pickPDF});
   return {app,Zotero,Services,IOUtils,files,prefs,items,menus,publisherCalls,submissions,remoteRequests,errors,httpCalls,imports,session,credentials,adapter,account,addItem(value){items.set(value.id,value);return value;},setWriteHook(value){writeHook=value;},get accountCalls(){return accountCalls;},get peak(){return peak;},get importCount(){return importCount;},get oaCalls(){return oaCalls;}};
 }
 
@@ -413,4 +415,109 @@ test('pausing while a resumed check is being persisted prevents the remote read'
   await env.app.start();env.setWriteHook(async(file,value)=>{if(!held&&file===queuePath&&JSON.parse(value).tasks[0].state==='ready_to_check'){held=true;await gate.promise;}});
   const check=env.app.checkTask(task.id);await until(()=>held);const pause=env.app.pauseTask(task.id);gate.resolve();await Promise.all([check,pause]);
   assert.equal(env.app.getSnapshot().tasks[0].state,'paused');assert.equal(env.remoteRequests.length,0);assert.equal(env.submissions.length,0);assert.equal(JSON.parse(env.files.get(queuePath)).tasks[0].state,'paused');await env.app.stop();
+});
+
+test('completed history survives startup without rewriting its completion date',async()=>{
+  const old=MODEL.createTask({libraryID:1,itemID:1,itemKey:'ITEM1',doi:'10.1234/paper1',state:'imported',attachmentID:901},{now:()=> '2026-10-01T00:00:00.000Z'});
+  const env=environment({initialTasks:[old]});await env.app.start();const stored=env.app.getSnapshot().tasks[0];
+  assert.equal(stored.completedAt,old.updatedAt);assert.equal(stored.updatedAt,old.updatedAt);await env.app.stop();
+  assert.equal(JSON.stringify(MODEL.deserializeQueue(env.files.get(queuePath)).tasks[0]),JSON.stringify(stored));
+});
+
+test('available standalone request stays unimported until the user confirms a matching item',async()=>{
+  const task=MODEL.createTask({doi:'10.1234/paper1',requestURL:'https://www.ablesci.com/assist/detail?id=Request1',state:'available'});
+  const env=environment({initialTasks:[task]});env.addItem(item(1));env.addItem(item(2));availableDownload(env);
+  await env.app.start();await env.app.refreshAccount();await env.app.checkTask(task.id);
+  assert.equal(env.importCount,0);assert.equal(env.app.getSnapshot().tasks[0].itemID,null);
+  const candidates=await env.app.getBindingCandidates(task.id);assert.deepEqual(Array.from(candidates,c=>c.itemID),[1]);
+  await env.app.bindExistingTask(task.id,1);assert.equal(env.app.getSnapshot().tasks[0].state,'imported');
+  assert.equal(env.imports[0].parentItemID,1);assert.equal(env.submissions.length,0);await env.app.stop();
+});
+
+test('explicit binding respects automatic-download-off and merges a prior item task',async()=>{
+  const track=MODEL.createTask({doi:'10.1234/paper1',requestURL:'https://www.ablesci.com/assist/detail?id=Request1',state:'available'});
+  const parent=MODEL.createTask({doi:'10.1234/paper1',libraryID:1,itemID:1,itemKey:'ITEM1',state:'not_found'});
+  const env=environment({initialTasks:[track,parent]});env.addItem(item(1));availableDownload(env);
+  await env.app.start();await env.app.saveSettings({autoDownload:false});await env.app.refreshAccount();
+  const linked=await env.app.bindExistingTask(track.id,1);assert.equal(linked.id,parent.id);assert.equal(linked.state,'available');assert.equal(linked.requestID,'Request1');
+  assert.equal(env.app.getSnapshot().tasks.length,1);assert.equal(env.importCount,0);assert.equal(env.submissions.length,0);await env.app.stop();
+});
+
+test('binding rejects mismatched or read-only items without changing the standalone tracker',async()=>{
+  const task=MODEL.createTask({doi:'10.1234/paper1',requestURL:'https://www.ablesci.com/assist/detail?id=Request1',state:'available'});
+  const env=environment({initialTasks:[task]});env.addItem(item(1));env.addItem(item(2));availableDownload(env);await env.app.start();
+  await assert.rejects(env.app.bindExistingTask(task.id,2),/DOI/);assert.equal(env.app.getSnapshot().tasks[0].itemID,null);
+  env.Zotero.Libraries.get=()=>({editable:true,filesEditable:false});assert.equal((await env.app.getBindingCandidates(task.id)).length,0);
+  await assert.rejects(env.app.bindExistingTask(task.id,1),/不可写/);assert.equal(env.importCount,0);assert.equal(env.submissions.length,0);await env.app.stop();
+});
+
+test('a raw file timeout stays scheduled with increasing backoff and recovers without another request',async()=>{
+  const task=remoteFixture(),env=environment({initialTasks:[task]});env.addItem(item(1));availableDownload(env);
+  const request=env.Zotero.HTTP.request;let timeoutSeen=0;
+  env.Zotero.HTTP.request=async(method,url,options)=>{timeoutSeen=options.timeout;const e=new Error('request timed out');e.name='TimeoutException';throw e;};
+  await env.app.start();await env.app.refreshAccount();await env.app.checkTask(task.id);
+  let current=env.app.getSnapshot().tasks[0];assert.equal(current.state,'waiting');assert.equal(current.attempts,1);assert.match(current.lastError,/下载超时/);assert.equal(timeoutSeen,180000);
+  await env.app.checkTask(task.id);current=env.app.getSnapshot().tasks[0];assert.equal(current.attempts,2);assert.match(current.lastError,/120 秒后重试/);
+  env.Zotero.HTTP.request=request;await env.app.checkTask(task.id);current=env.app.getSnapshot().tasks[0];assert.equal(current.state,'imported');assert.equal(current.attempts,0);assert.equal(env.importCount,1);assert.equal(env.submissions.length,0);await env.app.stop();
+});
+
+test('verified highspeed transport failure asks for a fresh fallback descriptor',async()=>{
+  const task=remoteFixture(),env=environment({initialTasks:[task]});env.addItem(item(1));availableDownload(env);const options=[];
+  env.adapter.getDownload=async(result,file,opt)=>{options.push(opt);return{url:'https://download.test/paper.pdf',method:'GET',route:'highspeed',transport:opt.fallback?'cdn':'vip',canFallback:!opt.fallback,allowedOrigins:['https://download.test'],timeoutMs:240000};};
+  const request=env.Zotero.HTTP.request;let calls=0;
+  env.Zotero.HTTP.request=async(...args)=>{calls++;if(calls===1){const e=new Error('network interrupted');e.status=503;throw e;}return request(...args);};
+  await env.app.start();await env.app.refreshAccount();await env.app.checkTask(task.id);
+  assert.equal(options.length,2);assert.equal(options[0].route,'auto-free');assert.equal(options[1].fallback,true);assert.equal(typeof options[1].isCancelled,'function');
+  assert.equal(env.app.getSnapshot().tasks[0].state,'imported');assert.equal(env.app.getSnapshot().tasks[0].downloadRoute,'highspeed');assert.equal(env.importCount,1);await env.app.stop();
+});
+
+test('a CDN descriptor cannot admit a lookalike redirect domain',async()=>{
+  const task=remoteFixture(),env=environment({initialTasks:[task]});env.addItem(item(1));availableDownload(env);
+  env.adapter.getDownload=async()=>({url:'https://download.test/paper.pdf',route:'highspeed',transport:'cdn',allowedRedirectDomain:'ablesci.com',allowedOrigins:['https://download.test']});
+  const request=env.Zotero.HTTP.request;env.Zotero.HTTP.request=async(...args)=>({...await request(...args),responseURL:'https://ablesci.com.evil.test/paper.pdf'});
+  await env.app.start();await env.app.refreshAccount();await env.app.checkTask(task.id);assert.equal(env.importCount,0);assert.equal(env.app.getSnapshot().tasks[0].state,'error');await env.app.stop();
+});
+
+function localFixture(){return MODEL.createTask({libraryID:1,itemID:1,itemKey:'ITEM1',doi:'10.1234/paper1',title:'Expected paper',state:'needs_login'});}
+test('normal download timeout retries a different offered server once',async()=>{
+  const task=remoteFixture(),env=environment({initialTasks:[task]});env.addItem(item(1));availableDownload(env);const options=[];
+  env.adapter.getDownload=async(result,file,opt)=>{options.push(opt);return{url:'https://download.test/paper.pdf',method:'GET',route:'normal',transport:'normal',normalServerIndex:opt.normalServerIndex||0,normalServerCount:3,allowedOrigins:['https://download.test']};};
+  const request=env.Zotero.HTTP.request;let calls=0;
+  env.Zotero.HTTP.request=async(...args)=>{if(++calls===1){const e=new Error('request timed out');e.name='TimeoutException';throw e;}return request(...args);};
+  await env.app.start();await env.app.refreshAccount();await env.app.checkTask(task.id);
+  assert.equal(options.length,2);assert.equal(options[1].route,'normal');assert.equal(options[1].normalServerIndex,1);assert.equal(env.app.getSnapshot().tasks[0].state,'imported');assert.equal(env.importCount,1);await env.app.stop();
+});
+
+test('failed message refresh preserves the last successful refresh date',async()=>{
+  const env=environment();await env.app.start();await env.app.refreshAccount();
+  env.adapter.listMessages=async()=>[];await env.app.refreshMessages();const successful=env.app.getSnapshot().messagesStatus.lastCheckedAt;
+  env.adapter.listMessages=async()=>{throw new Error('temporary network failure');};await assert.rejects(env.app.refreshMessages(),/network/);
+  const status=env.app.getSnapshot().messagesStatus;assert.equal(status.state,'error');assert.equal(status.lastCheckedAt,successful);assert.ok(status.lastAttemptAt);await env.app.stop();
+});
+
+test('cancelling while checking an existing local PDF preserves the paused state',async()=>{
+  const task=localFixture(),env=environment({initialTasks:[task]}),gate=deferred();let checking=false;
+  const parent=env.addItem(item(1));parent.getBestAttachment=async()=>({id:901,attachmentContentType:'application/pdf',async fileExists(){checking=true;await gate.promise;return true;}});
+  await env.app.start();const importing=env.app.importLocalPDF(task.id);await until(()=>checking);await env.app.pauseTask(task.id);gate.resolve();
+  await assert.rejects(importing,/取消/);assert.equal(env.app.getSnapshot().tasks[0].state,'paused');assert.equal(env.importCount,0);await env.app.stop();
+});
+
+test('cancelled manual PDF selection preserves the task exactly',async()=>{
+  const task=localFixture(),env=environment({initialTasks:[task],pickPDF:async()=>null});env.addItem(item(1));await env.app.start();const before=env.app.getSnapshot().tasks[0];
+  const result=await env.app.importLocalPDF(task.id);assert.equal(result.cancelled,true);assert.deepEqual(env.app.getSnapshot().tasks[0],before);assert.equal(env.importCount,0);await env.app.stop();
+});
+
+test('manual PDF selection validates bytes and imports into the explicit original parent',async()=>{
+  const task=localFixture(),file='C:\\isolated\\chosen.pdf',env=environment({initialTasks:[task],pickPDF:async()=>file});env.addItem(item(1));
+  env.files.set(file,new TextEncoder().encode('%PDF-1.7\n'+'x'.repeat(1500)+'\n%%EOF'));await env.app.start();
+  const result=await env.app.importLocalPDF(task.id);assert.equal(result.cancelled,false);assert.equal(result.attachmentID,900);assert.equal(env.imports[0].parentItemID,1);
+  const stored=env.app.getSnapshot().tasks[0];assert.equal(stored.state,'imported');assert.equal(stored.source,'local_file');assert.ok(stored.completedAt);assert.equal(env.submissions.length,0);await env.app.stop();
+});
+
+test('manual PDF rejects an HTML file and a DOI changed while the picker was open',async()=>{
+  const task=localFixture(),file='C:\\isolated\\chosen.pdf',env=environment({initialTasks:[task],pickPDF:async()=>file});const parent=env.addItem(item(1));env.files.set(file,new TextEncoder().encode('<html>'+'x'.repeat(1500)));
+  await env.app.start();await assert.rejects(env.app.importLocalPDF(task.id),/PDF/);assert.equal(env.importCount,0);
+  env.files.set(file,new TextEncoder().encode('%PDF-1.7\n'+'x'.repeat(1500)+'\n%%EOF'));
+  const oldRead=env.IOUtils.read;env.IOUtils.read=async path=>{const bytes=await oldRead(path);const old=parent.getField;parent.getField=name=>name==='DOI'?'10.1234/changed':old(name);return bytes;};
+  await assert.rejects(env.app.importLocalPDF(task.id),/DOI/);assert.equal(env.importCount,0);await env.app.stop();
 });

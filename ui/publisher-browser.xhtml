@@ -12,6 +12,8 @@
     #publisher-address { flex:1;min-width:120px;padding:7px 9px;border:1px solid #bbc4cf;border-radius:4px;font:12px 'Segoe UI',sans-serif; }
     #publisher-retry { color:white;background:#1767b8;border:1px solid #145ca4;border-radius:4px; }
     #publisher-status { padding:8px 12px;background:#fff7db;color:#514314;font:12px 'Segoe UI','Microsoft YaHei',sans-serif; }
+    .publisher-session { padding:7px 12px;background:#f1f5f9;color:#334155;font:12px 'Segoe UI','Microsoft YaHei',sans-serif; }
+    #publisher-remembered-hosts { overflow-wrap:anywhere; }
     #publisher-tabs { display:flex;gap:5px;padding:5px 9px;background:#e3e8ef;overflow-x:auto; }
     .publisher-tab { display:flex;max-width:270px;border:1px solid #bdc7d3;border-radius:4px;background:#f4f6f9; }
     .publisher-tab.selected { background:white;border-color:#297ac3; }
@@ -26,9 +28,15 @@
     <html:button type="button" id="publisher-reload">刷新</html:button>
     <html:input id="publisher-address" type="text" readonly="readonly" aria-label="当前网页地址" value="正在打开…" />
     <html:button type="button" id="publisher-home">返回论文</html:button>
+    <html:button type="button" id="publisher-external">系统浏览器打开</html:button>
+    <html:button type="button" id="publisher-import">导入本地 PDF</html:button>
     <html:button type="button" id="publisher-retry">完成登录并重试此文献</html:button>
   </html:div>
   <html:div id="publisher-status" role="status">请在下方网页完成出版社或机构登录。认证页面和弹窗都留在此窗口；登录后点击右上方重试。</html:div>
+  <html:div class="publisher-session">
+    <html:label><html:input id="publisher-remember" type="checkbox" checked="checked" /> 记住此窗口的机构登录（加密）</html:label>
+    <html:div>点击“完成登录并重试”时，仅为本窗口经过的站点保存会话，供同机构文献及重启后复用；网站仍决定登录有效期。站点：<html:span id="publisher-remembered-hosts">等待网页加载</html:span></html:div>
+  </html:div>
   <html:div id="publisher-tabs" role="tablist" aria-label="出版社及机构网页" />
   <vbox id="publisher-pages" flex="1">
     <browser id="publisher-main-browser" type="content" flex="1" remote="false" maychangeremoteness="true"
