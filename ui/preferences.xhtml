@@ -22,11 +22,13 @@
     <html:form id="fta-pref-settings-form">
       <html:div class="fta-fields">
         <html:label for="fta-pref-points">每篇求助悬赏积分<html:input id="fta-pref-points" type="number" min="1" max="10000" step="1" value="10" required="required"/></html:label>
-        <html:label for="fta-pref-poll">等待时检查间隔（秒）<html:input id="fta-pref-poll" type="number" min="60" max="3600" step="1" value="60" required="required"/></html:label>
+        <html:label for="fta-pref-poll">科研通应助检查间隔（秒）<html:input id="fta-pref-poll" type="number" min="60" max="3600" step="1" value="60" required="required"/></html:label>
       </html:div>
       <html:label class="fta-check" for="fta-pref-auto-download"><html:input id="fta-pref-auto-download" type="checkbox" checked="checked"/><html:span>收到应助文件后，自动下载并添加到原文献</html:span></html:label>
       <html:p class="fta-note">默认悬赏 10 积分。网站最低要求超过设置值时暂停，不自动加价；修改设置不会改变已发布的求助。</html:p>
       <html:p class="fta-note">科研通下载优先使用账号当前的免积分高速权益，否则使用普通免费线路；不自动购买高速下载。</html:p>
+      <html:p class="fta-note">“专用 Edge 自动获取”使用全文助手专用 Edge 会话，与日常 Edge 不共享登录。首次请在该窗口登录并完成网站验证；暂停后可点击“继续专用 Edge 获取”，失败后可重试。验证能否通过仍由网站决定。</html:p>
+      <html:p class="fta-note">“默认浏览器手动下载”会打开平常使用的默认浏览器；运行中的自动获取会先停止。请自行下载 PDF，再点击任务中的“选择已下载的PDF”导入原文献，插件不会监测该浏览器的下载。</html:p>
       <html:div class="fta-actions"><html:button id="fta-pref-save-settings" type="submit">保存设置</html:button><html:span id="fta-pref-save-state" class="fta-secondary" role="status" aria-live="polite"></html:span></html:div>
     </html:form>
     <html:p id="fta-pref-publisher-session" class="fta-note" hidden="hidden"></html:p>

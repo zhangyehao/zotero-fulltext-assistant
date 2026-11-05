@@ -14,7 +14,7 @@ const settle = () => new Promise(resolve=>setImmediate(resolve));
 async function until(condition) {const end=Date.now()+2000;while(!condition()){if(Date.now()>end)throw new Error('Fixture condition timed out');await settle();}}
 function item(id) {return {id,key:'ITEM'+id,libraryID:1,deleted:false,isRegularItem:()=>true,getAttachments:()=>[],async getBestAttachment(){return null;},getField(name){return {DOI:'10.1234/paper'+id,title:'Fixture paper '+id,url:'https://publisher.test/paper'+id}[name]||'';}};}
 
-function environment({acquire,initialTasks,initialIntents,realPublisher=false,writePDFError=false,pickPDF}={}) {
+function environment({acquire,initialTasks,initialIntents,realPublisher=false,writePDFError=false,pickPDF,edgeAcquire,edgeHost}={}) {
   const files=new Map(),prefs=new Map(),items=new Map(),menus=new Map(),publisherCalls=[],submissions=[],remoteRequests=[],errors=[],httpCalls=[],imports=[];
   let accountCalls=0,active=0,peak=0,writeHook=null,importCount=0,oaCalls=0;
   if(initialTasks)files.set(queuePath,MODEL.serializeQueue(initialTasks));
@@ -34,7 +34,7 @@ function environment({acquire,initialTasks,initialIntents,realPublisher=false,wr
   vm.runInNewContext(appSource,scope);
   Zotero.Search=class{addCondition(field,operator,value){this.doi=value;}async search(){return [...items.values()].filter(value=>value.getField&&value.getField('DOI').toLowerCase()===this.doi).map(value=>value.id);}};
   IOUtils.stat=async file=>({type:'regular',size:files.get(file)?.length||0});IOUtils.read=async file=>files.get(file);
-  const app=scope.FulltextApp.create({Zotero,Services,IOUtils,PathUtils:path.win32,rootURI:'file:///fixture/',pluginID:'fixture@local.invalid',version:'0.3.0',pickPDF});
+  const app=scope.FulltextApp.create({Zotero,Services,IOUtils,PathUtils:path.win32,rootURI:'file:///fixture/',pluginID:'fixture@local.invalid',version:'0.4.1',pickPDF,edgeAcquire,edgeHost});
   return {app,Zotero,Services,IOUtils,files,prefs,items,menus,publisherCalls,submissions,remoteRequests,errors,httpCalls,imports,session,credentials,adapter,account,addItem(value){items.set(value.id,value);return value;},setWriteHook(value){writeHook=value;},get accountCalls(){return accountCalls;},get peak(){return peak;},get importCount(){return importCount;},get oaCalls(){return oaCalls;}};
 }
 
@@ -520,4 +520,139 @@ test('manual PDF rejects an HTML file and a DOI changed while the picker was ope
   env.files.set(file,new TextEncoder().encode('%PDF-1.7\n'+'x'.repeat(1500)+'\n%%EOF'));
   const oldRead=env.IOUtils.read;env.IOUtils.read=async path=>{const bytes=await oldRead(path);const old=parent.getField;parent.getField=name=>name==='DOI'?'10.1234/changed':old(name);return bytes;};
   await assert.rejects(env.app.importLocalPDF(task.id),/DOI/);assert.equal(env.importCount,0);await env.app.stop();
+});
+
+test('browser start returns while human verification is pending and imports into original parent',async()=>{
+  const gate=deferred();let called=0,focus=0,progress;
+  const task={...localFixture(),allowAssist:true},env=environment({initialTasks:[task],edgeAcquire:{async acquire(value,options){called++;assert.equal(value.id,task.id);progress=options;await options.onProgress({state:'browser_waiting',message:'waiting for human'});return gate.promise;},async focus(){focus++;}}});
+  env.addItem(item(1));await env.app.start();assert.equal((await env.app.openExternalTask(task.id)).started,true);await until(()=>called===1);
+  assert.equal(env.app.getSnapshot().tasks[0].state,'browser_waiting');await env.app.openExternalTask(task.id);assert.equal(called,1);assert.equal(focus,1);
+  await progress.onProgress({state:'browser_downloading',message:'downloading'});gate.resolve({bytes:new TextEncoder().encode('%PDF-1.7\n'+'x'.repeat(1500)+'\n%%EOF')});
+  await until(()=>env.app.getSnapshot().tasks[0].state==='imported');assert.equal(env.imports[0].parentItemID,1);assert.equal(env.app.getSnapshot().tasks[0].source,'edge_browser');assert.equal(env.submissions.length,0);await env.app.stop();
+});
+
+test('browser cancellation prevents late PDF import and preserves history',async()=>{
+  const gate=deferred();let began=false;
+  const task=localFixture(),env=environment({initialTasks:[task],edgeAcquire:{async acquire(){began=true;return gate.promise;}}});env.addItem(item(1));await env.app.start();await env.app.openExternalTask(task.id);await until(()=>began);
+  const pausing=env.app.pauseTask(task.id);gate.resolve({bytes:new TextEncoder().encode('%PDF-1.7\n'+'x'.repeat(1500)+'\n%%EOF')});await pausing;
+  assert.equal(env.importCount,0);assert.equal(env.app.getSnapshot().tasks[0].state,'paused');assert.equal(MODEL.deserializeQueue(env.files.get(queuePath)).tasks[0].acquisitionMode,'browser');await env.app.stop();
+});
+
+test('browser restart is paused and resume never invokes publisher or paid fallback',async()=>{
+  const task={...localFixture(),state:'browser_scanning',acquisitionMode:'browser',allowAssist:true};let calls=0;
+  const env=environment({initialTasks:[task],edgeAcquire:{async acquire(){calls++;throw new Error('Browser closed');}}});env.addItem(item(1));await env.app.start();await settle();
+  assert.equal(env.app.getSnapshot().tasks[0].state,'paused');assert.equal(calls,0);await env.app.checkTask(task.id);await until(()=>env.app.getSnapshot().tasks[0].state==='error');
+  assert.equal(calls,1);assert.equal(env.publisherCalls.length,0);assert.equal(env.submissions.length,0);assert.match(env.app.getSnapshot().tasks[0].lastError,/Browser closed/);await env.app.stop();
+});
+
+test('browser validates PDF and rechecks DOI before committing attachment',async()=>{
+  const task=localFixture();let change=false,response={bytes:new TextEncoder().encode('<html>'+'x'.repeat(1500))};
+  const env=environment({initialTasks:[task],edgeAcquire:{async acquire(){if(change){const old=parent.getField;parent.getField=name=>name==='DOI'?'10.1234/changed':old(name);}return response;}}});const parent=env.addItem(item(1));await env.app.start();await env.app.openExternalTask(task.id);await until(()=>env.app.getSnapshot().tasks[0].state==='error');assert.equal(env.importCount,0);
+  response={bytes:new TextEncoder().encode('%PDF-1.7\n'+'x'.repeat(1500)+'\n%%EOF')};change=true;
+  await env.app.openExternalTask(task.id);await until(()=>env.app.getSnapshot().tasks[0].state==='error');assert.match(env.app.getSnapshot().tasks[0].lastError,/DOI/);assert.equal(env.importCount,0);await env.app.stop();
+});
+
+test('shutdown waits for a committing browser attachment and leaves no late history writes',async()=>{
+  const gate=deferred();let committing=false,stopped=false,writes=0;
+  const task=localFixture(),env=environment({initialTasks:[task],edgeAcquire:{async acquire(){return{bytes:new TextEncoder().encode('%PDF-1.7\n'+'x'.repeat(1500)+'\n%%EOF')};}}});env.addItem(item(1));
+  const original=env.Zotero.Attachments.importFromFile;env.Zotero.Attachments.importFromFile=async options=>{committing=true;await gate.promise;return original(options);};
+  env.setWriteHook(()=>{if(stopped)writes++;});await env.app.start();await env.app.openExternalTask(task.id);await until(()=>committing);
+  const stopping=env.app.stop().then(()=>{stopped=true;});await settle();assert.equal(stopped,false);gate.resolve();await stopping;await settle();
+  assert.equal(writes,0);assert.equal(env.app.getSnapshot().tasks[0].state,'imported');assert.equal(MODEL.deserializeQueue(env.files.get(queuePath)).tasks[0].attachmentID,900);
+});
+
+test('an existing AbleSci request cannot enter the browser route',async()=>{
+  const task={...localFixture(),requestID:'Existing',requestURL:'https://www.ablesci.com/assist/detail?id=Existing'};
+  const env=environment({initialTasks:[task],edgeAcquire:{async acquire(){throw new Error('must not open');}}});env.addItem(item(1));await env.app.start();
+  await assert.rejects(env.app.openExternalTask(task.id),/已关联科研通/);assert.equal(env.app.getSnapshot().tasks[0].acquisitionMode,'');await env.app.stop();
+});
+
+test('browser launch refreshes a formerly missing DOI and rejects a change during acquisition',async()=>{
+  const task={...localFixture(),doi:''},gate=deferred();let captured;
+  const env=environment({initialTasks:[task],edgeAcquire:{async acquire(value){captured=value;return gate.promise;}}});const parent=env.addItem(item(1));await env.app.start();await env.app.openExternalTask(task.id);await until(()=>captured);
+  assert.equal(captured.doi,'10.1234/paper1');const get=parent.getField;parent.getField=name=>name==='DOI'?'10.1234/another':get(name);
+  gate.resolve({bytes:new TextEncoder().encode('%PDF-1.7\n'+'x'.repeat(1500)+'\n%%EOF')});await until(()=>env.app.getSnapshot().tasks[0].state==='error');assert.equal(env.importCount,0);await env.app.stop();
+});
+
+test('browser download without DOI rechecks the title immediately before committing',async()=>{
+  const task={...localFixture(),doi:''},gate=deferred();let started=false;
+  const env=environment({initialTasks:[task],edgeAcquire:{async acquire(){started=true;return gate.promise;}}});const parent=env.addItem(item(1)),get=parent.getField;let title='A long exact paper title without any DOI';parent.getField=name=>name==='DOI'?'':name==='title'?title:get(name);
+  await env.app.start();await env.app.openExternalTask(task.id);await until(()=>started);title='A completely different long paper title';gate.resolve({bytes:new TextEncoder().encode('%PDF-1.7\n'+'x'.repeat(1500)+'\n%%EOF')});
+  await until(()=>env.app.getSnapshot().tasks[0].state==='error');assert.equal(env.importCount,0);assert.match(env.app.getSnapshot().tasks[0].lastError,/身份已改变/);await env.app.stop();
+});
+
+test('shutdown still closes Edge and clears sessions if queue storage fails',async()=>{
+  let closed=0;const env=environment({edgeHost:{async destroy(){closed++;}}});await env.app.start();env.setWriteHook(()=>{throw new Error('disk full');});
+  await assert.rejects(env.app.stop(),/disk full/);assert.equal(closed,1);assert.equal(env.session.destroyed,true);assert.equal(env.menus.size,0);
+});
+
+test('two historical browser tasks for the same Zotero item cannot run together',async()=>{
+  const first=localFixture(),second=MODEL.createTask({...first,id:undefined,doi:'10.1234/old'},{id:'second-browser-task'}),gate=deferred();let calls=0;
+  const env=environment({initialTasks:[first,second],edgeAcquire:{async acquire(){calls++;return gate.promise;}}});env.addItem(item(1));await env.app.start();await env.app.openExternalTask(first.id);await until(()=>calls===1);
+  await assert.rejects(env.app.openExternalTask(second.id),/同一文献/);assert.equal(calls,1);const pausing=env.app.pauseTask(first.id);gate.resolve({bytes:new Uint8Array()});await pausing;await env.app.stop();
+});
+
+test('default browser handoff uses the current article and never starts automated acquisition or a request',async()=>{
+  const task={...localFixture(),allowAssist:true},opened=[];
+  const env=environment({initialTasks:[task],edgeAcquire:{async acquire(){throw new Error('must not automate');}}});
+  const parent=env.addItem(item(1)),get=parent.getField;parent.getField=name=>name==='url'?'https://publisher.test/current-paper':get(name);
+  env.Zotero.launchURL=url=>opened.push(url);await env.app.start();
+  assert.equal((await env.app.openSystemBrowserTask(task.id)).opened,true);
+  assert.deepEqual(opened,['https://publisher.test/current-paper']);assert.equal(env.submissions.length,0);assert.equal(env.publisherCalls.length,0);assert.equal(env.importCount,0);
+  const saved=MODEL.deserializeQueue(env.files.get(queuePath)).tasks[0];assert.equal(saved.state,'paused');assert.equal(saved.acquisitionMode,'browser');assert.match(saved.lastError,/选择已下载/);
+  await env.app.stop();
+});
+
+test('default browser waits for cancellation cleanup and does not close another task browser',async()=>{
+  const task=localFixture(),gate=deferred(),opened=[];let began=false,cancelled=0,hostClosed=0,finished=false;
+  const env=environment({initialTasks:[task],edgeHost:{async destroy(){hostClosed++;}},edgeAcquire:{async acquire(){began=true;return gate.promise;},cancel(){cancelled++;}}});
+  env.addItem(item(1));env.Zotero.launchURL=url=>opened.push(url);await env.app.start();await env.app.openExternalTask(task.id);await until(()=>began);
+  const first=env.app.openSystemBrowserTask(task.id),second=env.app.openSystemBrowserTask(task.id);assert.equal(first,second);first.then(()=>finished=true);
+  await until(()=>cancelled===1);await settle();assert.equal(finished,false);assert.equal(opened.length,0);
+  await assert.rejects(env.app.openExternalTask(task.id),/切换/);
+  gate.resolve({bytes:new TextEncoder().encode('%PDF-1.7\n'+'x'.repeat(1500)+'\n%%EOF')});await first;
+  assert.equal(opened.length,1);assert.equal(env.importCount,0);assert.equal(hostClosed,0);assert.equal(env.app.getSnapshot().tasks[0].state,'paused');await env.app.stop();
+});
+
+test('default browser handoff falls back to DOI and rejects unsafe article URLs without opening',async()=>{
+  for(const url of ['', 'javascript:alert(1)', 'file:///private.pdf', 'https://user:secret@publisher.test/paper']){
+    const task=localFixture(),env=environment({initialTasks:[task]}),opened=[];const parent=env.addItem(item(1)),get=parent.getField;
+    parent.getField=name=>name==='url'?url:get(name);env.Zotero.launchURL=value=>opened.push(value);await env.app.start();
+    if(url) {await assert.rejects(env.app.openSystemBrowserTask(task.id),/地址/);assert.equal(opened.length,0);}
+    else {await env.app.openSystemBrowserTask(task.id);assert.deepEqual(opened,['https://doi.org/10.1234/paper1']);}
+    await env.app.stop();
+  }
+});
+
+test('a newer pause cancels a handoff while the old browser operation is still stopping',async()=>{
+  const task=localFixture(),gate=deferred(),opened=[];let began=false,cancelled=0;
+  const env=environment({initialTasks:[task],edgeAcquire:{async acquire(){began=true;return gate.promise;},cancel(){cancelled++;}}});env.addItem(item(1));env.Zotero.launchURL=url=>opened.push(url);
+  await env.app.start();await env.app.openExternalTask(task.id);await until(()=>began);
+  const handoff=env.app.openSystemBrowserTask(task.id),rejected=assert.rejects(handoff,/切换已取消/);await until(()=>cancelled===1);
+  const pause=env.app.pauseTask(task.id);gate.resolve({bytes:new Uint8Array()});await Promise.all([pause,rejected]);
+  assert.equal(opened.length,0);assert.equal(env.app.getSnapshot().tasks[0].state,'paused');await env.app.stop();
+});
+
+test('default browser cannot hijack an existing assistance request or a deleted library item',async()=>{
+  for(const hasRequest of [false,true]){
+    const task={...localFixture(),...(hasRequest?{requestID:'Existing',requestURL:'https://www.ablesci.com/assist/detail?id=Existing'}:{})};
+    const env=environment({initialTasks:[task]});const parent=env.addItem(item(1));if(!hasRequest)parent.deleted=true;
+    env.Zotero.launchURL=()=>{throw new Error('must not open');};await env.app.start();
+    await assert.rejects(env.app.openSystemBrowserTask(task.id),hasRequest?/科研通/:/删除/);assert.equal(env.submissions.length,0);await env.app.stop();
+  }
+});
+
+test('pause waits for browser cleanup before local PDF import is available',async()=>{
+  const task=localFixture(),gate=deferred();let began=false,finished=false;
+  const env=environment({initialTasks:[task],pickPDF:async()=>null,edgeAcquire:{async acquire(){began=true;return gate.promise;}}});env.addItem(item(1));await env.app.start();await env.app.openExternalTask(task.id);await until(()=>began);
+  const pausing=env.app.pauseTask(task.id).then(()=>{finished=true;});await settle();assert.equal(finished,false);await assert.rejects(env.app.importLocalPDF(task.id),/仍在处理/);
+  gate.resolve({bytes:new Uint8Array()});await pausing;assert.equal((await env.app.importLocalPDF(task.id)).cancelled,true);await env.app.stop();
+});
+
+test('missing browser page reports an actionable error without silently launching a second browser',async()=>{
+  const task=localFixture(),gate=deferred();let began=false,calls=0;
+  const env=environment({initialTasks:[task],edgeAcquire:{async acquire(){calls++;began=true;return gate.promise;},async focus(){return false;}}});env.addItem(item(1));await env.app.start();
+  await assert.rejects(env.app.focusExternalTask(task.id),/已停止/);assert.equal(calls,0);
+  await env.app.openExternalTask(task.id);await until(()=>began);await assert.rejects(env.app.focusExternalTask(task.id),/未就绪或已关闭/);assert.equal(calls,1);
+  const pausing=env.app.pauseTask(task.id);gate.resolve({bytes:new Uint8Array()});await pausing;await env.app.stop();
 });

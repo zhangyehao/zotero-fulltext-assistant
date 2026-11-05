@@ -51,6 +51,7 @@
 #fta-preferences .fta-row-note{font-size:.92em;margin-top:6px;color:light-dark(#765e38,#dfc89f);white-space:pre-wrap;overflow-wrap:anywhere}
 #fta-preferences .fta-row-actions{display:flex;flex-wrap:wrap;gap:7px;margin-top:8px}
 #fta-preferences .fta-row-actions button{font-size:.9em;min-height:26px;padding:3px 9px}
+#fta-preferences .fta-browser-hint{flex:1 1 240px;max-width:440px;align-self:center;font-size:.86em}
 #fta-preferences .fta-binding-panel{margin-top:10px;padding:12px;border:1px solid light-dark(#d7e1e8,#526577);border-radius:5px;background:light-dark(#f5f8fa,#2b3744)}
 #fta-preferences .fta-binding-panel label{display:block;font-size:.92em;margin-bottom:7px}
 #fta-preferences .fta-binding-panel .fta-actions{margin-bottom:0}

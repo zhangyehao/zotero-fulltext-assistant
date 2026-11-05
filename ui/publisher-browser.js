@@ -25,7 +25,7 @@ FulltextPublisherWindow.onChromeDocumentEvent(window, "load", async () => {
     let text = browser.contentTitle || "";
     try { text += " " + (browser.contentDocument?.body?.innerText || "").slice(0, 4000); } catch (_) {}
     if (/just a moment|verify (?:that )?you are human|verifying you are human|performing security verification|checking your browser|验证您是真人/i.test(text)) {
-      status.textContent = "网站正在进行真人验证。Cloudflare 等验证可能不支持 Zotero 内嵌浏览器；若手动点击后仍循环，请点“系统浏览器打开”，下载后用“导入本地 PDF”。插件不会自动操作验证码。";
+      status.textContent = "网站正在进行真人验证。若验证反复出现，可选择“专用 Edge 自动获取”，或用“默认浏览器手动下载”后导入本地 PDF。专用 Edge 与日常浏览器登录独立；插件不会自动操作验证码，验证能否通过由网站决定。";
     }
   }
   function updateAddress() {
@@ -105,12 +105,35 @@ FulltextPublisherWindow.onChromeDocumentEvent(window, "load", async () => {
   document.getElementById("publisher-reload").addEventListener("click", () => selected.browser.reload());
   document.getElementById("publisher-home").addEventListener("click", () => navigate(selected.browser, url));
   remember.disabled = !publisherSession;
-  document.getElementById("publisher-external").addEventListener("click", async () => {
+  const externalButton = document.getElementById("publisher-external");
+  externalButton.disabled = !taskId || typeof app?.openExternalTask !== "function";
+  externalButton.addEventListener("click", async () => {
+    if (externalButton.disabled) return;
+    externalButton.disabled = true;
     try {
-      if (taskId && app?.openExternalTask) await app.openExternalTask(taskId);
-      else Zotero.launchURL(FulltextPublisherWindow.httpURL(url));
-      status.textContent = "已在系统浏览器打开论文。两个浏览器的登录状态相互独立；下载 PDF 后可直接导入此文献。";
+      await app.openExternalTask(taskId);
+      status.textContent = "已启动全文助手专用 Edge 窗口。请在该窗口登录或完成网站验证；插件会自动等待可下载的 PDF 并保存到原文献。可在任务列表暂停或继续获取。";
     } catch (error) {status.textContent = errorText(error);}
+    finally {if (!closing) externalButton.disabled = !taskId || typeof app?.openExternalTask !== "function";}
+  });
+  const systemButton = document.getElementById("publisher-system");
+  systemButton.disabled = Boolean(taskId) && typeof app?.openSystemBrowserTask !== "function";
+  systemButton.addEventListener("click", async () => {
+    if (systemButton.disabled) return;
+    systemButton.disabled = true;
+    try {
+      if (taskId) {
+        const result = await app.openSystemBrowserTask(taskId);
+        if (result?.alreadyImported) {
+          status.textContent = "PDF 已保存到原文献，无需再次下载。请在全文助手的“已获取”中打开全文。";
+          return;
+        }
+      } else await Zotero.launchURL(FulltextPublisherWindow.httpURL(url));
+      status.textContent = taskId
+        ? "已在默认浏览器打开论文。请自行下载 PDF，再点击本窗口的“导入本地 PDF”或任务中的“选择已下载的PDF”保存到原文献；插件不会监测默认浏览器的下载。"
+        : "已在默认浏览器打开论文。请自行下载 PDF；此页面未关联文献，请回到对应 Zotero 条目添加附件。插件不会监测默认浏览器的下载。";
+    } catch (error) {status.textContent = errorText(error);}
+    finally {if (!closing) systemButton.disabled = Boolean(taskId) && typeof app?.openSystemBrowserTask !== "function";}
   });
   const importButton = document.getElementById("publisher-import");
   importButton.disabled = !taskId || !app?.importLocalPDF;
