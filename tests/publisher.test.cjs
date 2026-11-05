@@ -99,6 +99,64 @@ test('unavailable pages report fallback status without inventing download URLs',
   assert.equal((await login.publisher.acquire(login.item)).state,'needs_login');
 });
 
+// Synthetic access markup based on Elsevier's documented article controls;
+// it is not a captured authenticated page for the article below.
+// https://www.elsevier.support/sciencedirect/answer/how-do-i-get-access-to-sciencedirect-from-anywhere
+// https://www.elsevier.support/sciencedirect/answer/how-do-i-buy-an-article-or-chapter
+const scienceDirectArticle='https://www.sciencedirect.com/science/article/pii/S002839081400478X';
+const scienceDirectDOI='10.1016/j.neuropharm.2014.12.027';
+const scienceDirectTitle='Social feeding in Caenorhabditis elegans is modulated by antipsychotic drugs and calmodulin and may serve as a protophenotype for asociality';
+const scienceDirectPage=controls=>html('<meta name="citation_doi" content="'+scienceDirectDOI+'"><main><h1>'+scienceDirectTitle+'</h1>'+controls+'<h2>Abstract</h2><p>Article abstract.</p></main>');
+
+test('ScienceDirect institutional access labels are recognized without treating personal sign-in as subscription access',()=>{
+  const env=setup();
+  for(const label of ['Access through your organization','Check access through your organisation','Sign in via your organization','Sign in to your organization','Access through your institution','Institutional login']){
+    const found=env.api.discover(parseHTML(scienceDirectPage('<button>'+label+'</button>')).document,scienceDirectArticle,scienceDirectDOI);
+    assert.equal(found.needsLogin,true,label);assert.equal(found.accessReason,'institutional_access',label);assert.equal(found.candidates.length,0);
+  }
+  const ordinary=env.api.discover(parseHTML(scienceDirectPage('<button>Sign in</button><a href="/register">Create account</a>')).document,scienceDirectArticle,scienceDirectDOI);
+  assert.equal(ordinary.needsLogin,false);assert.equal(ordinary.accessReason,null);
+});
+
+test('ScienceDirect institution and purchase page returns needs_login with a default-browser instruction',async()=>{
+  const markup=scienceDirectPage('<div><button>Access through your organization</button><a href="/purchase/article">Purchase PDF</a></div><h2>Article preview</h2>');
+  const env=setup({url:scienceDirectArticle,doi:scienceDirectDOI,pages:{[scienceDirectArticle]:markup,['https://doi.org/'+scienceDirectDOI]:{url:scienceDirectArticle,body:markup}},rendered:{[scienceDirectArticle]:markup}});
+  const result=await env.publisher.acquire(env.item);
+  assert.equal(result.state,'needs_login');assert.equal(result.accessReason,'institutional_access');assert.equal(result.url,scienceDirectArticle);
+  assert.match(result.message,/默认浏览器/);assert.match(result.message,/机构登录/);assert.match(result.message,/点击 PDF 下载/);assert.match(result.message,/匹配的新 PDF 会自动入库/);assert.equal(env.imports.length,0);
+  assert(env.requests.every(request=>request.method==='GET'&&!request.url.includes('/purchase/')));
+});
+
+test('purchase and ScienceDirect preview controls are access restrictions, not an absent article',async()=>{
+  for(const [controls,reason] of [['<button>Purchase PDF</button>','purchase'],['<h2>Article preview</h2>','preview']]){
+    const markup=scienceDirectPage(controls),env=setup({url:scienceDirectArticle,pages:{[scienceDirectArticle]:markup},rendered:{[scienceDirectArticle]:markup}});
+    const result=await env.publisher.acquire(env.item);assert.equal(result.state,'needs_login');assert.equal(result.accessReason,reason);assert.match(result.message,/默认浏览器/);assert.match(result.message,/机构登录/);assert.equal(env.imports.length,0);
+  }
+  const generic=setup(),found=generic.api.discover(parseHTML(html('<h2>Article preview</h2>')).document,'https://publisher.test/article/one','');
+  assert.equal(found.needsLogin,false);
+});
+
+test('footer navigation hidden widgets and scripts do not turn ordinary content into an access gate',async()=>{
+  const noise='<footer><a href="/access">Access through your organization</a><button>Purchase PDF</button><input type="password"></footer><nav><a href="/login">Institutional login</a></nav><div hidden><button>Access through your institution</button></div><div aria-hidden="true"><input type="password"><h2>Article preview</h2></div><script>const text="Sign in to download";</script>';
+  const markup=html('<main><h1>Public article</h1><p>Abstract available</p></main>'+noise),env=setup({pages:{'https://publisher.test/article/one':markup},rendered:{'https://publisher.test/article/one':markup}});
+  const found=env.api.discover(parseHTML(markup).document,scienceDirectArticle,'');assert.equal(found.needsLogin,false);assert.equal(found.accessReason,null);
+  const result=await env.publisher.acquire(env.item);assert.equal(result.state,'not_found');assert.equal(env.imports.length,0);
+});
+
+test('a public PDF still imports despite footer sign-in or a visible institutional access option',async()=>{
+  for(const login of ['<footer><a href="/login">Institutional login</a></footer>','<button>Access through your organization</button><button>Purchase PDF</button>']){
+    const markup=scienceDirectPage(login+'<meta name="citation_pdf_url" content="/article.pdf">'),file='https://www.sciencedirect.com/article.pdf';
+    const env=setup({url:scienceDirectArticle,doi:scienceDirectDOI,pages:{[scienceDirectArticle]:markup,[file]:{bytes:pdf(),type:'application/pdf'}}});
+    const result=await env.publisher.acquire(env.item);assert.equal(result.source,'publisher');assert.equal(env.imports.length,1);assert.equal(env.hidden.length,0);assert.equal(result.state,undefined);
+  }
+});
+
+test('an institutional access page still allows an independent open-access PDF',async()=>{
+  const markup=scienceDirectPage('<button>Access through your organization</button>'),file='https://repository.test/paper.pdf';
+  const env=setup({url:scienceDirectArticle,doi:scienceDirectDOI,pages:{[scienceDirectArticle]:markup,['https://doi.org/'+scienceDirectDOI]:{url:scienceDirectArticle,body:markup},[file]:{bytes:pdf(),type:'application/pdf'}},rendered:{[scienceDirectArticle]:markup},oa:[{url:file}]});
+  const result=await env.publisher.acquire(env.item);assert.equal(result.source,'open_access');assert.equal(env.imports.length,1);
+});
+
 test('discovery excludes supplemental/reference files and refuses conflicting article DOI',()=>{
   const env=setup();
   const document=parseHTML(html('<meta name="citation_doi" content="10.1234/right"><div id="references"><a href="/cited.pdf">PDF</a></div><a href="/supplement.pdf">Supplementary PDF</a><a href="/article.pdf">Download PDF</a>')).document;
@@ -116,7 +174,7 @@ test('PDF validation rejects tiny, truncated and HTML payloads',()=>{
 test('Cloudflare response header stops repeated rendering and same-domain attempts until manual retry',async()=>{
   const address='https://publisher.test/article/one';
   const env=setup({pages:{[address]:{status:403,headers:{'cf-mitigated':'challenge'},body:html('Just a moment')}}});
-  const result=await env.publisher.acquire(env.item);assert.equal(result.state,'needs_login');assert.equal(result.challenge,'cloudflare');assert.match(result.message,/系统浏览器/);assert.equal(env.hidden.length,0);
+  const result=await env.publisher.acquire(env.item);assert.equal(result.state,'needs_login');assert.equal(result.challenge,'cloudflare');assert.match(result.message,/默认浏览器/);assert.match(result.message,/点击 PDF 下载/);assert.match(result.message,/匹配的新 PDF 会自动入库/);assert.equal(env.hidden.length,0);
   await env.publisher.acquire({...env.item,id:2});assert.equal(env.requests.length,1);
   env.publisher.clearAccessGate(address);await env.publisher.acquire({...env.item,id:3});assert.equal(env.requests.length,2);
 });

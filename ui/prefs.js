@@ -31,29 +31,40 @@
       available: "文件可下载", downloading: "正在下载", validating: "校验文件",
       needs_review: "需要核对", paused: "已暂停", imported: "已获取", completed: "已获取",
       error: "需要处理", failed: "需要处理", captcha: "需要验证", closed: "求助已关闭",
-      browser_waiting: "等待网页就绪", browser_scanning: "正在检测 PDF", browser_downloading: "浏览器下载中"
+      browser_waiting: "等待恢复", browser_scanning: "等待恢复", browser_downloading: "等待恢复",
+      manual_waiting: "等待浏览器下载", manual_review: "待核对 PDF"
     };
     const accountLabels = { authenticated: "已登录", logged_in: "已登录", signed_out: "未登录", logged_out: "未登录", pending_login: "需要登录", expired: "登录已过期", checking: "正在登录", logging_in: "正在登录", captcha: "需要验证", error: "登录失败", unknown: "待验证", unverified: "待验证" };
     const filterLabels = { unfinished: "未完成", all: "全部历史", success: "已获取", login: "需网页登录", fallback: "待兜底", active: "进行中" };
-    const sourceLabels = { publisher: "出版社网页", rendered_publisher: "出版社网页", open_access: "开放获取", existing: "已有附件", ablesci: "科研通", local_file: "本地 PDF", edge_browser: "Edge 浏览器" };
+    const sourceLabels = { publisher: "出版社网页", rendered_publisher: "出版社网页", open_access: "开放获取", existing: "已有附件", ablesci: "科研通", local_file: "本地 PDF", edge_browser: "Edge 浏览器", browser_download: "浏览器下载" };
     const browserNotes = {
-      browser_waiting: "网站允许专用 Edge 访问论文后，插件会继续查找 PDF；验证反复出现时可改用默认浏览器。",
-      browser_scanning: "正在从浏览器页面查找可下载的 PDF，取得后会自动保存到原文献。",
-      browser_downloading: "正在通过浏览器下载 PDF，完成后会自动保存到原文献。"
+      manual_waiting: "已开始检查下载文件夹。请在默认浏览器完成验证并点击 PDF 下载，保存到配置文件夹；明确匹配的新 PDF 会自动添加到原文献。",
+      manual_review: "无法自动确认所选 PDF 的论文身份。请先预览并核对标题、作者和 DOI，再明确确认。",
+      browser_waiting: "请通过默认浏览器下载全文，或发起科研通求助。",
+      browser_scanning: "请通过默认浏览器下载全文，或发起科研通求助。",
+      browser_downloading: "请通过默认浏览器下载全文，或发起科研通求助。"
     };
     const manualDownloadMessage = result => result?.alreadyImported
       ? "PDF 已保存到原文献，无需再次下载。可在“已获取”中打开全文。"
-      : "已在默认浏览器打开论文。请自行下载 PDF，再点击“选择已下载的PDF”导入原文献；插件不会监测默认浏览器或自动导入文件。";
-    const isBrowserActive = task => ["browser_waiting", "browser_scanning", "browser_downloading"].includes(task.state);
+      : result?.watching === false
+        ? "已打开默认浏览器，但下载文件夹检查尚未启动。请先添加下载文件夹，或点击“选择已下载的PDF”导入。"
+        : "已在默认浏览器打开论文，并开始检查下载文件夹。请自行完成网站验证、点击 PDF 下载并保存到配置文件夹；明确匹配的新 PDF 会自动入库，插件不会代你操作浏览器。";
+    const isBrowserActive = task => task.state === "manual_waiting";
+    const isBrowserRoute = task => ["manual", "browser"].includes(task.acquisitionMode) || ["manual_waiting", "manual_review", "browser_waiting", "browser_scanning", "browser_downloading"].includes(task.state);
     const isAcquired = task => ["imported", "completed"].includes(task.state);
     const currentTasks = () => Array.isArray(snapshot.tasks) ? snapshot.tasks : [];
-    const currentPoints = () => Number.isSafeInteger(snapshot.settings?.points) && snapshot.settings.points >= 1 && snapshot.settings.points <= 10000 ? snapshot.settings.points : 10;
-    const isFallback = task => !task.requestURL && !task.requestID && !task.attachmentID && (task.acquisitionMode === "browser" ? ["error", "failed", "not_found"] : ["not_found", "needs_login", "pending_login", "paused", "error", "failed"]).includes(task.state);
+    const currentPoints = () => {
+      const value = String($("fta-pref-points").value || "").trim();
+      const points = /^[1-9]\d*$/.test(value) ? Number(value) : NaN;
+      return Number.isSafeInteger(points) && points <= 10000 ? points : null;
+    };
+    const pointsText = () => currentPoints() === null ? "请填写有效积分" : currentPoints() + " 积分";
+    const isFallback = task => !task.requestURL && !task.requestID && !task.attachmentID && ["not_found", "needs_login", "pending_login", "paused", "error", "failed", "needs_review", "captcha", "manual_waiting", "manual_review", "browser_waiting", "browser_scanning", "browser_downloading"].includes(task.state);
     const canAssist = task => isFallback(task) && Boolean(String(task.doi || "").trim());
     function matchesFilter(task, filter) {
       if (filter === "unfinished") return !isAcquired(task);
       if (filter === "success") return isAcquired(task);
-      if (filter === "login") return ["needs_login", "pending_login", "captcha", "browser_waiting"].includes(task.state);
+      if (filter === "login") return ["needs_login", "pending_login", "captcha"].includes(task.state);
       if (filter === "fallback") return isFallback(task);
       if (filter === "active") return isBrowserActive(task) || ["waiting", "submitting", "downloading", "queued", "finding", "searching", "resolving", "checking_account", "validating", "ready_to_check"].includes(task.state);
       return true;
@@ -77,15 +88,49 @@
     function button(label, method, args, disabled = false, success = "") {
       const node = make("button", "", label);
       node.type = "button";
-      node.disabled = busy || disabled || typeof app[method] !== "function";
-      node.addEventListener("click", () => run(() => app[method](...args), success));
+      const budgetAction = ["requestAssist", "retryTask"].includes(method) && Object.prototype.hasOwnProperty.call(args[args.length - 1] || {}, "points");
+      const points = budgetAction ? args[args.length - 1].points : null;
+      node.disabled = busy || disabled || typeof app[method] !== "function" || budgetAction && (points === null || typeof app.saveSettings !== "function");
+      node.addEventListener("click", () => {
+        if (node.disabled) return;
+        run(async () => {
+          if (budgetAction) await saveActionPoints(points);
+          return app[method](...args);
+        }, success);
+      });
       return node;
+    }
+    async function saveActionPoints(points) {
+      if (points === null || !Number.isSafeInteger(points) || points < 1 || points > 10000) throw new Error("悬赏积分必须是 1–10000 的整数。");
+      if (currentPoints() !== points) throw new Error("悬赏积分已变化，请核对更新后的按钮金额再操作。");
+      await app.saveSettings({ points });
+      const saved = app.getSnapshot()?.settings || {};
+      settingsDirty = currentPoints() !== saved.points || Number($("fta-pref-poll").value) !== saved.pollSeconds || $("fta-pref-auto-download").checked !== (saved.autoDownload !== false);
+      status(settingsDirty ? "求助积分已保存；其他设置仍有未保存的更改" : "设置已保存", false, "fta-pref-save-state");
     }
     function assistMessage(result) {
       if (!Number.isSafeInteger(result?.accepted)) return "已转入科研通求助流程，进度见任务列表。";
       const accepted = result.accepted;
       const skipped = Number.isSafeInteger(result.skipped) ? result.skipped : 0;
       return (accepted ? "已将 " + accepted + " 篇转入科研通求助流程。" : "没有新增求助任务。") + (skipped ? "已跳过 " + skipped + " 项，请查看当前任务状态。" : "进度见任务列表。");
+    }
+    function directoryPauseNote(result) {
+      return Number.isSafeInteger(result?.paused) && result.paused > 0 ? " 已暂停 " + result.paused + " 个等待下载的任务；请点击各任务的“浏览器下载并自动入库”，按新目录重新开始检查。" : "";
+    }
+    function renderDirectories() {
+      const list = $("fta-pref-download-directories");
+      list.replaceChildren();
+      const values = Array.isArray(snapshot.settings?.downloadDirectories) ? snapshot.settings.downloadDirectories : snapshot.settings?.downloadDirectory ? [snapshot.settings.downloadDirectory] : [];
+      const directories = [...new Set(values.filter(value => typeof value === "string" && value.trim()))];
+      if (!directories.length) list.append(make("p", "fta-note", "尚未配置下载文件夹，请添加浏览器保存 PDF 的位置。"));
+      for (const directory of directories) {
+        const row = make("div", "fta-actions fta-inline-field");
+        const path = make("input");
+        path.type = "text"; path.readOnly = true; path.value = directory; path.title = directory;
+        path.setAttribute("aria-label", "下载文件夹路径");
+        row.append(path, button("移除", "removeDownloadDirectory", [directory], false, result => (result?.changed === false ? "下载文件夹配置未改变。" : "已移除该下载文件夹。文件夹内的文件保持不变。") + directoryPauseNote(result)));
+        list.append(row);
+      }
     }
     function renderSelection() {
       $("fta-pref-bulk-actions").hidden = taskFilter === "success";
@@ -97,10 +142,11 @@
       all.checked = eligible.length > 0 && selected.length === eligible.length;
       all.indeterminate = selected.length > 0 && selected.length < eligible.length;
       const action = $("fta-pref-bulk-assist");
-      action.disabled = busy || !selected.length || typeof app.requestAssist !== "function";
-      action.textContent = (selected.length ? "为所选 " + selected.length + " 篇发起科研通求助" : "为所选文献发起科研通求助") + "（每篇 " + currentPoints() + " 积分）";
-      const totalPoints = selected.length * currentPoints();
-      $("fta-pref-selection-summary").textContent = selected.length ? "已选 " + selected.length + " 篇 · 本次悬赏合计 " + totalPoints + " 积分" : "未选择文献";
+      const points = currentPoints();
+      action.disabled = busy || !selected.length || points === null || typeof app.requestAssist !== "function" || typeof app.saveSettings !== "function";
+      action.dataset.points = points === null ? "" : String(points);
+      action.textContent = (selected.length ? "为所选 " + selected.length + " 篇发起科研通求助" : "为所选文献发起科研通求助") + (points === null ? "（请填写有效积分）" : "（每篇 " + points + " 积分）");
+      $("fta-pref-selection-summary").textContent = selected.length ? "已选 " + selected.length + " 篇 · " + (points === null ? "请填写 1–10000 的整数积分" : "本次悬赏合计 " + selected.length * points + " 积分") : "未选择文献";
     }
     function renderRequestTargets() {
       const available = currentTasks().filter(task => task.itemID && !task.requestID && !task.requestURL);
@@ -227,7 +273,7 @@
         const badge = make("span", "fta-status-badge", unboundAvailable ? "待关联文献" : taskLabels[task.state] || "待处理");
         if (acquired) badge.dataset.tone = "success";
         if (["error", "failed"].includes(task.state)) badge.dataset.tone = "error";
-        if (["pending_login", "needs_login", "not_found", "needs_review", "captcha", "submission_unknown", "browser_waiting"].includes(task.state)) badge.dataset.tone = "warning";
+        if (["pending_login", "needs_login", "not_found", "needs_review", "captcha", "submission_unknown", "manual_review"].includes(task.state)) badge.dataset.tone = "warning";
         if (unboundAvailable) badge.dataset.tone = "warning";
         main.append(badge);
         row.append(main);
@@ -235,34 +281,15 @@
         const routeLabel = task.downloadRoute === "highspeed" ? "免积分高速" : task.downloadRoute === "normal" ? "普通线路" : "";
         const showRoute = acquired ? task.source === "ablesci" : ["downloading", "validating"].includes(task.state) && Boolean(task.source === "ablesci" || task.requestID || task.requestURL);
         const route = showRoute ? routeLabel : "";
-        const pointsLabel = task.acquisitionMode !== "browser" && task.requestedPoints ? (task.requestID ? "悬赏 " : "求助预算 ") + task.requestedPoints + " 积分" : "";
+        const pointsLabel = task.requestID && task.requestedPoints ? "悬赏 " + task.requestedPoints + " 积分" : "";
         const meta = (acquired ? [completedDate ? "完成 " + completedDate : "完成日期未记录", "来源：" + (sourceLabels[task.source] || "未记录"), route, task.doi] : [task.doi, task.requestID ? "求助 " + task.requestID : "", pointsLabel, route ? "来源：科研通" : "", route, task.lastCheckedAt ? "最近检查 " + dateText(task.lastCheckedAt) : ""]).filter(Boolean);
         if (meta.length) row.append(make("div", "fta-row-meta", meta.join(" · ")));
         const note = unboundAvailable ? "应助文件已就绪，但此任务仅跟踪求助，尚未关联 Zotero 文献。请先关联文献，才能下载到文库。" : acquired ? "" : task.message || task.lastError || browserNotes[task.state];
         if (note) row.append(make("p", "fta-row-note", note));
         const actions = make("div", "fta-row-actions");
-        if (isBrowserActive(task)) {
-          actions.append(button("查看专用 Edge", "focusExternalTask", [task.id]));
-          actions.append(button("暂停", "pauseTask", [task.id], false, "已暂停浏览器自动获取。需要继续时可点击“继续专用 Edge 获取”。"));
-          actions.append(button("默认浏览器手动下载", "openSystemBrowserTask", [task.id], !task.itemID, manualDownloadMessage));
-          row.append(actions, make("p", "fta-note", "若验证反复出现，可切换到默认浏览器手动下载；插件会先停止此任务的自动获取，下载后请再选择 PDF 导入。"));
-          list.append(row);
-          continue;
-        }
-        if (task.acquisitionMode === "browser" && !task.requestID && !task.requestURL && ["paused", "error", "failed", "not_found"].includes(task.state)) {
-          actions.append(button(task.state === "paused" ? "继续专用 Edge 获取" : "重试专用 Edge 获取", "openExternalTask", [task.id], !task.itemID, "已启动专用 Edge 自动获取，请在该窗口完成所需操作，进度会自动更新。"));
-          actions.append(button("默认浏览器手动下载", "openSystemBrowserTask", [task.id], !task.itemID, manualDownloadMessage));
-          if (task.itemID) actions.append(button("选择已下载的PDF", "importLocalPDF", [task.id], false, result => result?.cancelled ? "已取消选择文件。" : "本地 PDF 处理结果已更新。"));
-          if (isFallback(task)) {
-            actions.append(button("科研通求助（" + currentPoints() + " 积分）", "requestAssist", [[task.id], { points: currentPoints() }], !canAssist(task), assistMessage));
-            if (!canAssist(task)) actions.append(make("span", "fta-secondary", "补全 DOI 后可求助"));
-          }
-          row.append(actions, make("p", "fta-note", "默认浏览器使用自己的登录状态。请自行下载，再点击“选择已下载的PDF”导入；插件不会监测该浏览器的下载。"));
-          list.append(row);
-          continue;
-        }
         const done = ["imported", "completed", "closed"].includes(task.state);
-        if (!acquired) actions.append(button("立即检查", "checkTask", [task.id], done));
+        const hasRequest = Boolean(task.requestID || task.requestURL);
+        if (!acquired && (!isBrowserRoute(task) || hasRequest)) actions.append(button("立即检查", "checkTask", [task.id], done));
         if (task.state === "available" && task.itemID) actions.append(button("下载到文库", "downloadTask", [task.id], false, "下载结果已更新。"));
         if (unboundAvailable) {
           const bind = make("button", "", "关联文献");
@@ -273,22 +300,27 @@
         }
         const openMethod = typeof app.openTask === "function" ? "openTask" : "openRequest";
         const canOpen = openMethod === "openTask" ? Boolean(task.attachmentID || task.requestURL || task.officialURL || task.doi) : Boolean(task.requestURL);
-        actions.append(button(task.attachmentID ? "打开全文" : task.requestURL ? "打开" : "打开网页", openMethod, [task.id], !canOpen));
-        if (task.itemID && !acquired && ["needs_login", "needs_review", "error", "failed", "not_found", "pending_login", "captcha", "paused"].includes(task.state)) {
-          if (!task.requestID && !task.requestURL) {
-            actions.append(button("专用 Edge 自动获取", "openExternalTask", [task.id], false, "已启动专用 Edge 自动获取，请在该窗口完成所需操作，进度会自动更新。"));
-            actions.append(make("span", "fta-secondary fta-browser-hint", "使用独立 Edge 会话；网站允许访问时自动获取 PDF，验证反复出现可改用默认浏览器。"));
-            actions.append(button("默认浏览器手动下载", "openSystemBrowserTask", [task.id], false, manualDownloadMessage));
-          }
-          actions.append(button("选择已下载的PDF", "importLocalPDF", [task.id], false, result => result?.cancelled ? "已取消选择文件。" : "本地 PDF 处理结果已更新。"));
+        actions.append(button(task.attachmentID ? "打开全文" : hasRequest ? "查看已有求助" : "打开网页", openMethod, [task.id], !canOpen));
+        if (task.itemID && !acquired && (isFallback(task) || isBrowserRoute(task) || ["needs_login", "needs_review", "error", "failed", "pending_login", "captcha", "paused"].includes(task.state))) {
+          if (!hasRequest) actions.append(button("浏览器下载并自动入库", "openSystemBrowserTask", [task.id], false, manualDownloadMessage));
+          actions.append(button("选择已下载的PDF", "importLocalPDF", [task.id], false, result => result?.cancelled ? "已取消选择文件。" : result?.needsReview ? "请先预览所选 PDF，核对后再确认导入。" : "本地 PDF 处理结果已更新。"));
         }
-        if (["paused", "error", "failed", "not_found", "needs_login", "pending_login", "needs_review"].includes(task.state)) {
+        if (task.state === "manual_review") {
+          if (task.pendingFilename) row.append(make("p", "fta-note", "待核对文件：" + task.pendingFilename));
+          if (task.pendingTitle) row.append(make("p", "fta-note", "待关联文献：" + task.pendingTitle));
+          if (task.pendingSummary) row.append(make("p", "fta-note", task.pendingSummary));
+          actions.append(button("预览待核对 PDF", "previewDownloadedPDF", [task.id], !task.pendingFilename, "请核对 PDF 的标题、作者和 DOI，再决定是否导入。"));
+          actions.append(button("我已核对，是这篇论文", "confirmDownloadedPDF", [task.id], !task.pendingFilename, "PDF 已保存到原文献。"));
+          actions.append(button("取消这次导入", "dismissDownloadedPDF", [task.id], false, "已取消，任务保留。可重新选择文件，或点击“浏览器下载并自动入库”重新开始检查。"));
+        }
+        if (isBrowserActive(task) && !hasRequest) actions.append(button("暂停监控", "pauseTask", [task.id], false, "已暂停下载文件夹检查；可重新点击“浏览器下载并自动入库”恢复。"));
+        else if (["paused", "error", "failed", "not_found", "needs_login", "pending_login", "needs_review"].includes(task.state) && (!isBrowserRoute(task) || hasRequest)) {
           const unsubmitted = !task.requestID && !task.requestURL;
-          actions.append(button(unsubmitted ? "按 " + currentPoints() + " 积分重试" : "重试", "retryTask", unsubmitted ? [task.id, { points: currentPoints() }] : [task.id], false, "任务已恢复。"));
+          actions.append(button(unsubmitted ? "按 " + pointsText() + "重试" : "重试", "retryTask", unsubmitted ? [task.id, { points: currentPoints() }] : [task.id], false, "任务已恢复。"));
         }
-        else if (!acquired) actions.append(button("暂停", "pauseTask", [task.id], done, task.requestURL ? "已暂停本地检查，网站上的求助仍然保留。" : "任务已暂停。"));
+        else if (!acquired && !isBrowserRoute(task)) actions.append(button("暂停", "pauseTask", [task.id], done, task.requestURL ? "已暂停本地检查，网站上的求助仍然保留。" : "任务已暂停。"));
         if (isFallback(task)) {
-          actions.append(button("科研通求助（" + currentPoints() + " 积分）", "requestAssist", [[task.id], { points: currentPoints() }], !canAssist(task), assistMessage));
+          actions.append(button("科研通求助（" + pointsText() + "）", "requestAssist", [[task.id], { points: currentPoints() }], !canAssist(task), assistMessage));
           if (!canAssist(task)) actions.append(make("span", "fta-secondary", "补全 DOI 后可求助"));
         }
         row.append(actions);
@@ -348,10 +380,11 @@
         $("fta-pref-poll").value = String(settings.pollSeconds ?? 60);
         $("fta-pref-auto-download").checked = settings.autoDownload !== false;
       }
+      renderDirectories();
       renderTasks();
       renderRequestTargets();
       renderMessages();
-      const methodButtons = { "fta-pref-save-login": "saveCredentialsAndLogin", "fta-pref-web-login": "openLogin", "fta-pref-logout": "logout", "fta-pref-save-settings": "saveSettings", "fta-pref-add-request": "addExistingRequest", "fta-pref-refresh-messages": "refreshMessages" };
+      const methodButtons = { "fta-pref-save-login": "saveCredentialsAndLogin", "fta-pref-web-login": "openLogin", "fta-pref-logout": "logout", "fta-pref-save-settings": "saveSettings", "fta-pref-add-request": "addExistingRequest", "fta-pref-refresh-messages": "refreshMessages", "fta-pref-choose-directory": "chooseDownloadDirectory", "fta-pref-detect-directories": "detectDownloadDirectories" };
       for (const [id, method] of Object.entries(methodButtons)) $(id).disabled = busy || typeof app[method] !== "function";
       for (const id of ["fta-pref-username", "fta-pref-password", "fta-pref-points", "fta-pref-poll", "fta-pref-auto-download", "fta-pref-request-url", "fta-pref-request-target"]) $(id).disabled = busy;
     }
@@ -375,11 +408,24 @@
       run(async () => { await app.saveCredentialsAndLogin({ username, password }); accountDirty = false; }, "账号已保存，请在打开的科研通网页完成登录。", true);
     });
     on($("fta-pref-web-login"), "click", () => run(() => app.openLogin(), "请在科研通网页完成登录或验证。"));
+    on($("fta-pref-choose-directory"), "click", () => {
+      if ($("fta-pref-choose-directory").disabled) return;
+      run(() => app.chooseDownloadDirectory(), result => result?.cancelled ? "已取消添加下载文件夹。" : (result?.changed === false ? "该下载文件夹已在列表中。" : "已添加下载文件夹。请将浏览器下载的 PDF 保存到列表中的任一文件夹。") + directoryPauseNote(result));
+    });
+    on($("fta-pref-detect-directories"), "click", () => {
+      if ($("fta-pref-detect-directories").disabled) return;
+      run(() => app.detectDownloadDirectories(), result => (Number.isSafeInteger(result?.added) && result.added > 0 ? "发现并添加了 " + result.added + " 个新下载目录。" : "未发现新的下载目录，现有配置保持不变。") + directoryPauseNote(result));
+    });
     on($("fta-pref-logout"), "click", () => run(async () => { await app.logout(); $("fta-pref-password").value = ""; accountDirty = false; }, "已退出插件中的科研通登录。"));
-    for (const id of ["fta-pref-points", "fta-pref-poll", "fta-pref-auto-download"]) on($(id), "input", () => { settingsDirty = true; status("有未保存的更改", false, "fta-pref-save-state"); });
+    for (const id of ["fta-pref-points", "fta-pref-poll", "fta-pref-auto-download"]) on($(id), "input", () => {
+      settingsDirty = true;
+      status(currentPoints() === null ? "悬赏积分必须是 1–10000 的整数。" : "有未保存的更改", currentPoints() === null, "fta-pref-save-state");
+      $("fta-pref-points").setAttribute("aria-invalid", String(currentPoints() === null));
+      renderTasks();
+    });
     on($("fta-pref-settings-form"), "submit", event => {
       event.preventDefault();
-      const points = Number($("fta-pref-points").value);
+      const points = currentPoints();
       const pollSeconds = Number($("fta-pref-poll").value);
       const autoDownload = $("fta-pref-auto-download").checked;
       if (!Number.isSafeInteger(points) || points < 1 || points > 10000) return status("悬赏积分必须是 1–10000 的整数。", true, "fta-pref-save-state");
@@ -411,10 +457,12 @@
       renderTasks();
     });
     on($("fta-pref-bulk-assist"), "click", () => {
+      if (busy || $("fta-pref-bulk-assist").disabled) return;
       const ids = currentTasks().filter(task => matchesFilter(task, taskFilter) && canAssist(task) && selectedTasks.has(task.id)).map(task => task.id);
       if (!ids.length || typeof app.requestAssist !== "function") return;
-      const points = currentPoints();
+      const points = $("fta-pref-bulk-assist").dataset.points ? Number($("fta-pref-bulk-assist").dataset.points) : null;
       run(async () => {
+        await saveActionPoints(points);
         const result = await app.requestAssist(ids, { points });
         selectedTasks.clear();
         return result;

@@ -13,8 +13,10 @@ let subscriptions = 0;
 const calls = [];
 let bindingCandidates = [];
 let cancelLocalImport = false;
+let reviewLocalImport = false;
+let cancelDirectory = false;
 const model = {
-  version: "0.2.0", settings: { points: 10, pollSeconds: 60, autoDownload: true },
+  version: "0.5.0", settings: { points: 10, pollSeconds: 60, autoDownload: true, downloadDirectories: ["D:\\Downloads"], downloadDirectory: "D:\\Downloads" },
   session: { status: "signed_out", username: "", hasSavedPassword: false, message: "尚未登录" },
   tasks: [], messages: [], messagesStatus: { state: "idle" }
 };
@@ -28,7 +30,24 @@ const app = {
   },
   openLogin: async () => calls.push(["web"]),
   logout: async () => { calls.push(["logout"]); model.session.status = "signed_out"; renderListener(); },
-  saveSettings: async settings => { calls.push(["save", { ...settings }]); model.settings = { ...settings }; renderListener(); },
+  saveSettings: async settings => { calls.push(["save", { ...settings }]); model.settings = { ...model.settings, ...settings }; renderListener(); },
+  chooseDownloadDirectory: async () => {
+    calls.push(["chooseDirectory"]);
+    if (cancelDirectory) return { cancelled: true };
+    model.settings.downloadDirectories.push("D:\\Research"); renderListener();
+    return { cancelled: false, directory: "D:\\Research" };
+  },
+  removeDownloadDirectory: async directory => {
+    calls.push(["removeDirectory", directory]);
+    model.settings.downloadDirectories = model.settings.downloadDirectories.filter(value => value !== directory);
+    model.settings.downloadDirectory = model.settings.downloadDirectories[0] || ""; renderListener();
+  },
+  detectDownloadDirectories: async () => {
+    calls.push(["detectDirectories"]);
+    const added = model.settings.downloadDirectories.includes("D:\\BrowserDownloads") ? 0 : 1;
+    if (added) model.settings.downloadDirectories.push("D:\\BrowserDownloads");
+    renderListener(); return { added, directories: model.settings.downloadDirectories };
+  },
   checkTask: async id => calls.push(["check", id]),
   openRequest: async id => calls.push(["open", id]),
   pauseTask: async id => { calls.push(["pause", id]); model.tasks.find(task => task.id === id).state = "paused"; renderListener(); },
@@ -39,7 +58,7 @@ const app = {
     const acceptedIDs = [], skippedIDs = [];
     for (const id of requested) {
       const task = model.tasks.find(value => value.id === id);
-      if (!task?.doi || task.requestID || task.requestURL || task.attachmentID || !["not_found", "needs_login", "pending_login", "paused", "error", "failed"].includes(task.state)) { skippedIDs.push(id); continue; }
+      if (!task?.doi || task.requestID || task.requestURL || task.attachmentID || !["not_found", "needs_login", "pending_login", "paused", "error", "failed", "needs_review", "captcha", "manual_waiting", "manual_review", "browser_waiting", "browser_scanning", "browser_downloading"].includes(task.state)) { skippedIDs.push(id); continue; }
       task.state = "submitting";
       task.acquisitionMode = "";
       if (options?.points) task.requestedPoints = options.points;
@@ -58,27 +77,36 @@ const app = {
     if (model.settings.autoDownload) { task.state = "imported"; task.attachmentID = 501; task.completedAt = "2026-11-04T14:00:00Z"; task.source = "ablesci"; }
     renderListener();
   },
-  openExternalTask: async id => {
-    calls.push(["external", id]);
-    Object.assign(model.tasks.find(task => task.id === id), { acquisitionMode: "browser", state: "browser_waiting", lastError: "" });
-    renderListener();
-    return { started: true };
-  },
-  focusExternalTask: async id => calls.push(["focusExternal", id]),
+  openExternalTask: async () => { throw new Error("Removed dedicated Edge API must not be called"); },
+  focusExternalTask: async () => { throw new Error("Removed dedicated Edge API must not be called"); },
   openSystemBrowserTask: async id => {
     calls.push(["systemBrowser", id]);
     const task = model.tasks.find(value => value.id === id);
-    if (["browser_waiting", "browser_scanning", "browser_downloading"].includes(task.state)) task.state = "paused";
+    Object.assign(task, { state: "manual_waiting", acquisitionMode: "manual" });
     renderListener();
-    return { opened: true };
+    return { opened: true, watching: true };
   },
   importLocalPDF: async id => {
     calls.push(["localPDF", id]);
     if (cancelLocalImport) return { cancelled: true };
     const task = model.tasks.find(value => value.id === id);
+    if (reviewLocalImport) {
+      Object.assign(task, { state: "manual_review", acquisitionMode: "manual", pendingFilename: "<img src=x onerror=bad>.pdf", pendingTitle: "<b>PDF title</b>", pendingSummary: "身份仍不确定，请核对。" });
+      renderListener(); return { needsReview: true, identity: { status: "unknown" } };
+    }
     Object.assign(task, { state: "imported", attachmentID: 600, completedAt: "2026-11-04T13:00:00Z", source: "local_file" });
     renderListener();
     return { cancelled: false, attachmentID: 600 };
+  },
+  previewDownloadedPDF: async id => calls.push(["previewPDF", id]),
+  confirmDownloadedPDF: async id => {
+    calls.push(["confirmPDF", id]);
+    Object.assign(model.tasks.find(value => value.id === id), { state: "imported", attachmentID: 601, source: "local_file", pendingFilename: "" });
+    renderListener(); return { cancelled: false, attachmentID: 601 };
+  },
+  dismissDownloadedPDF: async id => {
+    calls.push(["dismissPDF", id]);
+    Object.assign(model.tasks.find(value => value.id === id), { state: "paused", pendingFilename: "" }); renderListener();
   },
   refreshMessages: async () => { calls.push(["messages"]); model.messagesStatus = { state: "loaded", lastCheckedAt: "2026-11-04T13:00:00Z" }; renderListener(); },
   openMessage: async id => calls.push(["message", id])
@@ -124,8 +152,8 @@ async function publisherControls(taskId = "publisher-task", overrides = {}) {
   const { document, window } = parseHTML("<html><body>" + markup + "</body></html>");
   const calls = [], handlers = {};
   const app = {
-    async openExternalTask(id) { calls.push(["external", id]); return { started: true }; },
-    async openSystemBrowserTask(id) { calls.push(["systemBrowser", id]); return { opened: true }; },
+    async openExternalTask() { throw new Error("Removed dedicated Edge API must not be called"); },
+    async openSystemBrowserTask(id) { calls.push(["systemBrowser", id]); return { opened: true, watching: true }; },
     async importLocalPDF(id) { calls.push(["localPDF", id]); return { cancelled: false }; },
     async retryTask(id) { calls.push(["retry", id]); },
     ...overrides
@@ -173,10 +201,63 @@ async function publisherControls(taskId = "publisher-task", overrides = {}) {
   assert.match(root.textContent, /关闭 Zotero 后停止检查/);
   assert.match(root.textContent, /优先使用账号当前的免积分高速权益，否则使用普通免费线路/);
   assert.match(root.textContent, /不自动购买高速下载/);
-  assert.match(root.textContent, /专用 Edge 会话，与日常 Edge 不共享登录/);
-  assert.match(root.textContent, /暂停后可点击“继续专用 Edge 获取”/);
-  assert.match(root.textContent, /“默认浏览器手动下载”会打开平常使用的默认浏览器/);
-  assert.match(root.textContent, /插件不会监测该浏览器的下载/);
+  assert.doesNotMatch(root.textContent, /专用 Edge|继续专用 Edge/);
+  assert.match(root.textContent, /“浏览器下载并自动入库”使用平常的默认浏览器/);
+  assert.match(root.textContent, /不递归扫描子目录/);
+  assert.match(root.textContent, /最多等待 30 分钟/);
+  assert.match(root.textContent, /不代你操作浏览器/);
+  const directories = () => [...get("fta-pref-download-directories").querySelectorAll("input")].map(node => node.value);
+  assert.deepEqual(directories(), ["D:\\Downloads"]);
+  assert.equal(get("fta-pref-download-directories").querySelector("input").readOnly, true);
+  assert.equal(calls.some(call => call[0] === "detectDirectories"), false, "rendering never silently redetects removed folders");
+  cancelDirectory = true;
+  get("fta-pref-choose-directory").click(); await flush();
+  assert.deepEqual(directories(), ["D:\\Downloads"]);
+  assert.match(get("fta-pref-status").textContent, /已取消添加/);
+  cancelDirectory = false;
+  get("fta-pref-choose-directory").click(); await flush();
+  assert.deepEqual(directories(), ["D:\\Downloads", "D:\\Research"], "the picker appends without replacing existing directories");
+  get("fta-pref-download-directories").querySelector("button").click(); await flush();
+  assert.deepEqual(calls.at(-1), ["removeDirectory", "D:\\Downloads"]);
+  assert.deepEqual(directories(), ["D:\\Research"]);
+  renderListener();
+  assert.deepEqual(directories(), ["D:\\Research"]);
+  get("fta-pref-detect-directories").click(); await flush();
+  assert.deepEqual(directories(), ["D:\\Research", "D:\\BrowserDownloads"]);
+  assert.match(get("fta-pref-status").textContent, /添加了 1 个新下载目录/);
+  get("fta-pref-detect-directories").click(); await flush();
+  assert.match(get("fta-pref-status").textContent, /未发现新的下载目录/);
+  for (const [method, id] of [["chooseDownloadDirectory", "fta-pref-choose-directory"], ["detectDownloadDirectories", "fta-pref-detect-directories"]]) {
+    const original = app[method]; delete app[method]; renderListener();
+    assert.equal(get(id).disabled, true); app[method] = original;
+  }
+  const removeDownloadDirectory = app.removeDownloadDirectory;
+  delete app.removeDownloadDirectory; renderListener();
+  assert.equal(get("fta-pref-download-directories").querySelector("button").disabled, true);
+  app.removeDownloadDirectory = removeDownloadDirectory;
+  delete model.settings.downloadDirectories;
+  model.settings.downloadDirectory = "D:\\Legacy"; renderListener();
+  assert.deepEqual(directories(), ["D:\\Legacy"], "old one-directory settings still display");
+  model.settings.downloadDirectories = []; renderListener();
+  assert.deepEqual(directories(), [], "an explicit empty list wins over legacy settings");
+  assert.match(get("fta-pref-download-directories").textContent, /尚未配置/);
+  model.settings.downloadDirectories = ["D:\\Research", "D:\\Research", "<b>folder</b>", null, ""];
+  renderListener();
+  assert.deepEqual(directories(), ["D:\\Research", "<b>folder</b>"]);
+  assert.equal(get("fta-pref-download-directories").querySelector("b"), null);
+  model.settings.downloadDirectories = ["D:\\Downloads"]; model.settings.downloadDirectory = "D:\\Downloads"; renderListener();
+  for (const [method, control] of [["chooseDownloadDirectory", () => get("fta-pref-choose-directory")], ["removeDownloadDirectory", () => get("fta-pref-download-directories").querySelector("button")], ["detectDownloadDirectories", () => get("fta-pref-detect-directories")]]) {
+    const original = app[method];
+    app[method] = async () => ({ cancelled: false, changed: true, added: 1, paused: 2 }); renderListener();
+    control().click(); await flush();
+    assert.match(get("fta-pref-status").textContent, /已暂停 2 个等待下载的任务/);
+    assert.match(get("fta-pref-status").textContent, /浏览器下载并自动入库.*按新目录重新开始检查/);
+    app[method] = async () => ({ cancelled: false, changed: false, added: 0, paused: 0 }); renderListener();
+    control().click(); await flush();
+    assert.doesNotMatch(get("fta-pref-status").textContent, /已暂停/);
+    app[method] = original;
+  }
+  renderListener();
   assert.equal(get("fta-pref-message-count"), null, "the message heading has no unexplained numeric badge");
   assert.equal(get("fta-pref-publisher-session").hidden, true, "an unsupported publisher-session API has no misleading status");
   model.publisherSession = { enabled: false, initialized: false, hosts: [], hasBackup: false };
@@ -210,8 +291,8 @@ async function publisherControls(taskId = "publisher-task", overrides = {}) {
   submit("fta-pref-account-form");
   assert.equal(get("fta-pref-password").value, "", "password cleared immediately before login call");
   await flush();
-  assert.equal(calls[0][1].username, "tester@example.invalid");
-  assert.equal(calls[0][1].password, "test-only-secret");
+  assert.equal(calls.find(call => call[0] === "login")[1].username, "tester@example.invalid");
+  assert.equal(calls.find(call => call[0] === "login")[1].password, "test-only-secret");
   assert.equal(root.textContent.includes("test-only-secret"), false);
   assert.equal(get("fta-pref-account-state").textContent, "需要登录", "saving credentials must not imply that login succeeded");
   assert.match(get("fta-pref-status").textContent, /请在打开的科研通网页完成登录/);
@@ -253,7 +334,7 @@ async function publisherControls(taskId = "publisher-task", overrides = {}) {
   assert.equal(get("fta-pref-task-list").querySelector("img"), null);
   assert.match(get("fta-pref-task-list").textContent, /等待应助/);
   rowButton("立即检查").click(); await flush();
-  rowButton("打开").click(); await flush();
+  rowButton("查看已有求助").click(); await flush();
   rowButton("暂停").click(); await flush();
   assert.equal(model.tasks[0].state, "paused");
   rowButton("重试").click(); await flush();
@@ -346,13 +427,75 @@ async function publisherControls(taskId = "publisher-task", overrides = {}) {
   get("fta-pref-bulk-assist").click(); await flush();
   assert.match(get("fta-pref-status").textContent, /没有新增求助任务。已跳过 1 项/, "stale selected tasks are not reported as accepted");
   filterButton("all").click();
-  model.settings.points = 35;
+  input("fta-pref-points", "35");
   model.tasks = [{ id: "retry-budget", title: "原预算不足", state: "error", requestedPoints: 10, doi: "10.1234/low-budget", itemID: 76 }];
   renderListener();
   assert.equal(assistButton().textContent, "科研通求助（35 积分）");
   rowButton("按 35 积分重试").click(); await flush();
   assert.deepEqual(calls.at(-1), ["retry", "retry-budget", { points: 35 }]);
   assert.equal(model.tasks[0].requestedPoints, 35);
+  model.tasks = [
+    { id: "live-one", itemID: 770, title: "即时积分一", state: "not_found", doi: "10.1234/live-one" },
+    { id: "live-two", itemID: 771, title: "即时积分二", state: "manual_waiting", acquisitionMode: "manual", doi: "10.1234/live-two" }
+  ];
+  renderListener();
+  changeChecked(get("fta-pref-select-tasks"), true);
+  input("fta-pref-points", "41");
+  assert.equal(assistButton().textContent, "科研通求助（41 积分）", "single action updates without saving or blurring");
+  assert.equal(rowButton("按 41 积分重试").disabled, false);
+  assert.match(get("fta-pref-bulk-assist").textContent, /每篇 41 积分/);
+  assert.match(get("fta-pref-selection-summary").textContent, /合计 82 积分/);
+  assert.equal(model.settings.points, 35, "typing has not silently saved a budget");
+  const staleAssist = assistButton();
+  input("fta-pref-points", "42");
+  const beforeStaleAction = calls.length;
+  staleAssist.click(); await flush();
+  assert.equal(calls.length, beforeStaleAction, "a detached stale button cannot save or submit its old amount");
+  assert.match(get("fta-pref-status").textContent, /悬赏积分已变化/);
+  for (const invalid of ["0", "-1", "1.5", "10001", "", "1e2", "NaN"]) {
+    input("fta-pref-points", invalid);
+    assert.equal(assistButton().disabled, true);
+    assert.equal(get("fta-pref-bulk-assist").disabled, true);
+    assert.equal(get("fta-pref-points").getAttribute("aria-invalid"), "true");
+    const beforeInvalid = calls.length;
+    assistButton().click(); get("fta-pref-bulk-assist").click(); await flush();
+    assert.equal(calls.length, beforeInvalid, "invalid amounts cannot save or submit");
+  }
+  input("fta-pref-points", "42");
+  const saveSettings = app.saveSettings;
+  delete app.saveSettings; renderListener();
+  assert.equal(assistButton().disabled, true);
+  assert.equal(get("fta-pref-bulk-assist").disabled, true);
+  app.saveSettings = async () => { throw new Error("积分保存失败"); }; renderListener();
+  const beforeSaveFailure = calls.length;
+  assistButton().click(); await flush();
+  assert.equal(calls.length, beforeSaveFailure, "failed budget persistence prevents submission");
+  assert.match(get("fta-pref-status").textContent, /积分保存失败/);
+  app.saveSettings = saveSettings;
+  input("fta-pref-poll", "180");
+  get("fta-pref-auto-download").checked = true;
+  get("fta-pref-auto-download").dispatchEvent(new window.Event("input"));
+  renderListener();
+  get("fta-pref-bulk-assist").click(); await flush();
+  assert.deepEqual(calls.slice(-2), [["save", { points: 42 }], ["assist", ["live-one", "live-two"], { points: 42 }]], "the displayed bulk budget is saved before submission with the identical amount");
+  assert.equal(model.settings.points, 42);
+  assert.equal(get("fta-pref-poll").value, "180", "point-only persistence preserves unrelated unsaved inputs");
+  assert.equal(get("fta-pref-auto-download").checked, true);
+  assert.equal(model.settings.pollSeconds, 3600);
+  assert.equal(model.settings.autoDownload, false);
+  assert.match(get("fta-pref-save-state").textContent, /其他设置仍有未保存/);
+  Object.assign(model.tasks[0], { state: "not_found", acquisitionMode: "" }); renderListener();
+  input("fta-pref-points", "43");
+  assistButton().click(); await flush();
+  assert.deepEqual(calls.slice(-2), [["save", { points: 43 }], ["assist", ["live-one"], { points: 43 }]], "one-task action also saves then posts the displayed amount");
+  Object.assign(model.tasks[0], { state: "error" }); renderListener();
+  input("fta-pref-points", "44");
+  rowButton("按 44 积分重试").click(); await flush();
+  assert.deepEqual(calls.slice(-2), [["save", { points: 44 }], ["retry", "live-one", { points: 44 }]], "budgeted retry follows the same captured-amount contract");
+  submit("fta-pref-settings-form"); await flush();
+  assert.equal(model.settings.pollSeconds, 180);
+  assert.equal(model.settings.autoDownload, true);
+  assert.deepEqual(model.settings.downloadDirectories, ["D:\\Downloads"], "saving ordinary settings preserves configured folders");
   model.settings.autoDownload = false;
   model.tasks = [{ id: "manual-file", title: "可手动下载", state: "available", itemID: 77, requestID: "FileReady", requestURL: "https://www.ablesci.com/assist/detail?id=FileReady" }];
   renderListener();
@@ -481,153 +624,125 @@ async function publisherControls(taskId = "publisher-task", overrides = {}) {
   assert.equal(rowButton("重试专用 Edge 获取"), undefined);
   assert.equal(rowButton("默认浏览器手动下载"), undefined);
   assert.equal(rowButton("选择已下载的PDF").disabled, false);
-  assert.equal(rowButton("打开").disabled, false);
+  assert.equal(rowButton("查看已有求助").disabled, false);
   assert.equal(rowButton("立即检查").disabled, false);
   assert.equal(rowButton("重试").disabled, false);
   filterButton("unfinished").click();
   model.tasks = [
     { id: "manual-login", title: "浏览器可下载的文献", itemID: 700, doi: "10.1234/browser", state: "needs_login", requestedPoints: 10 },
-    { id: "unbound-login", title: "未关联的文献", itemID: null, state: "needs_review" }
+    { id: "unbound-login", title: "仅跟踪", doi: "10.1234/unbound", state: "needs_login" }
   ];
-  renderListener();
-  assert.equal([...taskRow("unbound-login").querySelectorAll("button")].some(button => button.textContent === "选择已下载的PDF"), false);
-  assert.equal([...taskRow("unbound-login").querySelectorAll("button")].some(button => button.textContent === "专用 Edge 自动获取"), false);
-  assert.equal([...taskRow("unbound-login").querySelectorAll("button")].some(button => button.textContent === "默认浏览器手动下载"), false);
-  assert.match(taskRow("manual-login").querySelector(".fta-row-meta").textContent, /求助预算 10 积分/);
-  const externalCallsBeforeManual = calls.filter(call => call[0] === "external").length;
-  rowButton("默认浏览器手动下载").click(); await flush();
-  assert.deepEqual(calls.at(-1), ["systemBrowser", "manual-login"]);
-  assert.equal(calls.filter(call => call[0] === "external").length, externalCallsBeforeManual, "manual download is separate from dedicated Edge capture");
-  assert.match(get("fta-pref-status").textContent, /请自行下载 PDF，再点击“选择已下载的PDF”/);
-  assert.match(get("fta-pref-status").textContent, /不会监测默认浏览器或自动导入文件/);
-  changeChecked(taskCheckbox("manual-login"), true);
-  assert.match(get("fta-pref-selection-summary").textContent, /已选 1 篇/);
-  rowButton("专用 Edge 自动获取").click(); await flush();
-  assert.deepEqual(calls.at(-1), ["external", "manual-login"]);
-  assert.equal(model.tasks[0].state, "browser_waiting");
-  assert.equal(model.tasks[0].acquisitionMode, "browser");
-  assert.match(taskRow("manual-login").textContent, /等待网页就绪/);
-  assert.match(taskRow("manual-login").textContent, /网站允许专用 Edge 访问论文后/);
-  assert.doesNotMatch(taskRow("manual-login").querySelector(".fta-row-meta").textContent, /积分/, "browser acquisition never looks like a paid assistance request");
-  assert.deepEqual([...taskRow("manual-login").querySelectorAll("button")].map(button => button.textContent), ["查看专用 Edge", "暂停", "默认浏览器手动下载"]);
-  assert.match(taskRow("manual-login").textContent, /若验证反复出现，可切换到默认浏览器手动下载/);
-  assert.equal(rowButton("暂停").disabled, false, "starting a browser job returns before human verification and leaves pause usable");
-  assert.equal(taskCheckbox("manual-login"), null, "active browser work is never a bulk-assistance candidate");
-  assert.equal(assistButton(), undefined, "waiting for browser verification cannot publish an assistance request");
-  assert.equal(get("fta-pref-bulk-assist").disabled, true);
-  assert.equal(get("fta-pref-selection-summary").textContent, "未选择文献", "starting browser capture clears any prior paid-fallback selection");
-  assert.equal(filterButton("login").textContent, "需网页登录 1");
-  assert.equal(filterButton("active").textContent, "进行中 1");
-  rowButton("查看专用 Edge").click(); await flush();
-  assert.deepEqual(calls.at(-1), ["focusExternal", "manual-login"]);
-  filterButton("login").click();
-  assert.equal(get("fta-pref-task-list").children.length, 1);
-  filterButton("active").click();
-  for (const [state, label] of [["browser_scanning", "正在检测 PDF"], ["browser_downloading", "浏览器下载中"]]) {
-    model.tasks[0].state = state;
-    renderListener();
-    assert.match(taskRow("manual-login").textContent, new RegExp(label));
-    assert.deepEqual([...taskRow("manual-login").querySelectorAll("button")].map(button => button.textContent), ["查看专用 Edge", "暂停", "默认浏览器手动下载"]);
-    assert.equal(filterButton("active").textContent, "进行中 1");
-    assert.equal(filterButton("login").textContent, "需网页登录 0", "scanning and downloading no longer imply user verification is required");
-  }
-  const focusExternalTask = app.focusExternalTask;
-  delete app.focusExternalTask;
-  renderListener();
-  assert.equal(rowButton("查看专用 Edge").disabled, true);
-  app.focusExternalTask = focusExternalTask;
-  const openSystemBrowserTask = app.openSystemBrowserTask;
-  delete app.openSystemBrowserTask;
-  renderListener();
-  assert.equal(rowButton("默认浏览器手动下载").disabled, true, "an unavailable manual-browser API is not an active control");
-  app.openSystemBrowserTask = openSystemBrowserTask;
   filterButton("unfinished").click();
-  rowButton("暂停").click(); await flush();
-  assert.equal(model.tasks[0].state, "paused");
-  assert.equal(model.tasks[0].acquisitionMode, "browser");
-  assert.equal(rowButton("继续专用 Edge 获取").disabled, false);
-  assert.equal(taskCheckbox("manual-login"), null, "a paused browser route is not silently turned into paid fallback selection");
-  assert.deepEqual([...taskRow("manual-login").querySelectorAll("button")].map(button => button.textContent), ["继续专用 Edge 获取", "默认浏览器手动下载", "选择已下载的PDF"], "paused browser tasks do not expose ordinary checks or point-budget retries");
-  assert.equal(assistButton(), undefined);
-  rowButton("继续专用 Edge 获取").click(); await flush();
-  assert.deepEqual(calls.at(-1), ["external", "manual-login"], "browser resume calls the browser API without budget options");
-  assert.equal(model.tasks[0].state, "browser_waiting");
-  const acquireCalls = calls.filter(call => call[0] === "external").length;
-  const assistCalls = calls.filter(call => call[0] === "assist").length;
-  rowButton("默认浏览器手动下载").click(); await flush();
-  assert.deepEqual(calls.at(-1), ["systemBrowser", "manual-login"], "a running task can switch directly to manual browser download");
-  assert.equal(model.tasks[0].state, "paused");
-  assert.equal(calls.filter(call => call[0] === "external").length, acquireCalls);
-  assert.equal(calls.filter(call => call[0] === "assist").length, assistCalls);
-  assert.equal(rowButton("选择已下载的PDF").disabled, false);
-  assert.match(get("fta-pref-status").textContent, /请自行下载 PDF/);
-  rowButton("继续专用 Edge 获取").click(); await flush();
-  model.tasks[0].state = "error";
-  model.tasks[0].lastError = "专用 Edge 尚未连接，请先打开论文。";
   renderListener();
-  assert.match(taskRow("manual-login").textContent, /专用 Edge 尚未连接，请先打开论文。/, "connection errors are displayed as supplied by the app");
-  assert.equal(rowButton("重试专用 Edge 获取").disabled, false);
-  for (const state of ["error", "not_found", "failed"]) {
-    model.tasks[0].state = state;
-    renderListener();
-    assert.equal(taskCheckbox("manual-login").disabled, false, state + " browser jobs offer an explicit fallback selection");
-    assert.equal(assistButton().disabled, false);
-    assert.deepEqual([...taskRow("manual-login").querySelectorAll("button")].map(button => button.textContent), ["重试专用 Edge 获取", "默认浏览器手动下载", "选择已下载的PDF", "科研通求助（" + model.settings.points + " 积分）"]);
-  }
+  const labels = id => [...taskRow(id).querySelectorAll("button")].map(button => button.textContent);
+  assert.equal(labels("unbound-login").includes("浏览器下载并自动入库"), false, "browser acquisition requires an associated Zotero item");
+  assert.doesNotMatch(taskRow("manual-login").querySelector(".fta-row-meta").textContent, /积分/, "unsubmitted task budgets do not contradict the live input");
   changeChecked(taskCheckbox("manual-login"), true);
-  assert.match(get("fta-pref-selection-summary").textContent, /已选 1 篇/);
-  assistButton().click(); await flush();
-  assert.deepEqual(calls.at(-1), ["assist", ["manual-login"], { points: model.settings.points }], "failed browser jobs use the explicit assistance API");
-  assert.equal(model.tasks[0].state, "submitting");
-  assert.equal(model.tasks[0].acquisitionMode, "", "explicit assistance clears the browser route");
-  assert.equal(taskCheckbox("manual-login"), null);
-  assert.equal(get("fta-pref-selection-summary").textContent, "未选择文献");
-  Object.assign(model.tasks[0], { state: "error", acquisitionMode: "browser" });
-  renderListener();
-  const openExternalTask = app.openExternalTask;
-  app.openExternalTask = async () => { throw new Error("无法启动 Edge，请稍后重试。"); };
-  rowButton("重试专用 Edge 获取").click(); await flush();
-  assert.match(get("fta-pref-status").textContent, /无法启动 Edge/);
-  assert.equal(rowButton("重试专用 Edge 获取").disabled, false, "a failed launch does not leave the entire settings pane busy");
-  app.openSystemBrowserTask = async () => { throw new Error("默认浏览器暂时无法打开。"); };
-  rowButton("默认浏览器手动下载").click(); await flush();
-  assert.match(get("fta-pref-status").textContent, /默认浏览器暂时无法打开/);
-  assert.equal(rowButton("默认浏览器手动下载").disabled, false);
-  assert.equal(model.tasks[0].state, "error");
+  rowButton("浏览器下载并自动入库").click(); await flush();
+  assert.deepEqual(calls.at(-1), ["systemBrowser", "manual-login"]);
+  assert.equal(model.tasks[0].state, "manual_waiting");
+  assert.equal(model.tasks[0].acquisitionMode, "manual");
+  assert.match(taskRow("manual-login").textContent, /等待浏览器下载/);
+  assert.match(get("fta-pref-status").textContent, /明确匹配的新 PDF 会自动入库/);
+  assert.match(get("fta-pref-status").textContent, /插件不会代你操作浏览器/);
+  assert.equal(taskCheckbox("manual-login").disabled, false, "a waiting download remains an explicit AbleSci fallback candidate");
+  assert.equal(taskCheckbox("manual-login").checked, true, "manual download does not discard an intentional fallback selection");
+  assert.equal(assistButton().disabled, false);
+  assert.equal(rowButton("暂停监控").disabled, false);
+  assert.equal(labels("manual-login").includes("立即检查"), false);
+  assert.equal(labels("manual-login").some(label => label.includes("重试")), false);
+  assert.equal(labels("manual-login").some(label => label.includes("Edge")), false);
+  rowButton("暂停监控").click(); await flush();
+  assert.equal(model.tasks[0].state, "paused");
+  assert.equal(model.tasks[0].acquisitionMode, "manual");
+  assert.equal(assistButton().disabled, false);
+  assert.equal(rowButton("浏览器下载并自动入库").disabled, false);
+  rowButton("浏览器下载并自动入库").click(); await flush();
+  assert.equal(model.tasks[0].state, "manual_waiting");
+  for (const state of ["manual_waiting", "manual_review", "paused", "error", "failed", "needs_review", "captcha", "browser_waiting", "browser_scanning", "browser_downloading"]) {
+    model.tasks[0].state = state; renderListener();
+    assert.equal(taskCheckbox("manual-login").disabled, false, state + " retains explicit fallback");
+    assert.equal(assistButton().disabled, false, state + " retains one-task fallback");
+    assert.equal(labels("manual-login").some(label => label.includes("Edge")), false, state + " never exposes removed capture controls");
+    assert.equal(labels("manual-login").includes("立即检查"), false, state + " does not call the obsolete acquisition retry route");
+  }
+  assert.equal(rowButton("预览待核对 PDF"), undefined, "review controls appear only for the review state");
+  model.tasks[0].state = "manual_review"; renderListener();
+  assert.equal(rowButton("暂停监控"), undefined, "a selected unknown file is awaiting review, not being monitored");
+  assert.equal(rowButton("预览待核对 PDF").disabled, true);
+  assert.equal(rowButton("我已核对，是这篇论文").disabled, true, "missing candidate filename blocks confirmation");
+  const openSystemBrowserTask = app.openSystemBrowserTask;
+  delete app.openSystemBrowserTask; renderListener();
+  assert.equal(rowButton("浏览器下载并自动入库").disabled, true);
   app.openSystemBrowserTask = openSystemBrowserTask;
-  app.openExternalTask = openExternalTask;
-  rowButton("重试专用 Edge 获取").click(); await flush();
-  rowButton("暂停").click(); await flush();
+  model.tasks[0].state = "manual_waiting"; renderListener();
+  get("fta-pref-bulk-assist").click(); await flush();
+  assert.deepEqual(calls.at(-1), ["assist", ["manual-login"], { points: model.settings.points }]);
+  assert.equal(model.tasks[0].state, "submitting");
+  assert.equal(model.tasks[0].acquisitionMode, "");
+  assert.equal(taskCheckbox("manual-login"), null);
+  assert.equal(labels("manual-login").some(label => label.startsWith("科研通求助")), false, "submission cannot be duplicated");
+  Object.assign(model.tasks[0], { state: "paused", acquisitionMode: "manual" }); renderListener();
+  app.openSystemBrowserTask = async () => { throw new Error("默认浏览器暂时无法打开。"); };
+  rowButton("浏览器下载并自动入库").click(); await flush();
+  assert.match(get("fta-pref-status").textContent, /默认浏览器暂时无法打开/);
+  assert.equal(rowButton("浏览器下载并自动入库").disabled, false);
+  app.openSystemBrowserTask = async () => ({ opened: true, watching: false });
+  rowButton("浏览器下载并自动入库").click(); await flush();
+  assert.match(get("fta-pref-status").textContent, /下载文件夹检查尚未启动/);
+  assert.doesNotMatch(get("fta-pref-status").textContent, /并接管/);
+  app.openSystemBrowserTask = openSystemBrowserTask;
   cancelLocalImport = true;
   rowButton("选择已下载的PDF").click(); await flush();
   assert.equal(model.tasks[0].state, "paused");
   assert.match(get("fta-pref-status").textContent, /已取消选择文件/);
-  cancelLocalImport = false;
+  cancelLocalImport = false; reviewLocalImport = true;
   rowButton("选择已下载的PDF").click(); await flush();
-  assert.deepEqual(calls.at(-1), ["localPDF", "manual-login"]);
-  assert.equal(taskRow("manual-login"), null, "a locally imported PDF moves to completed history");
+  assert.equal(model.tasks[0].state, "manual_review");
+  assert.match(taskRow("manual-login").textContent, /待核对文件：<img src=x onerror=bad>.pdf/);
+  assert.equal(taskRow("manual-login").textContent.includes("待关联文献：<b>PDF title</b>"), true);
+  assert.match(taskRow("manual-login").textContent, /身份仍不确定/);
+  assert.equal(taskRow("manual-login").querySelector("img"), null);
+  assert.equal(taskRow("manual-login").querySelector("b"), null);
+  assert.equal(calls.some(call => call[0] === "confirmPDF"), false, "choosing an unknown PDF never confirms it implicitly");
+  assert.equal(assistButton().disabled, false);
+  rowButton("预览待核对 PDF").click(); await flush();
+  assert.deepEqual(calls.at(-1), ["previewPDF", "manual-login"]);
+  assert.equal(model.tasks[0].state, "manual_review");
+  rowButton("取消这次导入").click(); await flush();
+  assert.deepEqual(calls.at(-1), ["dismissPDF", "manual-login"]);
+  assert.equal(model.tasks[0].state, "paused");
+  assert.match(get("fta-pref-status").textContent, /已取消，任务保留/);
+  assert.doesNotMatch(get("fta-pref-status").textContent, /继续等待/);
+  rowButton("选择已下载的PDF").click(); await flush();
+  rowButton("我已核对，是这篇论文").click(); await flush();
+  assert.deepEqual(calls.at(-1), ["confirmPDF", "manual-login"]);
+  assert.equal(taskRow("manual-login"), null);
   filterButton("success").click();
   assert.match(taskRow("manual-login").textContent, /来源：本地 PDF/);
-  model.tasks.push({ id: "browser-complete", title: "浏览器取得的全文", itemID: 701, attachmentID: 702, state: "imported", source: "edge_browser", acquisitionMode: "browser", completedAt: "2026-11-05T01:00:00Z" });
-  renderListener();
-  assert.match(taskRow("browser-complete").textContent, /来源：Edge 浏览器/);
-  assert.deepEqual([...taskRow("browser-complete").querySelectorAll("button")].map(button => button.textContent), ["打开全文"]);
-  model.tasks.push({ id: "manual-finish-race", title: "切换时完成的文献", itemID: 710, doi: "10.1234/finished", state: "browser_downloading", acquisitionMode: "browser" });
+  reviewLocalImport = false;
+  model.tasks.push({ id: "local-match", title: "身份匹配的本地 PDF", itemID: 703, doi: "10.1234/matched", state: "not_found" });
+  filterButton("unfinished").click(); renderListener();
+  const matchedRow = taskRow("local-match");
+  [...matchedRow.querySelectorAll("button")].find(button => button.textContent === "选择已下载的PDF").click(); await flush();
+  assert.equal(model.tasks.find(task => task.id === "local-match").state, "imported");
+  model.tasks.push({ id: "browser-complete", title: "下载文件夹取得的全文", itemID: 701, attachmentID: 702, state: "imported", source: "browser_download", acquisitionMode: "manual", completedAt: "2026-11-05T01:00:00Z" });
+  filterButton("success").click(); renderListener();
+  assert.match(taskRow("browser-complete").textContent, /来源：浏览器下载/);
+  assert.deepEqual(labels("browser-complete"), ["打开全文"]);
+  model.tasks.push({ id: "manual-finish-race", title: "切换时完成的文献", itemID: 710, doi: "10.1234/finished", state: "manual_waiting", acquisitionMode: "manual" });
   app.openSystemBrowserTask = async id => {
     calls.push(["systemBrowser", id]);
-    Object.assign(model.tasks.find(task => task.id === id), { state: "imported", attachmentID: 711, source: "edge_browser" });
-    renderListener();
-    return { opened: false, alreadyImported: true };
+    Object.assign(model.tasks.find(task => task.id === id), { state: "imported", attachmentID: 711, source: "browser_download" });
+    renderListener(); return { opened: false, alreadyImported: true };
   };
-  renderListener();
-  filterButton("unfinished").click();
-  rowButton("默认浏览器手动下载").click(); await flush();
+  filterButton("unfinished").click(); renderListener();
+  rowButton("浏览器下载并自动入库").click(); await flush();
   assert.deepEqual(calls.at(-1), ["systemBrowser", "manual-finish-race"]);
-  assert.match(get("fta-pref-status").textContent, /PDF 已保存到原文献，无需再次下载/);
+  assert.match(get("fta-pref-status").textContent, /已保存到原文献，无需再次下载/);
   assert.doesNotMatch(get("fta-pref-status").textContent, /已在默认浏览器打开|请自行下载/);
   assert.equal(calls.some(call => call[0] === "localPDF" && call[1] === "manual-finish-race"), false);
   app.openSystemBrowserTask = openSystemBrowserTask;
-  filterButton("all").click();
   model.messages = [{ id: "m1", title: "应助提醒", text: "<script>secret</script>", read: false, createdAt: "2026-11-04T12:00:00Z" }];
   renderListener();
   assert.equal(get("fta-messages-heading").textContent, "消息");
@@ -673,21 +788,22 @@ async function publisherControls(taskId = "publisher-task", overrides = {}) {
   get("fta-pref-logout").click(); await flush();
   assert.equal(get("fta-pref-account-state").textContent, "未登录");
   assert.equal(get("fta-pref-account-identity").hidden, true);
-  for (const method of ["check", "open", "openTask", "assist", "download", "pause", "retry", "message", "messages", "add", "web", "logout", "bindingCandidates", "bind", "external", "focusExternal", "systemBrowser", "localPDF"]) assert.ok(calls.some(c => c[0] === method), method);
+  for (const method of ["check", "open", "openTask", "assist", "download", "pause", "retry", "message", "messages", "add", "web", "logout", "bindingCandidates", "bind", "systemBrowser", "localPDF", "previewPDF", "confirmPDF", "dismissPDF"]) assert.ok(calls.some(c => c[0] === method), method);
   const ids = [...root.querySelectorAll("[id]")].map(node => node.id);
   assert.equal(ids.length, new Set(ids).size);
   context.FulltextPreferences.destroy();
   assert.equal(subscriptions, 0);
   const publisher = await publisherControls();
-  assert.equal(publisher.get("publisher-external").textContent, "专用 Edge 自动获取");
-  assert.equal(publisher.get("publisher-system").textContent, "默认浏览器手动下载");
-  assert.match(publisher.get("publisher-status").textContent, /默认浏览器手动下载/);
+  assert.equal(publisher.get("publisher-external"), null);
+  assert.equal(publisher.get("publisher-system").textContent, "浏览器下载并自动入库");
+  assert.match(publisher.get("publisher-status").textContent, /浏览器下载并自动入库/);
   publisher.get("publisher-system").click(); await flush();
   assert.deepEqual(publisher.calls, [["systemBrowser", "publisher-task"]]);
-  assert.match(publisher.get("publisher-status").textContent, /请自行下载 PDF/);
-  assert.match(publisher.get("publisher-status").textContent, /插件不会监测默认浏览器的下载/);
-  publisher.get("publisher-external").click(); await flush();
-  assert.deepEqual(publisher.calls.at(-1), ["external", "publisher-task"]);
+  assert.match(publisher.get("publisher-status").textContent, /请自行完成验证、点击 PDF 下载/);
+  assert.match(publisher.get("publisher-status").textContent, /明确匹配的新 PDF 会自动入库/);
+  publisher.app.openSystemBrowserTask = async () => ({ opened: true, watching: false });
+  publisher.get("publisher-system").click(); await flush();
+  assert.match(publisher.get("publisher-status").textContent, /下载文件夹检查尚未启动/);
   publisher.app.openSystemBrowserTask = async () => ({ opened: false, alreadyImported: true });
   publisher.get("publisher-system").click(); await flush();
   assert.match(publisher.get("publisher-status").textContent, /已保存到原文献，无需再次下载/);
@@ -696,19 +812,22 @@ async function publisherControls(taskId = "publisher-task", overrides = {}) {
   publisher.get("publisher-system").click(); await flush();
   assert.equal(publisher.get("publisher-status").textContent, "默认浏览器调用失败。");
   assert.equal(publisher.get("publisher-system").disabled, false);
-  publisher.app.openExternalTask = async () => { throw new Error("专用 Edge 连接已断开。"); };
-  publisher.get("publisher-external").click(); await flush();
-  assert.equal(publisher.get("publisher-status").textContent, "专用 Edge 连接已断开。");
+  publisher.app.importLocalPDF = async id => { publisher.calls.push(["localPDF", id]); return { needsReview: true }; };
+  publisher.get("publisher-import").click(); await flush();
+  assert.match(publisher.get("publisher-status").textContent, /需要核对/);
+  assert.doesNotMatch(publisher.get("publisher-status").textContent, /已导入/);
   publisher.close();
   const noTask = await publisherControls(null);
-  assert.equal(noTask.get("publisher-external").disabled, true, "automatic capture requires an associated Zotero task");
+  assert.equal(noTask.get("publisher-external"), null);
+  assert.equal(noTask.get("publisher-system").textContent, "在默认浏览器打开");
   noTask.get("publisher-system").click(); await flush();
   assert.deepEqual(noTask.calls, [["launchURL", "https://publisher.example/article"]]);
   assert.match(noTask.get("publisher-status").textContent, /此页面未关联文献/);
+  assert.doesNotMatch(noTask.get("publisher-status").textContent, /接管|自动入库|检查/);
   assert.equal(noTask.get("publisher-import").disabled, true);
   noTask.close();
   const unsupported = await publisherControls("publisher-task", { openSystemBrowserTask: undefined });
   assert.equal(unsupported.get("publisher-system").disabled, true);
   unsupported.close();
-  console.log("Preferences tests passed: embedded mount, credentials, publisher-session summary, settings and route policy, unfinished default and completion history, batch selection, explicit binding and stale-state handling, browser progress/pause/resume and action isolation, manual/local download and route labels, message refresh placement, safe text, cleanup.");
+  console.log("Preferences tests passed: embedded mount, credentials, live action budgets, download folders, manual browser monitoring and explicit PDF review, continuous AbleSci fallback, completion history, batch selection, explicit binding, safe text, cleanup.");
 })().catch(error => { console.error(error); process.exitCode = 1; });

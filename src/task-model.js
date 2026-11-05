@@ -8,7 +8,7 @@
     "pending_login", "ready_to_check", "waiting", "available", "needs_review",
     "paused", "imported", "error", "queued", "resolving", "not_found",
     "submitting", "submission_unknown", "downloading", "closed", "needs_login",
-    "browser_waiting", "browser_scanning", "browser_downloading",
+    "browser_waiting", "browser_scanning", "browser_downloading", "manual_waiting", "manual_review",
   ]);
   const stateSet = new Set(STATES);
   const secretQueryNames = /^(?:access[_-]?token|refresh[_-]?token|token|api[_-]?key|key|session(?:[_-]?id)?|password|pass|pwd|secret|signature|sig|auth(?:orization)?|cookie|code)$/i;
@@ -164,7 +164,7 @@
       allowAssist: input.allowAssist === true,
       attachmentID: optionalInteger(input.attachmentID, "attachmentID"),
       source: text(input.source, 100),
-      acquisitionMode: input.acquisitionMode === "browser" ? "browser" : "",
+      acquisitionMode: ["browser", "manual"].includes(input.acquisitionMode) ? input.acquisitionMode : "",
       downloadRoute: ["normal", "highspeed"].includes(input.downloadRoute) ? input.downloadRoute : "",
       attempts: optionalInteger(input.attempts, "attempts") || 0,
       state,

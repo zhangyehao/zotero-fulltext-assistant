@@ -24,11 +24,14 @@
         <html:label for="fta-pref-points">每篇求助悬赏积分<html:input id="fta-pref-points" type="number" min="1" max="10000" step="1" value="10" required="required"/></html:label>
         <html:label for="fta-pref-poll">科研通应助检查间隔（秒）<html:input id="fta-pref-poll" type="number" min="60" max="3600" step="1" value="60" required="required"/></html:label>
       </html:div>
+      <html:p id="fta-pref-download-directories-label">浏览器下载文件夹</html:p>
+      <html:div id="fta-pref-download-directories" aria-labelledby="fta-pref-download-directories-label"></html:div>
+      <html:div class="fta-actions"><html:button id="fta-pref-choose-directory" type="button">添加下载文件夹</html:button><html:button id="fta-pref-detect-directories" type="button">自动检测下载目录</html:button></html:div>
       <html:label class="fta-check" for="fta-pref-auto-download"><html:input id="fta-pref-auto-download" type="checkbox" checked="checked"/><html:span>收到应助文件后，自动下载并添加到原文献</html:span></html:label>
-      <html:p class="fta-note">默认悬赏 10 积分。网站最低要求超过设置值时暂停，不自动加价；修改设置不会改变已发布的求助。</html:p>
+      <html:p class="fta-note">默认悬赏 10 积分。输入后求助按钮会立即显示当前金额；点击时先保存并按按钮所示金额发起。网站最低要求超过设置值时暂停，不自动加价；修改设置不会改变已发布的求助。</html:p>
       <html:p class="fta-note">科研通下载优先使用账号当前的免积分高速权益，否则使用普通免费线路；不自动购买高速下载。</html:p>
-      <html:p class="fta-note">“专用 Edge 自动获取”使用全文助手专用 Edge 会话，与日常 Edge 不共享登录。首次请在该窗口登录并完成网站验证；暂停后可点击“继续专用 Edge 获取”，失败后可重试。验证能否通过仍由网站决定。</html:p>
-      <html:p class="fta-note">“默认浏览器手动下载”会打开平常使用的默认浏览器；运行中的自动获取会先停止。请自行下载 PDF，再点击任务中的“选择已下载的PDF”导入原文献，插件不会监测该浏览器的下载。</html:p>
+      <html:p class="fta-note">“浏览器下载并自动入库”使用平常的默认浏览器。请自行完成网站登录或验证并点击 PDF 下载，保存到上方任一文件夹；插件只检查列出的文件夹，不递归扫描子目录，将明确匹配原文献的新 PDF 自动入库，不代你操作浏览器。每次打开后最多等待 30 分钟，重启 Zotero 后需重新开始。</html:p>
+      <html:p class="fta-note">未能自动匹配时，可点击“选择已下载的PDF”。所选文件身份仍不确定时，需要先预览核对并明确确认；不匹配的文件会停止导入。未获取全文的任务始终可改用科研通求助，已有求助可直接查看。</html:p>
       <html:div class="fta-actions"><html:button id="fta-pref-save-settings" type="submit">保存设置</html:button><html:span id="fta-pref-save-state" class="fta-secondary" role="status" aria-live="polite"></html:span></html:div>
     </html:form>
     <html:p id="fta-pref-publisher-session" class="fta-note" hidden="hidden"></html:p>

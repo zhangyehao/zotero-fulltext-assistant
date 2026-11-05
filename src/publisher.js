@@ -56,15 +56,27 @@
         add(raw, "page-pdf-anchor");
       }
     }
-    // Work only on a detached copy; script strings are not login/captcha evidence.
-    for (const node of doc.querySelectorAll("script,style,template,noscript")) node.remove();
-    const text = (doc.body?.textContent || "").replace(/\s+/g, " ").slice(0, 120000);
-    const password = [...doc.querySelectorAll('input[type="password"]')].some(node => !node.closest('[hidden],[aria-hidden="true"]'));
+    // Article access controls are different from a site's ordinary account
+    // sign-in. Inspect a detached copy and ignore navigation/footer prompts,
+    // hidden UI and script strings; never suppress a verified public PDF.
+    const visible = doc.cloneNode(true);
+    for (const node of visible.querySelectorAll('script,style,template,noscript,[hidden],[aria-hidden="true"],[inert],footer,nav,[role="contentinfo"],[role="navigation"],[id*="footer"],[class*="footer"],#references,.references,.bibliography,.related-articles')) node.remove();
+    const text = (visible.body?.textContent || "").replace(/\s+/g, " ").slice(0, 120000);
+    const labels = [...visible.querySelectorAll('a[href],button,[role="button"],h1,h2,h3,[role="heading"]')]
+      .map(node => [node.textContent, node.getAttribute("aria-label"), node.getAttribute("title")].join(" ").replace(/\s+/g, " ")).join("\n").slice(0, 120000);
+    const password = !!visible.querySelector('input[type="password"]');
     const challenge = /verify (?:that )?you are human|verifying you are human|checking your browser|performing security verification|unusual traffic|complete the captcha|验证您是真人|请输入验证码|安全验证/i.test(text);
-    const cloudflare = challenge && (!!doc.querySelector('[id^="cf-chl"],#challenge-running,#challenge-stage,.cf-turnstile,iframe[src*="challenges.cloudflare.com"]') || /cloudflare|ray id/i.test(text));
-    const loginGate = /(?:sign|log)\s*in to (?:access|download|view)|access through your institution|institutional login|登录后(?:下载|查看)|请先登录/i.test(text);
+    const cloudflare = challenge && (!!visible.querySelector('[id^="cf-chl"],#challenge-running,#challenge-stage,.cf-turnstile,iframe[src*="challenges.cloudflare.com"]') || /cloudflare|ray id/i.test(text));
+    // Elsevier distinguishes personal Sign in from checking subscription access:
+    // https://www.elsevier.support/elsevieraccess/answer/what-is-the-difference-between-sign-in-and-check-access
+    const institutionalAccess = /\b(?:check\s+)?access\s+(?:through|via)\s+(?:your|my|an?)\s+(?:institution|organi[sz]ation)\b|\b(?:sign|log)\s*in\s+(?:via|through|to)\s+(?:your|my)\s+(?:institution|organi[sz]ation)\b|\binstitutional\s+(?:log\s*in|sign\s*in)\b|通过(?:您的?|所在)?(?:机构|学校|单位)(?:登录|访问)/i.test(text + "\n" + labels);
+    const purchase = /\b(?:purchase|buy)\s+(?:(?:this|the)\s+)?(?:pdf|article|full[\s-]*text)\b|购买(?:全文|文章|PDF)|订阅后(?:下载|查看)/i.test(labels);
+    const scienceDirect = /(?:^|\.)sciencedirect\.com$/i.test(new URL(pageURL).hostname);
+    const preview = scienceDirect && /\barticle\s+preview\b|\b(?:preview|abstract)\s+only\b/i.test(labels);
+    const accessReason = institutionalAccess ? "institutional_access" : purchase ? "purchase" : preview ? "preview" : null;
+    const loginGate = !!accessReason || /(?:sign|log)\s*in to (?:access|download|view)|登录后(?:下载|查看)|请先登录/i.test(text);
     return { candidates: candidates.slice(0, MAX_CANDIDATES), needsLogin: password || challenge || loginGate,
-      challenge: challenge ? (cloudflare ? "cloudflare" : "verification") : null, mismatch: false };
+      accessReason, challenge: challenge ? (cloudflare ? "cloudflare" : "verification") : null, mismatch: false };
   }
 
   function create({ Zotero, Services, IOUtils, PathUtils, parseHTML, HiddenBrowser: BrowserClass, publisherSession }) {
@@ -138,6 +150,7 @@
       let needsLogin = false;
       let loginURL = null;
       let challengeKind = null;
+      let accessReason = null;
       let lastURL = articleURL || starts[0] || null;
 
       async function request(url, referrer) {
@@ -205,6 +218,8 @@
       }
       function noteGate(result, url) {
         if (result.needsLogin) { needsLogin = true; loginURL ||= url; }
+        const rank = { preview: 1, purchase: 2, institutional_access: 3 };
+        if ((rank[result.accessReason] || 0) > (rank[accessReason] || 0)) accessReason = result.accessReason;
         if (result.challenge) { challengeKind = result.challenge; rememberGate(url, result.challenge); }
       }
       function cachedGate(url) {
@@ -339,10 +354,13 @@
       }
       check();
       return needsLogin
-        ? { state: "needs_login", challenge: challengeKind, message: challengeKind === "cloudflare"
-          ? "该网站返回 Cloudflare 真人验证。Zotero 内嵌浏览器可能不被支持；若手动验证仍循环，请使用系统浏览器下载 PDF 后选择“导入本地 PDF”。同一站点已暂缓重复请求，也可继续科研通兜底。"
-          : challengeKind ? "该网站要求人工验证，同一站点已暂缓重复请求。请在网页窗口完成后手动重试；无法完成时可用系统浏览器下载后导入 PDF。"
-          : "网页提示登录、访问验证或请求限制。请在 Zotero 网页窗口完成后重试；仍不可得的条目可进入科研通兜底。", url: loginURL || lastURL }
+        ? { state: "needs_login", challenge: challengeKind, accessReason, message: challengeKind === "cloudflare"
+          ? "该网站返回 Cloudflare 真人验证，同一站点已暂缓重复请求。请点击“浏览器下载并自动入库”，在日常使用的默认浏览器完成验证并点击 PDF 下载；保存到配置文件夹且确认匹配的新 PDF 会自动入库，也可使用科研通兜底。"
+          : challengeKind ? "该网站要求人工验证，同一站点已暂缓重复请求。请点击“浏览器下载并自动入库”，在日常使用的默认浏览器完成验证并点击 PDF 下载；保存到配置文件夹且确认匹配的新 PDF 会自动入库，也可使用科研通兜底。"
+          : accessReason === "institutional_access" ? "出版社页面提供机构访问入口，当前 Zotero 会话尚未取得全文。请点击“浏览器下载并自动入库”，在默认浏览器完成机构登录、确认本篇论文的订阅权限并点击 PDF 下载；保存到配置文件夹且确认匹配的新 PDF 会自动入库，也可使用科研通兜底。"
+          : accessReason === "purchase" ? "出版社页面显示购买或订阅入口，当前会话尚未取得全文。如有机构访问权限，请点击“浏览器下载并自动入库”，在默认浏览器完成机构登录、检查订阅并点击 PDF 下载；保存到配置文件夹且确认匹配的新 PDF 会自动入库，也可使用科研通兜底。"
+          : accessReason === "preview" ? "当前仅取得 ScienceDirect 论文预览或摘要页，尚未取得全文。请点击“浏览器下载并自动入库”，在默认浏览器完成机构登录、确认全文访问权限并点击 PDF 下载；保存到配置文件夹且确认匹配的新 PDF 会自动入库，也可使用科研通兜底。"
+          : "网页提示登录、访问验证或请求限制。请点击“浏览器下载并自动入库”，在默认浏览器完成出版社或机构登录、检查访问权限并点击 PDF 下载；保存到配置文件夹且确认匹配的新 PDF 会自动入库，也可使用科研通兜底。", url: loginURL || lastURL }
         : { state: "not_found", message: "网页、渲染后的下载入口和开放获取来源均未取得有效 PDF，可进入科研通兜底。", url: lastURL };
     }
     return {
