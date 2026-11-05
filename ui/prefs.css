@@ -94,3 +94,15 @@
 @media(max-width:650px){#fta-preferences .fta-fields{grid-template-columns:1fr;gap:14px}#fta-preferences .fta-tabs{gap:4px;margin-bottom:20px}#fta-preferences .fta-section-heading{flex-wrap:wrap;gap:8px}#fta-preferences .fta-row{padding:12px}#fta-preferences .fta-row-main{flex-wrap:wrap}#fta-preferences .fta-row-title{flex-basis:calc(100% - 115px)}#fta-preferences .fta-message-tools{justify-content:flex-start;text-align:start;margin-inline-start:0}#fta-preferences .fta-bulk-actions{padding:11px}}
 @media(max-width:420px){#fta-preferences .fta-tabs{gap:0}#fta-preferences .fta-tabs [role=tab]{padding:10px}#fta-preferences .fta-intro{gap:9px}#fta-preferences .fta-product-name{gap:6px}#fta-preferences .fta-section-heading>.fta-secondary{flex-basis:100%}}
 @media(forced-colors:active){#fta-preferences .fta-tabs [role=tab][aria-selected=true]{color:Highlight;border-bottom-color:Highlight}#fta-preferences .fta-status-badge{border:1px solid CanvasText}#fta-preferences .fta-tabs [role=tab][data-dirty=true]::after{background:Highlight}}
+.fta-copy-wrap { display: inline-flex; gap: 6px; align-items: baseline; max-width: 100%; }
+#fta-preferences .fta-copy-button { appearance: none; min-height: 0; min-width: 0; padding: 0; border: 0; border-radius: 3px; background: transparent; color: inherit; font: inherit; text-align: start; cursor: copy; white-space: normal; overflow-wrap: anywhere; }
+#fta-preferences .fta-copy-button:hover { text-decoration: underline; text-underline-offset: 3px; }
+#fta-preferences button.fta-copy-button:hover:enabled { background: transparent; }
+#fta-preferences .fta-copy-button:focus-visible { outline: 2px solid var(--fta-accent, #2878c8); outline-offset: 3px; }
+#fta-preferences .fta-copy-button:disabled { cursor: default; opacity: 1; }
+.fta-copy-hint { flex-shrink: 0; color: light-dark(#287044, #a4d7b7); font-size: 11px; font-weight: 400; }
+.fta-download-details { margin-top: 9px; font-size: 12px; }
+.fta-download-details > summary { cursor: pointer; color: var(--fta-muted, #667085); }
+.fta-download-candidate { padding: 8px 0; border-top: 1px solid var(--fta-border, #e2e6ec); }
+.fta-candidate-name { overflow-wrap: anywhere; }
+#fta-pref-language { display: block; margin-top: 7px; min-width: 180px; }

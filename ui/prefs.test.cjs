@@ -6,6 +6,10 @@ const path = require("node:path");
 const { parseHTML } = require("linkedom");
 const source = fs.readFileSync(path.join(__dirname, "preferences.xhtml"), "utf8");
 const script = fs.readFileSync(path.join(__dirname, "prefs.js"), "utf8");
+const i18nContext = {};
+vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../src/i18n-backend-data.js"), "utf8"), i18nContext);
+vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../src/i18n.js"), "utf8"), i18nContext);
+const i18n = i18nContext.FulltextI18n;
 new vm.Script(script);
 const { document, window } = parseHTML("<html><body><div id='preference-container'></div></body></html>");
 let renderListener;
@@ -16,12 +20,15 @@ let cancelLocalImport = false;
 let reviewLocalImport = false;
 let cancelDirectory = false;
 const model = {
-  version: "0.6.0", settings: { points: 10, pollSeconds: 60, autoDownload: true, downloadDirectories: ["D:\\Downloads"], downloadDirectory: "D:\\Downloads" },
+  version: "0.7.0", settings: { language: "zh-CN", points: 10, pollSeconds: 60, autoDownload: true, downloadDirectories: ["D:\\Downloads"], downloadDirectory: "D:\\Downloads" },
   session: { status: "signed_out", username: "", hasSavedPassword: false, message: "尚未登录" },
   tasks: [], messages: [], messagesStatus: { state: "idle" }
 };
 const app = {
-  getSnapshot: () => structuredClone(model),
+  getSnapshot: () => { const value = structuredClone(model);if (model.currentBatch === undefined) value.currentBatch = { id: "ui-test-batch", createdAt: "2026-11-05T08:00:00Z", taskIDs: model.tasks.map(task => task.id), summary: model.captureSummary || null };return value; },
+  translate: (text, params) => i18n.translate(text, model.settings.language, params),
+  localize: root => i18n.apply(root, model.settings.language),
+  copyText: async value => { calls.push(["copy", value]); },
   subscribe: fn => { renderListener = fn; subscriptions++; return () => { subscriptions--; }; },
   saveCredentialsAndLogin: async account => {
     calls.push(["login", { ...account }]);
@@ -158,10 +165,14 @@ const chooseBindingTarget = itemID => {
   select.dispatchEvent(new window.Event("change"));
 };
 async function publisherControls(taskId = "publisher-task", overrides = {}) {
-  const markup = fs.readFileSync(path.join(__dirname, "publisher-browser.xhtml"), "utf8").replace(/html:/g, "");
+  const markup = fs.readFileSync(path.join(__dirname, "publisher-browser.xhtml"), "utf8").replace(/html:/g, "").replace(/<script([^>]*?)\s*\/>/g, "<script$1></script>");
   const { document, window } = parseHTML("<html><body>" + markup + "</body></html>");
   const calls = [], handlers = {};
+  let language = "zh-CN";const languageListeners = new Set();
   const app = {
+    localize: root => i18n.apply(root, language),
+    translate: text => i18n.translate(text, language),
+    subscribe: listener => { languageListeners.add(listener);return () => languageListeners.delete(listener); },
     async openExternalTask() { throw new Error("Removed dedicated Edge API must not be called"); },
     async openSystemBrowserTask(id) { calls.push(["systemBrowser", id]); return { opened: true, watching: true }; },
     async importLocalPDF(id) { calls.push(["localPDF", id]); return { cancelled: false }; },
@@ -190,7 +201,21 @@ async function publisherControls(taskId = "publisher-task", overrides = {}) {
   };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, "publisher-browser.js"), "utf8"), scope);
   await handlers.load();
-  return { app, calls, get: id => document.getElementById(id), close: () => handlers.unload() };
+  return { app, calls, get: id => document.getElementById(id), close: () => handlers.unload(), languageSubscriptions: () => languageListeners.size,
+    setLanguage(value) { language = value;for (const listener of languageListeners) listener(); }, document, browser };
+}
+async function siteControls() {
+  const markup = fs.readFileSync(path.join(__dirname, "browser.xhtml"), "utf8").replace(/html:/g, "").replace(/<script([^>]*?)\s*\/>/g, "<script$1></script>");
+  const { document, window } = parseHTML("<html><body>" + markup + "</body></html>");
+  const handlers = {}, listeners = new Set();let language = "zh-CN", detached = false;
+  const app = { localize: root => i18n.apply(root, language), subscribe: listener => { listeners.add(listener);return () => listeners.delete(listener); },
+    attachBrowser: async () => ({ currentURI: { spec: "https://www.ablesci.com/assist/detail?id=LocalOnly" } }), detachBrowser: () => { detached = true; }, inspectActivePage: async () => {} };
+  const chromeWindow = { document, MutationObserver: window.MutationObserver,
+    arguments: [{ wrappedJSObject: { app, url: "https://www.ablesci.com/assist/detail?id=LocalOnly", mode: "request" } }],
+    addEventListener(type, callback) { handlers[type] = callback; }, setInterval: () => 1, clearInterval() {} };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "browser.js"), "utf8"), { window: chromeWindow, document, Date });
+  await handlers.load();await flush();
+  return { get: id => document.getElementById(id), setLanguage(value) { language = value;for (const listener of listeners) listener(); }, close: () => handlers.unload(), detached: () => detached, languageSubscriptions: () => listeners.size };
 }
 (async () => {
   assert.equal(root.dataset.activePage, "tasks");
@@ -430,7 +455,7 @@ async function publisherControls(taskId = "publisher-task", overrides = {}) {
   assert.equal(badgeText("queue-warning"), "需网页登录");
   assert.equal(taskRow("queue-warning").querySelector(".fta-status-badge").dataset.tone, "warning");
   filterButton("all").click();
-  assert.equal(badgeText("queue-third"), "排队中 · 第 3 位", "completed history does not affect queue ranks");
+  assert.equal(taskRow("queue-third"), null, "completed history excludes queued tasks");
   filterButton("active").click();
   assert.equal(get("fta-pref-task-list").children.length, 7, "active filter retains queued, acquiring and waiting tasks");
   assert.equal(badgeText("queue-fourth"), "排队中 · 第 4 位", "rank comes from the full snapshot, not visible row indices");
@@ -516,7 +541,7 @@ async function publisherControls(taskId = "publisher-task", overrides = {}) {
   renderListener();
   assert.equal(filterButton("success").textContent, "已获取 1");
   assert.equal(filterButton("login").textContent, "需网页登录 2");
-  assert.equal(filterButton("fallback").textContent, "待兜底 5");
+  assert.equal(filterButton("fallback").textContent, "待兜底 3");
   filterButton("success").click();
   assert.equal(get("fta-pref-task-list").children.length, 1);
   assert.equal(get("fta-pref-select-tasks").disabled, true);
@@ -527,7 +552,8 @@ async function publisherControls(taskId = "publisher-task", overrides = {}) {
   filterButton("fallback").click();
   assert.equal(filterButton("fallback").getAttribute("aria-pressed"), "true");
   assert.equal(get("fta-pref-selection-summary").textContent, "未选择文献", "switching filters cannot submit hidden selections");
-  assert.equal(get("fta-pref-task-list").children.length, 5);
+  assert.equal(get("fta-pref-task-list").children.length, 3, "login tasks do not overlap the fallback category");
+  filterButton("unfinished").click();
   assert.equal(taskCheckbox("select-5").disabled, true, "missing DOI is visible but cannot be submitted");
   assert.equal(taskCheckbox("select-6"), null, "a request ID alone prevents duplicate fallback");
   assert.equal(taskCheckbox("select-7"), null, "uncertain submissions cannot be selected");
@@ -535,7 +561,7 @@ async function publisherControls(taskId = "publisher-task", overrides = {}) {
   assert.match(get("fta-pref-selection-summary").textContent, /已选 4 篇 · 本次悬赏合计 100 积分/, "explicit action uses the saved current default, not old task budgets");
   pageTab("settings").click(); pageTab("messages").click(); pageTab("tasks").click();
   assert.match(get("fta-pref-selection-summary").textContent, /已选 4 篇/);
-  assert.equal(filterButton("fallback").getAttribute("aria-pressed"), "true", "page tabs preserve the task filter and explicit selections");
+  assert.equal(filterButton("unfinished").getAttribute("aria-pressed"), "true", "page tabs preserve the task filter and explicit selections");
   assert.match(get("fta-pref-bulk-assist").textContent, /每篇 25 积分/);
   changeChecked(taskCheckbox("select-3"), false);
   assert.equal(get("fta-pref-select-tasks").indeterminate, true);
@@ -553,7 +579,7 @@ async function publisherControls(taskId = "publisher-task", overrides = {}) {
   model.tasks.find(task => task.id === "select-3").requestID = "RaceExisting";
   get("fta-pref-bulk-assist").click(); await flush();
   assert.match(get("fta-pref-status").textContent, /没有新增求助任务。已跳过 1 项/, "stale selected tasks are not reported as accepted");
-  filterButton("all").click();
+  filterButton("unfinished").click();
   input("fta-pref-points", "35");
   model.tasks = [{ id: "retry-budget", title: "原预算不足", state: "error", requestedPoints: 10, doi: "10.1234/low-budget", itemID: 76 }];
   renderListener();
@@ -633,7 +659,7 @@ async function publisherControls(taskId = "publisher-task", overrides = {}) {
   assert.equal(rowButton("下载到文库"), undefined);
   filterButton("unfinished").click();
   assert.equal(get("fta-pref-task-list").children.length, 0);
-  assert.match(get("fta-pref-task-empty").textContent, /已获取的记录可在“已获取”中查看/);
+  assert.match(get("fta-pref-task-empty").textContent, /跨批次的已获取记录可在“全部历史”中查看/);
   model.tasks = [{ id: "unbound-file", title: "仅跟踪的已应助任务", doi: "10.1234/bind", itemID: null, state: "available", requestID: "ReadyUnbound", requestURL: "https://www.ablesci.com/assist/detail?id=ReadyUnbound" }];
   bindingCandidates = [
     { itemID: 501, title: "<strong>对应文献</strong>", doi: "10.1234/bind", libraryName: "我的文库" },
@@ -689,7 +715,7 @@ async function publisherControls(taskId = "publisher-task", overrides = {}) {
   bindingCandidates = [{ itemID: 501, title: "对应文献", doi: "10.1234/bind" }];
   rowButton("关联文献").click(); await flush();
   chooseBindingTarget(501);
-  filterButton("all").click();
+  filterButton("active").click();
   assert.equal(get("fta-pref-binding-target"), null, "switching filters clears the binding form along with batch selection");
   rowButton("关联文献").click(); await flush();
   assert.equal(get("fta-pref-binding-target").value, "", "reopening never reuses a previous item's selection");
@@ -763,7 +789,7 @@ async function publisherControls(taskId = "publisher-task", overrides = {}) {
   ];
   filterButton("unfinished").click();
   renderListener();
-  const labels = id => [...taskRow(id).querySelectorAll("button")].map(button => button.textContent);
+  const labels = id => [...taskRow(id).querySelectorAll(".fta-row-actions button")].map(button => button.textContent);
   assert.equal(labels("unbound-login").includes("浏览器下载并自动入库"), false, "browser acquisition requires an associated Zotero item");
   assert.doesNotMatch(taskRow("manual-login").querySelector(".fta-row-meta").textContent, /积分/, "unsubmitted task budgets do not contradict the live input");
   changeChecked(taskCheckbox("manual-login"), true);
@@ -990,6 +1016,172 @@ async function publisherControls(taskId = "publisher-task", overrides = {}) {
   assert.equal(get("fta-pref-task-list").children.length, 8);
   assert.equal(get("fta-pref-bulk-actions").hidden, true);
   assert.equal(get("fta-pref-bulk-note").hidden, true, "completed history keeps the paid-selection toolbar collapsed");
+  // Batch categories are exclusive and never absorb old tasks. Global unfinished
+  // and completed history remain available even before any batch was recorded.
+  assert.deepEqual([...get("fta-pref-task-filters").querySelectorAll("button")].map(node => node.dataset.filter), ["active", "login", "fallback", "success", "unfinished", "all"]);
+  model.tasks = [
+    { id: "scope-old-wait", state: "waiting", requestID: "OldRequest" },
+    { id: "scope-old-done", state: "imported", attachmentID: 201, completedAt: "2026-11-01T08:00:00Z" },
+    { id: "scope-queued", state: "queued", title: "Queued article" },
+    { id: "scope-login", state: "needs_login", itemID: 101, doi: "10.1234/login" },
+    { id: "scope-fallback", state: "not_found", itemID: 102, doi: "10.1234/fallback" },
+    { id: "scope-browser", state: "manual_waiting", itemID: 103, doi: "10.1234/browser" },
+    { id: "scope-done", state: "imported", attachmentID: 202, completedAt: "2026-11-05T08:00:00Z" },
+    { id: "scope-old-receipt", state: "imported", attachmentID: 203, completedAt: "2026-11-03T08:00:00Z", assistReceipt: { adoption: "pending", messages: "pending" } }
+  ];
+  model.currentBatch = { id: "scope-batch", createdAt: "2026-11-05T08:00:00Z", taskIDs: ["scope-queued", "scope-login", "scope-fallback", "scope-browser", "scope-done"], summary: { id: "persisted-batch", at: "2026-11-05T08:00:00Z", message: "本次选择已处理，结果见任务列表。" } };
+  filterButton("unfinished").click();renderListener();
+  assert.equal(get("fta-pref-task-list").children.length, 6);
+  assert.ok(taskRow("scope-old-wait"));assert.ok(taskRow("scope-old-receipt"));
+  assert.match(get("fta-pref-task-scope").textContent, /跨批次保留所有未完成/);
+  assert.equal(filterButton("active").textContent, "进行中 2");
+  assert.equal(filterButton("login").textContent, "需网页登录 1");
+  assert.equal(filterButton("fallback").textContent, "待兜底 1");
+  assert.equal(filterButton("success").textContent, "已获取 1");
+  assert.equal(filterButton("unfinished").textContent, "未完成 6");
+  assert.equal(filterButton("all").textContent, "全部历史 3");
+  filterButton("active").click();
+  assert.deepEqual([...get("fta-pref-task-list").children].map(node => node.dataset.taskId), ["scope-queued", "scope-browser"]);
+  assert.equal(get("fta-pref-task-count").textContent, "5");
+  assert.match(get("fta-pref-task-scope").textContent, /仅统计最近一次/);
+  assert.equal(labels("scope-browser").some(label => label.startsWith("科研通求助")), true, "browser wait remains eligible for an explicit fallback despite its active category");
+  filterButton("login").click();
+  assert.equal(labels("scope-login").some(label => label.startsWith("科研通求助")), true, "login category retains an explicit fallback action");
+  filterButton("all").click();
+  assert.deepEqual([...get("fta-pref-task-list").children].map(node => node.dataset.taskId), ["scope-done", "scope-old-receipt", "scope-old-done"]);
+  assert.match(get("fta-pref-task-scope").textContent, /按完成时间从新到旧/);
+  model.currentBatch = null;renderListener();filterButton("active").click();
+  assert.equal(get("fta-pref-task-list").children.length, 0);
+  assert.equal(filterButton("active").textContent, "进行中 0");
+  assert.match(get("fta-pref-task-scope").textContent, /尚未记录当前批次/);
+  filterButton("unfinished").click();assert.equal(get("fta-pref-task-list").children.length, 6);
+  filterButton("all").click();assert.equal(get("fta-pref-task-list").children.length, 3);
+
+  // Download diagnostics cannot implicitly import or confirm a candidate.
+  app.recheckDownloadedPDFs = async id => { calls.push(["recheckPDFs", id]); };
+  app.reviewDownloadCandidate = async (id, candidate) => { calls.push(["reviewCandidate", id, candidate]); };
+  model.tasks = [{ id: "diagnostic", state: "manual_waiting", itemID: 301, title: "下载设置", doi: "10.1234/diagnostic", acquisitionMode: "manual",
+    downloadStatus: { scanned: 4, unknown: 1, mismatched: 2, lastScanAt: "2026-11-05T08:30:00Z" },
+    downloadCandidates: [{ id: "candidate-one", filename: "<img src=x onerror=bad>.pdf", message: "无法自动确认所选 PDF 的论文身份。请先预览并核对标题、作者和 DOI，再明确确认。" }],
+    accessEvidence: { kind: "institutional_entry", confidence: "explicit" }, accessHint: { scope: "host_hint", kind: "institutional_confirmed", institutionalConfirmed: false }
+  }];
+  model.currentBatch = { id: "diagnostic-batch", createdAt: "2026-11-05T08:00:00Z", taskIDs: ["diagnostic"] };
+  filterButton("unfinished").click();renderListener();
+  const diagnostic = taskRow("diagnostic").querySelector(".fta-download-details");
+  assert.equal(diagnostic.hasAttribute("open"), false, "download diagnostics start collapsed");
+  assert.match(diagnostic.textContent, /已检查 4 个 PDF；身份待核对 1 个，不匹配 2 个/);
+  assert.equal(diagnostic.querySelector("img"), null);
+  assert.match(taskRow("diagnostic").textContent, /不代表当前账号拥有此论文权限/);
+  assert.match(taskRow("diagnostic").textContent, /仅供参考/);
+  assert.doesNotMatch(taskRow("diagnostic").textContent, /此论文已确认机构访问/);
+  diagnostic.setAttribute("open", "");
+  renderListener();
+  assert.equal(taskRow("diagnostic").querySelector(".fta-download-details").hasAttribute("open"), true, "an immediate polling refresh preserves the user's expanded diagnostic before toggle dispatch");
+  model.tasks.push({ id: "diagnostic-other", state: "manual_waiting", itemID: 302, title: "Another download", downloadStatus: { scanned: 0 } });
+  renderListener();
+  assert.equal(taskRow("diagnostic-other").querySelector(".fta-download-details").hasAttribute("open"), false, "expansion belongs only to the selected task");
+  filterButton("all").click();filterButton("unfinished").click();
+  assert.equal(taskRow("diagnostic").querySelector(".fta-download-details").hasAttribute("open"), true, "filtering away and back preserves the expanded task");
+  taskRow("diagnostic").querySelector(".fta-download-details").removeAttribute("open");
+  renderListener();
+  assert.equal(taskRow("diagnostic").querySelector(".fta-download-details").hasAttribute("open"), false, "an explicitly collapsed diagnostic stays collapsed after refresh");
+  taskRow("diagnostic").querySelector(".fta-download-details").setAttribute("open", "");
+  model.tasks.pop();renderListener();
+  const beforeDiagnostic = calls.length;
+  rowButton("检查已下载文件").click();await flush();
+  assert.equal(taskRow("diagnostic").querySelector(".fta-download-details").hasAttribute("open"), true, "a check action also preserves expanded candidates");
+  rowButton("预览并核对").click();await flush();
+  assert.deepEqual(calls.slice(beforeDiagnostic), [["recheckPDFs", "diagnostic"], ["reviewCandidate", "diagnostic", "candidate-one"]]);
+  assert.equal(model.tasks[0].state, "manual_waiting");
+  assert.equal(taskRow("diagnostic").querySelector(".fta-download-details").hasAttribute("open"), true, "preview refresh does not hide the candidate or imply confirmation");
+
+  // Language is saved on its own, while drafts, task filter, selection and raw
+  // article/site text survive immediately switching among all three locales.
+  model.session = { status: "signed_out", username: "saved@example.invalid", message: "", hasSavedPassword: false };
+  model.messages = [{ id: "raw-message", title: "下载设置", summary: "科研通账号" }];
+  model.messagesStatus = { state: "loaded" };
+  input("fta-pref-points", "37");input("fta-pref-poll", "125");
+  input("fta-pref-username", "draft@example.invalid");input("fta-pref-password", "do-not-save-this-draft");
+  get("fta-pref-request-url").value = "https://www.ablesci.com/assist/detail?id=DraftOnly";
+  chooseTarget("diagnostic");changeChecked(taskCheckbox("diagnostic"), true);
+  const savedPointsBeforeLanguage = model.settings.points;
+  const chooseLanguage = async language => {
+    const select = get("fta-pref-language");
+    for (const option of select.querySelectorAll("option")) option.removeAttribute("selected");
+    select.querySelector('option[value="' + language + '"]').setAttribute("selected", "selected");
+    select.dispatchEvent(new window.Event("change"));await flush();
+  };
+  const beforeLanguage = calls.length;await chooseLanguage("en");
+  assert.deepEqual(calls.slice(beforeLanguage), [["save", { language: "en" }]]);
+  assert.equal(model.settings.points, savedPointsBeforeLanguage);
+  assert.equal(get("fta-pref-points").value, "37");assert.equal(get("fta-pref-poll").value, "125");
+  assert.equal(get("fta-pref-username").value, "draft@example.invalid");assert.equal(get("fta-pref-password").value, "do-not-save-this-draft");
+  assert.equal(get("fta-pref-request-url").value, "https://www.ablesci.com/assist/detail?id=DraftOnly");
+  assert.equal(get("fta-pref-request-target").value, "diagnostic");assert.equal(taskCheckbox("diagnostic").checked, true);
+  assert.equal(filterButton("unfinished").getAttribute("aria-pressed"), "true");
+  assert.equal(pageTab("settings").textContent, "Download settings");
+  assert.equal(filterButton("active").textContent, "In progress 1");
+  assert.match(get("fta-pref-task-scope").textContent, /All unfinished tasks across batches/);
+  assert.match(get("fta-pref-bulk-assist").textContent, /37 points each/);
+  assert.equal(taskRow("diagnostic").querySelector(".fta-row-title button span").textContent, "下载设置", "article title matching a UI key must never be translated");
+  assert.equal(get("fta-pref-message-list").querySelector(".fta-row-title").textContent, "下载设置");
+  assert.equal(get("fta-pref-message-list").querySelector(".fta-message-summary").textContent, "科研通账号");
+  assert.equal(taskRow("diagnostic").querySelector(".fta-candidate-name").textContent, "<img src=x onerror=bad>.pdf");
+  assert.match(taskRow("diagnostic").textContent, /Checked 4 PDFs: 1 need identity review, 2 do not match/);
+  assert.match(taskRow("diagnostic").textContent, /does not confirm that the current account/);
+  const untranslatedUI = [];
+  (function inspect(node) {
+    if (node.nodeType === 3) { if (/[\u4e00-\u9fff]/.test(node.nodeValue || "")) untranslatedUI.push(node.nodeValue.trim());return; }
+    if (node.getAttribute?.("data-i18n-skip") === "true" || ["style", "script"].includes(node.localName)) return;
+    for (const child of node.childNodes || []) inspect(child);
+  })(root);
+  assert.deepEqual(untranslatedUI, [], "all plugin UI text is translated; source metadata is explicitly excluded");
+  await chooseLanguage("zh-TW");
+  assert.equal(pageTab("settings").textContent, "下載設定");
+  assert.equal(get("fta-pref-account-state").textContent, "未登入");
+  assert.equal(get("fta-pref-password").value, "do-not-save-this-draft");
+  assert.equal(taskRow("diagnostic").querySelector(".fta-row-title button span").textContent, "下载设置");
+  await chooseLanguage("zh-CN");
+  assert.equal(pageTab("settings").textContent, "下载设置");
+  assert.match(get("fta-pref-bulk-assist").textContent, /每篇 37 积分/);
+  await chooseLanguage("en");
+  model.tasks[0].title = "S <i>olenopsis</i> and <b>other</b>";renderListener();
+  const copyTitle = taskRow("diagnostic").querySelector(".fta-row-title button");
+  assert.equal(copyTitle.getAttribute("aria-label"), "Copy title");
+  assert.equal(copyTitle.getAttribute("type"), "button");
+  copyTitle.click();await flush();
+  assert.deepEqual(calls.at(-1), ["copy", "S olenopsis and other"], "copy strips formatting but does not collapse real spaces");
+  assert.equal(taskRow("diagnostic").querySelector(".fta-copy-hint").textContent, "Copied");
+  await new Promise(resolve => setTimeout(resolve, 1900));
+  assert.equal(taskRow("diagnostic").querySelector(".fta-copy-hint").textContent, "", "copy feedback expires without changing the item title");
+  const copyDOI = taskRow("diagnostic").querySelector(".fta-doi-copy");copyDOI.click();await flush();
+  assert.deepEqual(calls.at(-1), ["copy", "10.1234/diagnostic"]);
+  app.copyText = async () => { throw new Error("复制失败，请重试。"); };
+  copyDOI.click();await flush();assert.equal(get("fta-pref-status").textContent, "Copy failed. Try again.");
+  assert.equal(get("fta-pref-status").dataset.error, "true");
+  app.copyText = async value => { calls.push(["copy", value]); };
+  await chooseLanguage("zh-CN");
+  app.confirmInstitutionalAccess = async id => { calls.push(["confirmAccess", id]);model.tasks[0].accessHint = { scope: "article", kind: "institutional_confirmed", institutionalConfirmed: true };renderListener(); };
+  app.forgetInstitutionalAccess = async id => { calls.push(["forgetAccess", id]);model.tasks[0].accessHint = { scope: "article", kind: "browser_success", institutionalConfirmed: false };renderListener(); };
+  Object.assign(model.tasks[0], { state: "imported", source: "browser_download", attachmentID: 345, accessHint: { scope: "article", kind: "browser_success", institutionalConfirmed: false } });
+  filterButton("success").click();renderListener();
+  assert.match(taskRow("diagnostic").textContent, /尚未确认机构权限/);
+  rowButton("这是通过机构获取").click();await flush();
+  assert.deepEqual(calls.at(-1), ["confirmAccess", "diagnostic"]);
+  assert.match(taskRow("diagnostic").textContent, /此论文已确认机构访问/);
+  assert.equal(rowButton("这是通过机构获取"), undefined);
+  rowButton("撤销机构确认").click();await flush();
+  assert.deepEqual(calls.at(-1), ["forgetAccess", "diagnostic"]);
+  assert.doesNotMatch(taskRow("diagnostic").textContent, /此论文已确认机构访问/);
+  assert.ok(rowButton("这是通过机构获取"));
+  for (const [zh, tw, en] of i18n.uiCatalog) {
+    if (zh.includes("{")) continue;
+    assert.equal(i18n.translate(zh, "en"), en);assert.equal(i18n.translate(zh, "zh-TW"), tw);
+  }
+  assert.equal(i18n.translate("已检查 9 个 PDF；身份待核对 2 个，不匹配 6 个。", "en"), "Checked 9 PDFs: 2 need identity review, 6 do not match.");
+  assert.equal(i18n.translate("按 25 积分重试", "en"), "Retry with 25 points");
+  assert.equal(i18n.translate("来源：出版社网页", "en"), "Source: Publisher page");
+  assert.equal(i18n.translate("Unknown <img onerror=x> 论文", "en"), "Unknown <img onerror=x> 论文");
   pageTab("messages").click();
   context.FulltextPreferences.destroy();
   assert.equal(subscriptions, 0);
@@ -1031,5 +1223,31 @@ async function publisherControls(taskId = "publisher-task", overrides = {}) {
   const unsupported = await publisherControls("publisher-task", { openSystemBrowserTask: undefined });
   assert.equal(unsupported.get("publisher-system").disabled, true);
   unsupported.close();
-  console.log("Preferences tests passed: horizontal accessible tabs, keyboard navigation, preserved drafts, batch summaries, comfortable empty/history states, credentials, live budgets, download folders, PDF review, AbleSci fallback, binding, safe text, cleanup.");
+  const localizedPublisher = await publisherControls();
+  assert.equal(localizedPublisher.languageSubscriptions(), 1);
+  localizedPublisher.setLanguage("en");await flush();
+  assert.equal(localizedPublisher.document.documentElement.getAttribute("lang"), "en", "publisher localization targets its own document");
+  assert.equal(localizedPublisher.document.documentElement.contains(localizedPublisher.get("publisher-system")), true, "test browser chrome is inside its document element");
+  assert.equal(localizedPublisher.get("publisher-system").textContent, "Download in browser and auto-import");
+  assert.match(localizedPublisher.get("publisher-status").textContent, /website requires human verification/);
+  localizedPublisher.get("publisher-system").click();await flush();
+  assert.match(localizedPublisher.get("publisher-status").textContent, /folder checks started/);
+  localizedPublisher.browser.contentTitle = "下载设置";localizedPublisher.browser.dispatchEvent(new window.Event("pagetitlechanged"));await flush();
+  assert.equal(localizedPublisher.get("publisher-tabs").querySelector(".publisher-tab-title").textContent, "下载设置", "real website titles are preserved in localized browser chrome");
+  localizedPublisher.setLanguage("zh-TW");await flush();
+  assert.equal(localizedPublisher.get("publisher-retry").textContent, "完成登入並重試此文獻");
+  localizedPublisher.setLanguage("zh-CN");await flush();
+  assert.equal(localizedPublisher.get("publisher-system").textContent, "浏览器下载并自动入库");
+  localizedPublisher.close();assert.equal(localizedPublisher.languageSubscriptions(), 0);
+  const localizedSite = await siteControls();
+  assert.equal(localizedSite.languageSubscriptions(), 1);
+  localizedSite.setLanguage("en");await flush();
+  assert.equal(localizedSite.get("ft-read").textContent, "Refresh task status");
+  assert.match(localizedSite.get("ft-status").textContent, /Complete login or CAPTCHA/);
+  localizedSite.get("ft-read").click();await flush();
+  assert.match(localizedSite.get("ft-status").textContent, /Task status updated/);
+  localizedSite.setLanguage("zh-TW");await flush();
+  assert.equal(localizedSite.get("ft-read").textContent, "刷新任務狀態");
+  localizedSite.close();assert.equal(localizedSite.languageSubscriptions(), 0);assert.equal(localizedSite.detached(), true);
+  console.log("Preferences tests passed: batch scopes and exclusive filters, completed history, three-language UI and browser chrome, preserved drafts and metadata, title/DOI copy, download diagnosis and explicit review, institutional confirmation/undo, existing task workflows and cleanup.");
 })().catch(error => { console.error(error); process.exitCode = 1; });

@@ -18,12 +18,15 @@ const settle = () => new Promise(resolve=>setImmediate(resolve));
 async function until(condition) {const end=Date.now()+2000;while(!condition()){if(Date.now()>end)throw new Error('Fixture condition timed out');await settle();}}
 function item(id) {return {id,key:'ITEM'+id,libraryID:1,deleted:false,isRegularItem:()=>true,getAttachments:()=>[],async getBestAttachment(){return null;},getField(name){return {DOI:'10.1234/paper'+id,title:'Fixture paper '+id,url:'https://publisher.test/paper'+id}[name]||'';}};}
 
-function environment({acquire,initialTasks,initialIntents,realPublisher=false,writePDFError=false,pickPDF,pickDirectory,pdfIdentity,discoverDirectories,watchNow,edgeAcquire,edgeHost}={}) {
+function environment({acquire,initialTasks,initialQueue,initialAccessHistory,initialPrefs,initialIntents,realPublisher=false,writePDFError=false,pickPDF,pickDirectory,pdfIdentity,discoverDirectories,watchNow,edgeAcquire,edgeHost}={}) {
   const files=new Map(),prefs=new Map(),items=new Map(),menus=new Map(),publisherCalls=[],submissions=[],remoteRequests=[],errors=[],httpCalls=[],imports=[];
   const directories=new Set([downloadDirectory]),fileMetadata=new Map(),openedURLs=[],openedFiles=[],identityCalls=[];
   let clock=Date.now(),fileRevision=1;
   let accountCalls=0,active=0,peak=0,writeHook=null,importCount=0,oaCalls=0;
   if(initialTasks)files.set(queuePath,MODEL.serializeQueue(initialTasks));
+  if(initialQueue)files.set(queuePath,MODEL.serializeQueue(initialQueue));
+  if(initialAccessHistory)files.set(path.win32.join('C:\\isolated','fulltext-assistant','access-history.json'),JSON.stringify(initialAccessHistory));
+  for(const [key,value] of Object.entries(initialPrefs||{}))prefs.set(key,value);
   if(initialIntents)files.set(intentPath,JSON.stringify(initialIntents));
   const account={authenticated:true,accountID:'FixtureAccount',username:'Display Name'};
   const session={destroyed:false,cleared:0,async initialize(){},getStatus(){return {hasCookies:false,persistent:true};},async flush(){},async destroy(){this.destroyed=true;},async clearSession(){this.cleared++;},async request(){throw new Error('No real request permitted in app fixture');}};
@@ -38,6 +41,8 @@ function environment({acquire,initialTasks,initialIntents,realPublisher=false,wr
   vm.runInNewContext(publisherWindowSource,scope);
   vm.runInNewContext(downloadWatchSource,scope);
   vm.runInNewContext(downloadFoldersSource,scope);
+  scope.FulltextAccessHistory=require('../src/access-history.js');
+  for(const moduleFile of ['i18n-backend-data.js','i18n.js']){const file=path.join(__dirname,'../src',moduleFile);if(fs.existsSync(file))vm.runInNewContext(fs.readFileSync(file,'utf8'),scope);}
   const createWatch=scope.FulltextDownloadWatch.create;
   scope.FulltextDownloadWatch.create=options=>createWatch({...options,now:watchNow||(()=>clock)});
   if(!realPublisher)scope.FulltextPublisher={validPDF:scope.FulltextPublisher.validPDF,findExistingPDF:scope.FulltextPublisher.findExistingPDF,create(){return {async acquire(value,options){publisherCalls.push({item:value,options});active++;peak=Math.max(peak,active);try{return await(acquire?acquire(value,options):{attachmentID:800+value.id,source:'publisher'});}finally{active--;}}};}};
@@ -760,7 +765,7 @@ test('completed history survives startup without rewriting its completion date',
   const old=MODEL.createTask({libraryID:1,itemID:1,itemKey:'ITEM1',doi:'10.1234/paper1',state:'imported',attachmentID:901},{now:()=> '2026-10-01T00:00:00.000Z'});
   const env=environment({initialTasks:[old]});await env.app.start();const stored=env.app.getSnapshot().tasks[0];
   assert.equal(stored.completedAt,old.updatedAt);assert.equal(stored.updatedAt,old.updatedAt);await env.app.stop();
-  assert.equal(JSON.stringify(MODEL.deserializeQueue(env.files.get(queuePath)).tasks[0]),JSON.stringify(stored));
+  assert.equal(JSON.stringify(MODEL.deserializeQueue(env.files.get(queuePath)).tasks[0]),JSON.stringify(MODEL.sanitizeTask(stored)));
 });
 
 test('available standalone request stays unimported until the user confirms a matching item',async()=>{
@@ -1199,4 +1204,141 @@ test('context menu has one branded submenu, live points, and selection-aware act
   context.items=[{isRegularItem:()=>false,isAttachment:()=>true,parentID:1}];parent.menus[0].onShowing(null,context);assert.equal(context.enabled,true);
   context.items=[{isRegularItem:()=>false,isAttachment:()=>true,parentID:null}];parent.menus[0].onShowing(null,context);assert.equal(context.enabled,false);
   await env.app.stop();assert.equal(env.menus.size,0);
+});
+
+test('current batch membership is a persisted view and never replaces older active or completed tasks',async()=>{
+  const gates=new Map(),env=environment({acquire:async value=>{const gate=deferred();gates.set(value.id,gate);await gate.promise;return {attachmentID:800+value.id,source:'publisher'};}});
+  const parents=[1,2,3].map(id=>env.addItem(item(id)));await env.app.start();
+  await env.app.captureItems(parents.slice(0,2));await until(()=>gates.size===2);
+  const first=env.app.getSnapshot().currentBatch;
+  await env.app.captureItems([parents[1],parents[2]]);
+  const snapshot=env.app.getSnapshot(),current=snapshot.currentBatch;
+  assert.notEqual(current.id,first.id);assert.equal(snapshot.tasks.length,3);
+  assert.deepEqual(Array.from(current.taskIDs,id=>snapshot.tasks.find(t=>t.id===id).itemID),[2,3]);
+  current.taskIDs.length=0;current.summary.queuedTaskIDs.push('tampered');
+  assert.equal(env.app.getSnapshot().currentBatch.taskIDs.length,2);
+  gates.get(1).resolve();gates.get(2).resolve();await until(()=>gates.has(3));gates.get(3).resolve();
+  await until(()=>env.app.getSnapshot().tasks.every(t=>t.state==='imported'));await env.app.stop();
+  const persisted=MODEL.deserializeQueue(env.files.get(queuePath)),restored=environment({initialQueue:persisted});await restored.app.start();
+  assert.equal(restored.app.getSnapshot().tasks.length,3);
+  assert.equal(restored.app.getSnapshot().currentBatch.id,persisted.currentBatch.id);
+  assert.deepEqual(Array.from(restored.app.getSnapshot().currentBatch.taskIDs),persisted.currentBatch.taskIDs);
+  assert.equal(restored.app.getSnapshot().captureSummary.id,persisted.currentBatch.summary.id);
+  await restored.app.captureItems([]);assert.equal(restored.app.getSnapshot().currentBatch.taskIDs.length,0);assert.equal(restored.app.getSnapshot().tasks.length,3);
+  await restored.app.stop();
+});
+
+test('explicit recheck finds a recent already-downloaded PDF without reopening the browser or including older files',async()=>{
+  const task=MODEL.createTask({libraryID:1,itemID:1,itemKey:'ITEM1',doi:'10.1234/paper1',state:'paused'});
+  const env=environment({initialTasks:[task]});env.addItem(item(1));await env.app.start();
+  env.putFile(path.win32.join(downloadDirectory,'older.pdf'),env.pdf,{lastModified:Date.parse(task.createdAt)-86400000});
+  env.putFile(path.win32.join(downloadDirectory,'downloaded.pdf'),env.pdf,{lastModified:Date.parse(task.createdAt)+100});
+  await env.app.recheckDownloadedPDFs(task.id);assert.equal(env.openedURLs.length,0);
+  await env.app.checkDownloads();env.advanceTime(2500);await env.app.checkDownloads();
+  assert.equal(env.app.getSnapshot().tasks[0].state,'imported');assert.equal(env.importCount,1);
+  assert.equal(env.identityCalls.some(c=>c.file.endsWith('older.pdf')),false);
+  assert.equal(env.submissions.length,0);await env.app.stop();
+});
+
+test('unknown browser files become bounded preview candidates and still require explicit confirmation',async()=>{
+  const task=MODEL.createTask({libraryID:1,itemID:1,itemKey:'ITEM1',doi:'10.1234/paper1',state:'paused'});
+  const env=environment({initialTasks:[task],pdfIdentity:{async inspect(){return{status:'unknown',message:'The title starts after an earlier article'};}}});env.addItem(item(1));await env.app.start();
+  await env.app.openSystemBrowserTask(task.id);const file=path.win32.join(downloadDirectory,'needs-review.pdf');env.putFile(file,env.pdf);
+  await env.app.checkDownloads();env.advanceTime(2500);await env.app.checkDownloads();
+  let snapshot=env.app.getSnapshot();assert.equal(snapshot.tasks[0].state,'manual_waiting');assert.equal(env.importCount,0);
+  assert.equal(snapshot.tasks[0].downloadCandidates.length,1);assert.equal(snapshot.tasks[0].downloadStatus.unknown,1);
+  const id=snapshot.tasks[0].downloadCandidates[0].id;snapshot.tasks[0].downloadCandidates[0].id='tampered';
+  assert.equal(env.app.getSnapshot().tasks[0].downloadCandidates[0].id,id);
+  await env.app.reviewDownloadCandidate(task.id,id);assert.equal(env.app.getSnapshot().tasks[0].state,'manual_review');assert.equal(env.importCount,0);assert.deepEqual(env.openedFiles,[file]);
+  await env.app.confirmDownloadedPDF(task.id);assert.equal(env.importCount,1);assert.equal(env.app.getSnapshot().tasks[0].downloadCandidates.length,0);await env.app.stop();
+});
+
+test('changed or mismatched browser candidates never inherit a preview confirmation',async()=>{
+  const task=MODEL.createTask({libraryID:1,itemID:1,itemKey:'ITEM1',doi:'10.1234/paper1',state:'paused'});
+  const env=environment({initialTasks:[task],pdfIdentity:{async inspect(file){return{status:file.endsWith('wrong.pdf')?'mismatch':'unknown',message:'Fixture diagnostic'};}}});env.addItem(item(1));await env.app.start();
+  await env.app.openSystemBrowserTask(task.id);const file=path.win32.join(downloadDirectory,'uncertain.pdf');env.putFile(file,env.pdf);env.putFile(path.win32.join(downloadDirectory,'wrong.pdf'),env.pdf);
+  await env.app.checkDownloads();env.advanceTime(2500);await env.app.checkDownloads();
+  const taskView=env.app.getSnapshot().tasks[0];assert.equal(taskView.downloadCandidates.length,1);assert.equal(taskView.downloadStatus.mismatched,1);
+  const changed=env.pdf.slice();changed[30]=65;env.putFile(file,changed);
+  await assert.rejects(env.app.reviewDownloadCandidate(task.id,taskView.downloadCandidates[0].id),/已改变/);
+  assert.equal(env.importCount,0);assert.equal(env.openedFiles.length,0);await env.app.stop();
+});
+
+test('a candidate that becomes identifiable during preview still requires explicit confirmation',async()=>{
+  const task=localFixture();let matches=false;
+  const env=environment({initialTasks:[task],pdfIdentity:{async inspect(){return{status:matches?'match':'unknown',message:'Candidate identity'};}}});
+  env.addItem(item(1));await env.app.start();await env.app.openSystemBrowserTask(task.id);
+  const file=path.win32.join(downloadDirectory,'candidate.pdf');env.putFile(file,env.pdf);
+  await env.app.checkDownloads();env.advanceTime(2500);await env.app.checkDownloads();matches=true;
+  const candidate=env.app.getSnapshot().tasks[0].downloadCandidates[0];
+  const result=await env.app.reviewDownloadCandidate(task.id,candidate.id);
+  assert.equal(result.needsReview,true);assert.equal(env.importCount,0);assert.deepEqual(env.openedFiles,[file]);
+  assert.equal(env.app.getSnapshot().tasks[0].state,'manual_review');
+  await env.app.confirmDownloadedPDF(task.id);assert.equal(env.importCount,1);await env.app.stop();
+});
+
+test('pausing while a candidate file is read prevents a late preview and task revival',async()=>{
+  const task=localFixture(),gate=deferred();let reading=false;
+  const env=environment({initialTasks:[task],pdfIdentity:{async inspect(){return{status:'unknown',message:'Candidate identity'};}}});
+  env.addItem(item(1));await env.app.start();await env.app.openSystemBrowserTask(task.id);
+  const file=path.win32.join(downloadDirectory,'candidate.pdf');env.putFile(file,env.pdf);
+  await env.app.checkDownloads();env.advanceTime(2500);await env.app.checkDownloads();
+  const candidate=env.app.getSnapshot().tasks[0].downloadCandidates[0],read=env.IOUtils.read;
+  env.IOUtils.read=async(...args)=>{if(args[0]===file&&!reading){reading=true;await gate.promise;}return read(...args);};
+  const pending=env.app.reviewDownloadCandidate(task.id,candidate.id);await until(()=>reading);
+  const rejected=assert.rejects(pending,/已取消/);await env.app.pauseTask(task.id);gate.resolve();await rejected;
+  assert.equal(env.app.getSnapshot().tasks[0].state,'paused');assert.equal(env.importCount,0);assert.equal(env.openedFiles.length,0);
+  await env.app.stop();
+});
+
+test('institutional experience requires explicit user confirmation, survives restart, and does not prevent explicit fallback',async()=>{
+  const task=MODEL.createTask({libraryID:1,itemID:1,itemKey:'ITEM1',doi:'10.1234/paper1',officialURL:'https://publisher.test/paper1',source:'browser_download',attachmentID:900,state:'imported'});
+  const env=environment({initialTasks:[task]});env.addItem(item(1));await env.app.start();
+  assert.equal(env.app.getSnapshot().tasks[0].accessHint.kind,'browser_success');assert.equal(env.app.getSnapshot().tasks[0].accessHint.institutionalConfirmed,false);
+  await env.app.confirmInstitutionalAccess(task.id);assert.equal(env.app.getSnapshot().tasks[0].accessHint.institutionalConfirmed,true);
+  const history=JSON.parse(env.files.get(path.win32.join('C:\\isolated','fulltext-assistant','access-history.json')));await env.app.stop();
+  const restarted=environment({initialTasks:[task],initialAccessHistory:history,acquire:async()=>({state:'not_found',message:'No automatic PDF'})});const parent=restarted.addItem(item(1));await restarted.app.start();
+  await restarted.app.captureItems([parent]);await until(()=>restarted.app.getSnapshot().tasks[0].state==='needs_login');assert.equal(restarted.submissions.length,0);
+  await restarted.app.requestAssist(task.id);await until(()=>restarted.submissions.length===1);
+  await restarted.app.forgetInstitutionalAccess(task.id);assert.equal(restarted.app.getSnapshot().tasks[0].accessHint.institutionalConfirmed,false);
+  await restarted.app.stop();
+});
+
+test('an article with only a resolved publisher URL can retain explicit institutional experience',async()=>{
+  const task=MODEL.createTask({libraryID:1,itemID:1,itemKey:'ITEM1',doi:'10.1234/paper1',publisherURL:'https://publisher.test/paper1',source:'browser_download',attachmentID:900,state:'imported'});
+  const env=environment({initialTasks:[task]});env.addItem(item(1));await env.app.start();
+  await env.app.confirmInstitutionalAccess(task.id);
+  assert.equal(env.app.getSnapshot().tasks[0].accessHint.institutionalConfirmed,true);
+  assert.equal(JSON.parse(env.files.get(path.win32.join('C:\\isolated','fulltext-assistant','access-history.json'))).entries.length,1);
+  await env.app.stop();
+});
+
+test('institutional confirmation cannot silently succeed without an article identity or publisher host',async()=>{
+  for(const fields of [{doi:'',officialURL:'https://publisher.test/article'},{doi:'10.1234/paper1',officialURL:''},{doi:'10.1234/paper1',officialURL:'https://doi.org/10.1234/paper1'}]){
+    const task=MODEL.createTask({libraryID:1,itemID:1,itemKey:'ITEM1',source:'local_file',attachmentID:900,state:'imported',...fields});
+    const env=environment({initialTasks:[task]});env.addItem(item(1));await env.app.start();
+    await assert.rejects(env.app.confirmInstitutionalAccess(task.id),/缺少 DOI 或有效出版社/);
+    assert.equal(env.app.getSnapshot().tasks[0].accessHint.institutionalConfirmed,false);await env.app.stop();
+  }
+});
+
+test('language changes persist without changing other settings and context-menu labels update on display',async()=>{
+  const env=environment();await env.app.start();assert.equal(env.app.getSnapshot().settings.language,'zh-CN');
+  await env.app.saveSettings({points:31});await env.app.saveSettings({language:'en'});
+  assert.equal(env.app.getSnapshot().settings.points,31);assert.equal(env.app.translate('检查已下载文件'),'Check downloaded files');
+  const menu=env.menus.get('fulltext-assistant').menus[0],labels=[];
+  menu.onShowing(null,{menuElem:{setAttribute(name,value){if(name==='label')labels.push(value);}},setEnabled(){}});
+  menu.menus[0].onShowing(null,{items:[item(1)],menuElem:{setAttribute(name,value){if(name==='label')labels.push(value);}},setEnabled(){}});
+  assert.equal(labels[0],'Full Text Assistant');assert.equal(/[\u3400-\u9fff]/u.test(labels[1]),false);assert.equal(env.menus.size,1);
+  await assert.rejects(env.app.saveSettings({language:'unsupported'}),/不支持/);assert.equal(env.app.getSnapshot().settings.language,'en');
+  const prefs=Object.fromEntries(env.prefs);await env.app.stop();const restored=environment({initialPrefs:prefs});await restored.app.start();
+  assert.equal(restored.app.getSnapshot().settings.language,'en');assert.equal(restored.app.getSnapshot().settings.points,31);
+  await restored.app.saveSettings({language:'zh-TW'});assert.equal(restored.app.translate('任务'),'任務');await restored.app.stop();
+});
+
+test('copy bridge writes the exact supplied title or DOI and reports invalid or failed copies',async()=>{
+  const env=environment(),copied=[];env.Zotero.Utilities.Internal.copyTextToClipboard=value=>copied.push(value);await env.app.start();
+  env.app.copyText('A title with < and > symbols');env.app.copyText('10.1111/mec.12915');
+  assert.deepEqual(copied,['A title with < and > symbols','10.1111/mec.12915']);assert.throws(()=>env.app.copyText('  '),/可复制/);
+  env.Zotero.Utilities.Internal.copyTextToClipboard=()=>{throw new Error('clipboard unavailable');};assert.throws(()=>env.app.copyText('Title'),/clipboard unavailable/);await env.app.stop();
 });

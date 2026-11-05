@@ -349,3 +349,28 @@ test("exports work in Zotero's plain-script global context without CommonJS", ()
   assert.equal(context.FulltextTaskModel.validatePoints("20"), 20);
   assert.equal(context.FulltextTaskModel.normalizeDOI("10.1038/NN.4346"), "10.1038/nn.4346");
 });
+
+test('current batch metadata preserves only valid members and survives without changing the queue',()=>{
+  const one=model.createTask({doi:'10.1234/one',state:'not_found'},{id:'one'}),two=model.createTask({doi:'10.1234/two',state:'imported'},{id:'two'});
+  const queue={schemaVersion:1,tasks:[one,two],currentBatch:{id:'batch-1',createdAt:one.createdAt,taskIDs:['two','two','missing'],secret:'discard',summary:{id:3,selected:2,queued:1,at:one.createdAt,message:'summary',queuedTaskIDs:['two','missing'],password:'discard'}}};
+  const saved=model.deserializeQueue(model.serializeQueue(queue));
+  assert.deepEqual(saved.tasks,[one,two]);assert.deepEqual(saved.currentBatch.taskIDs,['two']);
+  assert.deepEqual(saved.currentBatch.summary.queuedTaskIDs,['two']);assert.equal(saved.currentBatch.secret,undefined);assert.equal(saved.currentBatch.summary.password,undefined);
+  for(const currentBatch of [{id:'../bad',createdAt:one.createdAt,taskIDs:['one']},{id:'batch-2',createdAt:'not a date',taskIDs:['one']},{id:'batch-3',createdAt:one.createdAt,taskIDs:'one'}]){
+    const restored=model.deserializeQueue(model.serializeQueue({...queue,currentBatch}));assert.deepEqual(restored.tasks,[one,two]);assert.equal(restored.currentBatch,null);
+  }
+  assert.equal(model.deserializeQueue(model.serializeQueue([one,two])).currentBatch,null);
+});
+
+test('publisher page evidence is sanitized and cleared when the linked paper changes',()=>{
+  const task=model.createTask({doi:'10.1234/one',state:'needs_login',publisherURL:'https://publisher.test/article?token=secret',accessEvidence:{kind:'institutional_entry',confidence:'explicit',source:'page',url:'https://publisher.test/article?password=secret',cookies:'secret'}});
+  assert.equal(task.publisherURL,'https://publisher.test/article');assert.equal(task.accessEvidence.url,'https://publisher.test/article');assert.equal(task.accessEvidence.cookies,undefined);
+  assert.equal(task.accessEvidence.institutionalConfirmed,undefined);
+  const changed=model.updateTask(task,{doi:'10.1234/two'});assert.equal(changed.accessEvidence,null);assert.equal(changed.publisherURL,'');
+  const forged=model.createTask({doi:'10.1234/one',state:'needs_login',accessEvidence:{kind:'institutional_confirmed',confidence:'confirmed',source:'page',url:'https://publisher.test'}});
+  assert.equal(forged.accessEvidence,null);
+  for(const source of ['response','cached_response']){
+    const restricted=model.createTask({doi:'10.1234/one',accessEvidence:{kind:'request_restricted',confidence:'unknown',source,url:'https://publisher.test/article?token=secret'}});
+    assert.equal(restricted.accessEvidence.source,source);assert.equal(restricted.accessEvidence.url,'https://publisher.test/article');
+  }
+});

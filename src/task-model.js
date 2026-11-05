@@ -212,6 +212,7 @@
       doi,
       title: text(input.title, 2000),
       officialURL: cleanOfficialURL(input.officialURL),
+      publisherURL: cleanOfficialURL(input.publisherURL),
       requestURL: request.requestURL,
       requestID: request.requestID,
       // Snapshot per task: global settings changes cannot rewrite an existing request.
@@ -232,6 +233,11 @@
     };
     task.assistReceipt = normalizeAssistReceipt(input.assistReceipt, task);
     task.assistReview = normalizeAssistReview(input.assistReview, task);
+    const evidence = input.accessEvidence;
+    task.accessEvidence = evidence && ["page", "response", "cached_response"].includes(evidence.source) &&
+      ["institutional_entry", "institutional_hint", "login_hint", "request_restricted", "human_verification", "automatic_not_found"].includes(evidence.kind) &&
+      ["explicit", "possible", "unknown"].includes(evidence.confidence) && cleanOfficialURL(evidence.url)
+      ? { kind: evidence.kind, confidence: evidence.confidence, source: evidence.source, url: cleanOfficialURL(evidence.url) } : null;
     return task;
   }
 
@@ -305,6 +311,7 @@
     const identityChanged = ["libraryID", "itemID", "itemKey", "doi", "title", "requestID"]
       .some(field => updated[field] !== previous[field]);
     const attachmentChanged = updated.attachmentID !== previous.attachmentID;
+    if (["libraryID", "itemID", "itemKey", "doi"].some(field => updated[field] !== previous[field])) { updated.accessEvidence = null; updated.publisherURL = ""; }
     if ((previous.assistReceipt || previous.assistReview) && identityChanged || previous.assistReceipt && attachmentChanged) {
       updated.assistReceipt = null; updated.assistReview = null;
     }
@@ -330,7 +337,27 @@
       tasks.push(task);
       ids.add(task.id);
     }
-    return { schemaVersion: SCHEMA_VERSION, tasks };
+    let currentBatch = null;
+    try {
+      const batch = source.currentBatch;
+      if (batch && /^[A-Za-z0-9._-]{1,128}$/.test(batch.id) && Array.isArray(batch.taskIDs)) {
+        const taskIDs = [...new Set(batch.taskIDs.filter(id => ids.has(id)))];
+        const summary = batch.summary;
+        let safeSummary = null;
+        if (summary && typeof summary === "object") {
+          safeSummary = {};
+          for (const key of ["id", "selected", "eligible", "queued", "skippedExistingPDF", "retained", "ignored", "duplicates", "failed", "unprocessed"]) {
+            safeSummary[key] = Number.isSafeInteger(summary[key]) && summary[key] >= 0 ? summary[key] : 0;
+          }
+          safeSummary.at = timestamp(summary.at, false);
+          safeSummary.cancelled = summary.cancelled === true;
+          safeSummary.message = cleanError(summary.message);
+          safeSummary.queuedTaskIDs = [...new Set((Array.isArray(summary.queuedTaskIDs) ? summary.queuedTaskIDs : []).filter(id => taskIDs.includes(id)))];
+        }
+        currentBatch = { id: batch.id, createdAt: timestamp(batch.createdAt, false), taskIDs, summary: safeSummary };
+      }
+    } catch (_) { /* Invalid batch metadata must not discard valid task history. */ }
+    return { schemaVersion: SCHEMA_VERSION, tasks, currentBatch };
   }
 
   function serializeQueue(payload) {

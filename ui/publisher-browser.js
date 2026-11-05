@@ -1,6 +1,11 @@
 "use strict";
 FulltextPublisherWindow.onChromeDocumentEvent(window, "load", async () => {
   const {url, taskId, app, publisherSession} = window.arguments[0].wrappedJSObject;
+  const localize = () => app?.localize?.(document.documentElement);
+  const t = value => app?.translate?.(value) || value;
+  const languageObserver = window.MutationObserver ? new window.MutationObserver(localize) : null;
+  languageObserver?.observe(document.documentElement, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ["title", "aria-label", "placeholder"] });
+  const unsubscribeLanguage = app?.subscribe?.(localize);localize();
   const status = document.getElementById("publisher-status");
   const address = document.getElementById("publisher-address");
   const pages = document.getElementById("publisher-pages");
@@ -37,7 +42,7 @@ FulltextPublisherWindow.onChromeDocumentEvent(window, "load", async () => {
     document.getElementById("publisher-back").disabled = !browser.canGoBack;
     document.getElementById("publisher-forward").disabled = !browser.canGoForward;
     const title = browser.contentTitle || (() => {try {return new URL(address.value).hostname;} catch (_) {return "机构登录";}})();
-    selected.title.textContent = title || "机构登录";
+    selected.title.textContent = title || t("机构登录");
     window.document.title = (title || "出版社与机构登录") + " · 全文助手";
     showCompatibility(browser);
   }
@@ -56,12 +61,12 @@ FulltextPublisherWindow.onChromeDocumentEvent(window, "load", async () => {
   }
   function register(browser) {
     const tab = document.createElementNS("http://www.w3.org/1999/xhtml", "div");tab.className = "publisher-tab";
-    const title = document.createElementNS("http://www.w3.org/1999/xhtml", "button");title.type = "button";title.className = "publisher-tab-title";title.textContent = "正在打开…";title.setAttribute("role", "tab");
+    const title = document.createElementNS("http://www.w3.org/1999/xhtml", "button");title.type = "button";title.className = "publisher-tab-title";title.textContent = t("正在打开…");title.setAttribute("role", "tab");title.setAttribute("data-i18n-skip", "true");
     const remove = document.createElementNS("http://www.w3.org/1999/xhtml", "button");remove.type = "button";remove.textContent = "×";remove.setAttribute("aria-label", "关闭此网页");
     tab.append(title, remove);tabBar.appendChild(tab);
     const entry = {browser, tab, title};entries.push(entry);
     title.addEventListener("click", () => select(entry));remove.addEventListener("click", () => close(entry));
-    browser.addEventListener("pagetitlechanged", () => {entry.title.textContent = browser.contentTitle || "机构登录";if (selected === entry) updateAddress();});
+    browser.addEventListener("pagetitlechanged", () => {entry.title.textContent = browser.contentTitle || t("机构登录");if (selected === entry) updateAddress();});
     browser.addEventListener("DOMWindowClose", event => {event.preventDefault();close(entry);});
     entry.listener = {
       QueryInterface: ChromeUtils.generateQI(["nsIWebProgressListener", "nsISupportsWeakReference"]),
@@ -94,7 +99,7 @@ FulltextPublisherWindow.onChromeDocumentEvent(window, "load", async () => {
     const checked = FulltextPublisherWindow.httpURL(target);
     browser.loadURI(Services.io.newURI(checked), {triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal()});
   }
-  FulltextPublisherWindow.onChromeDocumentEvent(window, "unload", () => {closing = true;for (const entry of entries) try {entry.browser.removeProgressListener(entry.listener);} catch (_) {}}, true);
+  FulltextPublisherWindow.onChromeDocumentEvent(window, "unload", () => {closing = true;languageObserver?.disconnect();unsubscribeLanguage?.();for (const entry of entries) try {entry.browser.removeProgressListener(entry.listener);} catch (_) {}}, true);
   try {
     const initial = document.getElementById("publisher-main-browser");await ready(initial);register(initial);
     window.browserDOMWindow = FulltextPublisherWindow.createBrowserAccess({win: window, Services, Components, ChromeUtils, createBrowser, nativeAccess: window.browserDOMWindow});

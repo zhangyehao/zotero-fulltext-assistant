@@ -128,6 +128,8 @@ test('unavailable pages report fallback status without inventing download URLs',
   const env=setup({pages:{'https://publisher.test/article/one':html('Article without download')}});
   const result=await env.publisher.acquire(env.item);assert.equal(result.state,'not_found');assert.equal(env.imports.length,0);
   assert.deepEqual(env.requests.map(value=>value.url),['https://publisher.test/article/one']);
+  assert.equal(result.accessReason,'automatic_not_found');assert.equal(result.accessEvidence.kind,'automatic_not_found');assert.equal(result.accessEvidence.confidence,'unknown');
+  assert.match(result.message,/不能判断你是否拥有机构访问权限/);assert.match(result.message,/浏览器下载并自动入库/);
   const login=setup({pages:{'https://publisher.test/article/one':html('<form><input type="password"></form>')},rendered:{'https://publisher.test/article/one':html('<form><input type="password"></form>')}});
   assert.equal((await login.publisher.acquire(login.item)).state,'needs_login');
 });
@@ -146,9 +148,71 @@ test('ScienceDirect institutional access labels are recognized without treating 
   for(const label of ['Access through your organization','Check access through your organisation','Sign in via your organization','Sign in to your organization','Access through your institution','Institutional login']){
     const found=env.api.discover(parseHTML(scienceDirectPage('<button>'+label+'</button>')).document,scienceDirectArticle,scienceDirectDOI);
     assert.equal(found.needsLogin,true,label);assert.equal(found.accessReason,'institutional_access',label);assert.equal(found.candidates.length,0);
+    assert.equal(found.accessEvidence.kind,'institutional_entry');assert.equal(found.accessEvidence.confidence,'explicit');assert.equal(found.accessEvidence.institutionalConfirmed,undefined);
   }
   const ordinary=env.api.discover(parseHTML(scienceDirectPage('<button>Sign in</button><a href="/register">Create account</a>')).document,scienceDirectArticle,scienceDirectDOI);
   assert.equal(ordinary.needsLogin,false);assert.equal(ordinary.accessReason,null);
+});
+
+test('possible access controls and generic login are distinct from explicit institutional entries',()=>{
+  const env=setup();
+  for(const markup of ['<button>Check access</button>','<button>Get access</button>','<p>Access through your institution</p>']){
+    const found=env.api.discover(parseHTML(scienceDirectPage(markup)).document,scienceDirectArticle,scienceDirectDOI);
+    assert.equal(found.accessReason,'institutional_hint');assert.equal(found.accessEvidence.kind,'institutional_hint');assert.equal(found.accessEvidence.confidence,'possible');
+  }
+  const login=env.api.discover(parseHTML(scienceDirectPage('<form><input type="password"></form>')).document,scienceDirectArticle,scienceDirectDOI);
+  assert.equal(login.accessReason,'login_possible');assert.equal(login.accessEvidence.kind,'login_hint');assert.equal(login.accessEvidence.confidence,'possible');
+  const link=env.api.discover(parseHTML(scienceDirectPage('<a href="https://www.sciencedirect.com/user/institution/login">Check access</a>')).document,scienceDirectArticle,scienceDirectDOI);
+  assert.equal(link.accessReason,'institutional_access');assert.equal(link.accessEvidence.kind,'institutional_entry');
+});
+
+test('HTTP request restrictions do not assert an institutional login or entitlement',async()=>{
+  const env=setup({url:scienceDirectArticle,pages:{[scienceDirectArticle]:{status:403,body:html('Request denied')}}});
+  const result=await env.publisher.acquire(env.item);
+  assert.equal(result.state,'needs_login');assert.equal(result.accessReason,null);assert.equal(result.accessEvidence.kind,'request_restricted');
+  assert.equal(result.accessEvidence.confidence,'possible');assert.equal(result.accessEvidence.source,'response');
+});
+
+test('access evidence excludes query and fragment secrets',()=>{
+  const env=setup(),found=env.api.discover(parseHTML(scienceDirectPage('<button>Institutional login</button>')).document,scienceDirectArticle+'?token=secret#private',scienceDirectDOI);
+  assert.equal(found.accessEvidence.url,scienceDirectArticle);assert(!JSON.stringify(found.accessEvidence).includes('secret'));
+});
+
+test('Linking Hub uses its supplied encoded same-PII ScienceDirect route',async()=>{
+  const locator='https://linkinghub.elsevier.com/retrieve/pii/S002839081400478X',file='https://www.sciencedirect.com/fulltext.pdf';
+  const markup=html('<input type="hidden" id="redirectURL" value="'+encodeURIComponent(scienceDirectArticle+'?via%3Dihub')+'"><input type="hidden" id="key" value="must-not-be-retained">');
+  const env=setup({url:locator,doi:scienceDirectDOI,pages:{[locator]:markup,[scienceDirectArticle]:scienceDirectPage('<meta name="citation_pdf_url" content="/fulltext.pdf">'),[file]:{bytes:pdf(),type:'application/pdf'}}});
+  const discovered=env.api.discover(parseHTML(markup).document,locator,scienceDirectDOI);
+  assert.deepEqual(Array.from(discovered.articleRoutes),[scienceDirectArticle]);
+  const result=await env.publisher.acquire(env.item);assert.equal(result.source,'publisher');assert.equal(result.publisherURL,scienceDirectArticle);assert.equal(env.imports.length,1);
+  assert.deepEqual(env.requests.map(value=>value.url),[locator,scienceDirectArticle,file]);
+  assert.equal(env.hidden.length,0);assert(!JSON.stringify(env.requests).includes('must-not-be-retained'));
+});
+
+test('Linking Hub refresh target can expose the canonical article but not an invented PDF URL',()=>{
+  const locator='https://linkinghub.elsevier.com/retrieve/pii/S002839081400478X',env=setup();
+  const markup=html('<meta http-equiv="refresh" content="2; url=\'/retrieve/articleSelectSinglePerm?Redirect='+encodeURIComponent(scienceDirectArticle+'?tracking=private')+'&amp;key=private\'">');
+  const result=env.api.discover(parseHTML(markup).document,locator,scienceDirectDOI);
+  assert.deepEqual(Array.from(result.articleRoutes),[scienceDirectArticle]);assert.equal(result.candidates.length,0);
+});
+
+test('article routing refuses other PIIs other hosts credentials PDF guesses and untrusted locator pages',()=>{
+  const env=setup(),locator='https://linkinghub.elsevier.com/retrieve/pii/S002839081400478X';
+  for(const target of [scienceDirectArticle.replace('478X','4791'),'https://sciencedirect.com.evil.test/science/article/pii/S002839081400478X','https://user:pass@www.sciencedirect.com/science/article/pii/S002839081400478X',scienceDirectArticle+'/pdfft','http://www.sciencedirect.com/science/article/pii/S002839081400478X']){
+    const markup=html('<input id="redirectURL" value="'+encodeURIComponent(target)+'">');
+    assert.equal(env.api.discover(parseHTML(markup).document,locator,scienceDirectDOI).articleRoutes.length,0,target);
+  }
+  const markup=html('<input id="redirectURL" value="'+encodeURIComponent(scienceDirectArticle)+'">');
+  assert.equal(env.api.discover(parseHTML(markup).document,'https://publisher.test/article/one',scienceDirectDOI).articleRoutes.length,0);
+});
+
+test('a routed institution page remains the article destination when the locator itself has no download',async()=>{
+  const locator='https://linkinghub.elsevier.com/retrieve/pii/S002839081400478X';
+  const markup=html('<input id="redirectURL" value="'+encodeURIComponent(scienceDirectArticle)+'">'),article=scienceDirectPage('<button>Access through your organization</button>');
+  const env=setup({url:locator,doi:scienceDirectDOI,pages:{[locator]:markup,[scienceDirectArticle]:article},rendered:{[scienceDirectArticle]:article,[locator]:markup}});
+  const result=await env.publisher.acquire(env.item);assert.equal(result.state,'needs_login');assert.equal(result.accessReason,'institutional_access');
+  assert.equal(result.publisherURL,scienceDirectArticle);assert.equal(result.url,scienceDirectArticle);
+  assert.equal(env.requests.filter(value=>value.url===scienceDirectArticle).length,1);
 });
 
 test('ScienceDirect institution and purchase page returns needs_login with a default-browser instruction',async()=>{

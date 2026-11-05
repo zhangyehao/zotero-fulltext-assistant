@@ -19,13 +19,13 @@ function pdf(size = 2048) {
 function setup(options = {}) {
   let clock = 0;
   const files = new Map(), directories = new Set([directory]);
-  const denied = new Set(), reads = [], inspections = [], matches = [], issues = [];
+  const denied = new Set(), reads = [], inspections = [], matches = [], candidates = [], issues = [];
   const env = {
-    files, directories, denied, reads, inspections, matches, issues,
+    files, directories, denied, reads, inspections, matches, candidates, issues,
     time(value) { clock = value; },
-    put(name, { bytes = pdf(), modified = clock, type = 'regular', size = bytes.length } = {}) {
+    put(name, { bytes = pdf(), modified = clock, created = modified, type = 'regular', size = bytes.length } = {}) {
       const path = /^[a-z]:[\\/]/i.test(name) ? name : pathFor(name);
-      files.set(path, { bytes, info: { type, size, lastModified: modified } });
+      files.set(path, { bytes, info: { type, size, lastModified: modified, creationTime: created } });
       return path;
     },
     readHook: null,
@@ -63,6 +63,7 @@ function setup(options = {}) {
       matches.push({ id, ...result });
       return options.onMatch ? options.onMatch(id, result) : undefined;
     },
+    onCandidate: async (id, result) => { candidates.push({ id, ...result });if (options.onCandidate) await options.onCandidate(id, result); },
     onIssue: async (id, issue) => { issues.push({ id, ...issue }); },
     now: () => clock,
     stableMs: options.stableMs ?? 2000,
@@ -144,7 +145,11 @@ test('mismatching, unknown and failed identity checks never import unrelated PDF
   env.time(9000);
   await env.watch.poll();
   assert.equal(env.inspections.length, 3, 'unchanged rejected PDFs are not checked repeatedly');
-  assert.equal(env.issues.length, 0);
+  assert.deepEqual(env.issues.map(issue => [issue.kind, issue.status]), [['identity','mismatch'],['identity','unknown'],['identity','unknown']]);
+  assert.deepEqual(env.candidates.map(candidate => candidate.path), [pathFor('unknown.pdf'),pathFor('failed.pdf')]);
+  assert.equal(env.watch.getStatus('one').scanned,3);
+  assert.equal(env.watch.getStatus('one').unknown,2);
+  assert.equal(env.watch.getStatus('one').mismatched,1);
 });
 
 test('a PDF matching multiple waiting tasks is reported as ambiguous and is not imported', async () => {
@@ -421,4 +426,46 @@ test('cancelling while a match handoff is pending cannot resurrect its watch on 
   assert.equal(env.watch.isWatching('one'), false);
   await env.watch.poll();
   assert.equal(env.matches.length, 1);
+});
+
+test('an unknown candidate reports its exact checked snapshot once while the watch keeps waiting', async () => {
+  const env=setup({inspect:async()=>({status:'unknown',reason:'title_outside_front_matter',message:'Title occurs after prior references.'})});
+  await env.watch.start('one',directory,expected);const file=env.put('candidate.pdf');await settle(env);
+  assert.equal(env.matches.length,0);assert.equal(env.candidates.length,1);assert.equal(env.watch.isWatching('one'),true);
+  assert.equal(env.candidates[0].path,file);assert.deepEqual(env.candidates[0].bytes,env.files.get(file).bytes);assert.deepEqual(env.candidates[0].expected,expected);
+  assert.equal(env.issues[0].reason,'title_outside_front_matter');assert.match(env.issues[0].message,/candidate\.pdf/);
+  const status=env.watch.getStatus('one');assert.equal(status.scanned,1);assert.equal(status.unknown,1);assert.equal(status.lastScanAt,new Date(2000).toISOString());status.unknown=100;
+  await env.watch.poll();assert.equal(env.candidates.length,1);assert.equal(env.issues.length,1);assert.equal(env.watch.getStatus('one').unknown,1);
+});
+
+test('explicit recent-file rescan can inspect downloaded baseline PDFs without admitting older files',async()=>{
+  const env=setup();env.time(10000);
+  const old=env.put('old.pdf',{modified:1000,created:1000});
+  const downloaded=env.put('downloaded.pdf',{modified:5000,created:2000});
+  const preserved=env.put('preserved-date.pdf',{modified:500,created:7000});
+  await env.watch.start('one',directory,expected);await env.watch.poll();assert.equal(env.reads.length,0);
+  const result=await env.watch.rescan('one',{includeExisting:true,since:new Date(4000).toISOString()});assert.equal(result.eligible,2);assert.equal(env.watch.getStatus('one').baseline,1);
+  await env.watch.poll();env.time(12000);await env.watch.poll();assert.equal(env.matches.length,1);assert.notEqual(env.matches[0].path,old);assert.ok([downloaded,preserved].includes(env.matches[0].path));
+  assert.equal(env.reads.includes(old),false);
+});
+
+test('rescan retries a checked unknown file and still requires the stable interval and full identity check',async()=>{
+  let match=false;const env=setup({inspect:async()=>({status:match?'match':'unknown',reason:'insufficient_identity'})});
+  await env.watch.start('one',directory,expected);env.put('review.pdf');await settle(env);assert.equal(env.candidates.length,1);
+  match=true;const result=await env.watch.rescan('one');assert.equal(result.eligible,1);await env.watch.poll();assert.equal(env.matches.length,0);
+  env.time(4000);await env.watch.poll();assert.equal(env.matches.length,1);assert.equal(env.inspections.length,2);
+});
+
+test('recent-file rescan requires a timestamp and cancellation during listing cannot revive a watch',async()=>{
+  const env=setup(),gate=deferred();env.put('existing.pdf');await env.watch.start('one',directory,expected);
+  await assert.rejects(env.watch.rescan('one',{includeExisting:true}),/起始时间/);
+  let entered=false;env.listingHook=async()=>{entered=true;await gate.promise;};
+  const rescanning=env.watch.rescan('one',{includeExisting:true,since:0});while(!entered)await new Promise(resolve=>setImmediate(resolve));
+  env.watch.cancel('one');gate.resolve();assert.equal((await rescanning).cancelled,true);assert.equal(env.watch.isWatching('one'),false);assert.equal(env.matches.length,0);
+});
+
+test('invalid stable PDFs expose a reason once without repeated reads and oversized files never get read',async()=>{
+  const env=setup();await env.watch.start('one',directory,expected);env.put('invalid.pdf',{bytes:Buffer.alloc(2048,32)});env.put('large.pdf',{size:101*1024*1024});await settle(env);
+  assert.deepEqual(env.issues.map(issue=>issue.reason).sort(),['file_size','invalid_pdf']);assert.equal(env.watch.getStatus('one').rejected,2);
+  await env.watch.poll();assert.equal(env.reads.length,1);assert.equal(env.issues.length,2);assert.equal(env.candidates.length,0);assert.equal(env.matches.length,0);
 });

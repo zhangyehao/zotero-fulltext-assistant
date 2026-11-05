@@ -1,10 +1,14 @@
 "use strict";
 window.addEventListener("load",async()=>{
   const {app,url,mode}=window.arguments[0].wrappedJSObject;
+  const localize=()=>app.localize?.(document.documentElement);
+  const languageObserver=window.MutationObserver?new window.MutationObserver(localize):null;
+  languageObserver?.observe(document.documentElement,{subtree:true,childList:true,characterData:true,attributes:true,attributeFilter:["title","aria-label","placeholder"]});
+  const unsubscribeLanguage=app.subscribe?.(localize);localize();
   window.FulltextSiteMode=mode||"request";
   const status=document.getElementById("ft-status"),button=document.getElementById("ft-read");
   let browser,timer,filled=false,checking=false,lastCheck=0,closed=false;
-  window.addEventListener("unload",()=>{closed=true;if(timer)window.clearInterval(timer);app.detachBrowser(window);},{once:true});
+  window.addEventListener("unload",()=>{closed=true;if(timer)window.clearInterval(timer);languageObserver?.disconnect();unsubscribeLanguage?.();app.detachBrowser(window);},{once:true});
   button.disabled=true;
   try{browser=await app.attachBrowser(window,document.getElementById("ft-browser-holder"),url);}catch(e){status.textContent=e.message;return;}
   if(closed)return;button.disabled=false;

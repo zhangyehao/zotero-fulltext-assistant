@@ -45,6 +45,48 @@ test('publisher copyright metadata can identify the article DOI in a first-page 
   const r = await inspect('Another scientific article about brain structures and behavior\nAbstract\nLong research text.\nCopyright 2015 Oxford University Press. All rights reserved.\nhttps://doi.org/' + DOI);
   assert.equal(r.status, 'match'); assert.equal(r.matchedBy, 'doi');
 });
+
+test('a journal citation footer immediately below publisher copyright identifies the article DOI', async () => {
+  const text='Social chromosome variants differentially affect queen\ndetermination and the survival of workers in the ﬁre ant\nSolenopsis invicta\nAbstract\nResearch text.\n© 2014 John Wiley & Sons Ltd\nMolecular Ecology (2014) 23, 5117–5127 doi: 10.1111/mec.12915';
+  const r=await inspect(text,{doi:'10.1111/mec.12915',title:'Social chromosome variants differentially affect queen determination and the survival of workers in the fire ant <i><span>S</span> olenopsis invicta</i>'});
+  assert.equal(r.status,'match');assert.equal(r.matchedBy,'doi');assert.deepEqual(r.detectedDOIs,['10.1111/mec.12915']);
+  const wrong=await inspect(text,{doi:'10.1111/mec.00000'});assert.equal(wrong.status,'mismatch');
+});
+
+test('a journal-style citation needs publisher footer context and is never taken from references', async () => {
+  const citation='Molecular Ecology (2014) 23, 5117–5127 doi: 10.1111/mec.12915';
+  for(const text of ['Another paper title\nAbstract\n'+citation,'Another paper title\nAbstract\n© 2014 Publisher\nReferences\n'+citation]){
+    const r=await inspect(text,{doi:'10.1111/mec.12915'});assert.equal(r.status,'unknown');assert.deepEqual(r.detectedDOIs,[]);
+  }
+});
+
+test('submission dates plus online publication and copyright can establish an uncolonized footer DOI',async()=>{
+  const footer='Correspondence to: Annaliese K. Beery. Received 20 June 2007; Revised 18 October 2007; Accepted 18 December 2007 DOI 10.1002/cne.21638 Published online in Wiley InterScience (www.interscience.wiley.com).\nTHE JOURNAL OF COMPARATIVE NEUROLOGY 507:1847–1859 (2008)\n© 2008 WILEY-LISS, INC.';
+  const text='Oxytocin and Vasopressin Receptor Distributions in a Solitary and a Social Species of Tuco-Tuco\nABSTRACT\nResearch text.\n'+footer;
+  const r=await inspect(text,{doi:'10.1111/j.1601-183x.2005.00118.x'});assert.equal(r.status,'mismatch');assert.deepEqual(r.detectedDOIs,['10.1002/cne.21638']);
+  assert.equal((await inspect(text,{doi:'10.1002/cne.21638'})).status,'match');
+  for(const omitted of ['Received 20 June 2007; ','Accepted 18 December 2007 ','Published online in ','© 2008 WILEY-LISS, INC.']){
+    const incomplete=await inspect(text.replace(omitted,''),{doi:'10.1002/cne.21638'});assert.equal(incomplete.status,'unknown',omitted);
+  }
+});
+
+test('a copyright journal footer may print the verified opening page after its DOI',async()=>{
+  const title='Female oxytocin gene-knockout mice, in a semi-natural environment, display exaggerated aggressive behavior';
+  const text='Female oxytocin gene-knockout mice, in a seminatural environment, display exaggerated aggressive behavior\nAuthors\nAbstract\nResearch text.\nGenes, Brain and Behavior (2005) 4: 229–239 Copyright # Blackwell Munksgaard 2005\ndoi: 10.1111/j.1601-183X.2005.00118.x 229';
+  const target={doi:'10.1111/j.1601-183x.2005.00118.x',title};
+  const r=await inspect(text,target);assert.equal(r.status,'match');assert.equal(r.matchedBy,'doi');assert.deepEqual(r.detectedDOIs,[target.doi]);
+  assert.equal((await inspect(text,{doi:'10.1111/j.1601-183x.2005.00999.x'})).status,'mismatch');
+  for(const invalid of [text.replace('Copyright # Blackwell Munksgaard 2005',''),text.replace(/ 229$/,' 230'),text.replace('4: 229–239','4: 229'),text.replace('Genes, Brain and Behavior (2005) 4: 229–239 Copyright # Blackwell Munksgaard 2005','Copyright # Blackwell Munksgaard 2005')]){
+    assert.equal((await inspect(invalid,target)).status,'unknown');
+  }
+});
+
+test('a target article after a previous article reference section remains a diagnostic candidate', async () => {
+  const title='Mesotocin and Nonapeptide Receptors Promote Estrildid Flocking Behavior';
+  const text='References and Notes\n1. A cited paper.\n'+('Previous article bibliography.\n'.repeat(110))+'10.1126/science.1175028\nMesotocin and Nonapeptide Receptors\nPromote Estrildid Flocking Behavior\nJames L. Goodson\nResearch text.';
+  const r=await inspect(text,{doi:'10.1126/science.1174929',title});
+  assert.equal(r.status,'unknown');assert.equal(r.reason,'title_outside_front_matter');assert.deepEqual(r.detectedDOIs,[]);assert.equal(r.matchedBy,'');
+});
 test('the second page never establishes a match', async () => {
   const r = await inspect('Another scientific article about brain structures and behavior\nAbstract\nResearch.\f' + TITLE + '\nDOI: ' + DOI);
   assert.equal(r.status, 'unknown'); assert.deepEqual(r.detectedDOIs, []);

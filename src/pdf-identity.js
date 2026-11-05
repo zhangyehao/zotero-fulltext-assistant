@@ -100,14 +100,33 @@
       const lineEnd = text.indexOf("\n", end);
       const prefix = text.slice(lineStart, match.index).trim();
       const suffix = text.slice(end, lineEnd < 0 ? text.length : lineEnd).trim();
-      const preceding = text.slice(Math.max(0, lineStart - 700), lineStart).trim().split("\n").slice(-2).join(" ");
-      if (citationLike(prefix) || citationLike(preceding)) continue;
+      const precedingLines = text.slice(Math.max(0, lineStart - 700), lineStart).trim().split("\n").slice(-2);
+      const preceding = precedingLines.join(" ");
+      const footer = /(?:©|\bcopyright\b|\ball rights reserved\b|\bpublished by\b|\bcreative commons\b|\blicensed under\b)/i.test(preceding + " " + prefix);
+      // Some publishers put the article DOI after a journal/year/volume/pages
+      // footer directly beneath their copyright line. The year is metadata,
+      // not a citation; require this full narrow structure before exempting it.
+      const journalFooter = footer && /^[\p{L}][\p{L} .,&'’\-–]{1,100}\s+\((?:19|20)\d{2}\)\s+\d+(?:\s*\([\w-]+\))?\s*[,;:]\s*\d+\s*[-–—]\s*\d+\s+doi\s*:\s*$/iu.test(prefix)
+        && /^[\s.,;:()\[\]{}]*$/.test(suffix);
+      // Wiley's older PDFs join submission dates, DOI and publication notice
+      // into one paragraph. Require all three plus the nearby copyright line.
+      const publicationFooter = /\bReceived\b[^<>]{0,240}\bAccepted\b[^<>]{0,100}\bDOI\s*:?\s*$/i.test(prefix)
+        && /^Published online (?:in|at)\b/i.test(suffix)
+        && /(?:©|\bcopyright\b)/i.test(text.slice(end, Math.min(text.length, end + 500)));
+      const priorLine = precedingLines[precedingLines.length - 1] || "";
+      const pageRange = /^[\p{L}][\p{L} .,&'’\-–]{1,100}\s+\((?:19|20)\d{2}\)\s+\d+(?:\s*\([\w-]+\))?\s*[,;:]\s*(\d{1,6})\s*[-–—]\s*(\d{1,6})\b/iu.exec(priorLine);
+      // The printed opening page can share the DOI's text line. It is metadata
+      // only when the immediately preceding journal/copyright line supplies
+      // exactly that opening page; arbitrary numbers after a DOI stay unknown.
+      const numberedFooter = !!pageRange && /(?:©|\bcopyright\b)/i.test(priorLine)
+        && /^(?:doi\s*:\s*|https?:\/\/(?:dx\.)?doi\.org\/)?$/i.test(prefix)
+        && /^\d{1,6}$/.test(suffix) && Number(suffix) === Number(pageRange[1]);
+      if ((!journalFooter && citationLike(prefix)) || (!numberedFooter && citationLike(preceding))) continue;
       const standalone = /^(?:(?:digital object identifier|doi)[ \t]*:[ \t]*|(?:https?:\/\/)?(?:dx\.)?doi\.org\/)?$/i.test(prefix)
         && /^[\s.,;:()\[\]{}]*$/.test(suffix);
-      const footer = /(?:©|\bcopyright\b|\ball rights reserved\b|\bpublished by\b|\bcreative commons\b|\blicensed under\b)/i.test(preceding + " " + prefix);
       const header = match.index < frontEnd && prefix.length < 220
         && /(?:^|\s)doi[ \t]*:[ \t]*$/i.test(prefix) && suffix.length < 100;
-      if (((standalone && (match.index < frontEnd || footer)) || header) && !found.includes(doi)) found.push(doi);
+      if (((standalone && (match.index < frontEnd || footer)) || header || journalFooter || publicationFooter || numberedFooter) && !found.includes(doi)) found.push(doi);
       if (found.length === 8) break;
     }
     return found;
@@ -118,6 +137,7 @@
     doi_mismatch: "PDF 首页的文献 DOI 与目标条目不同，已阻止导入。",
     conflicting_dois: "PDF 首页存在多个可能的文献 DOI，无法可靠确认身份。",
     insufficient_identity: "未找到足够可靠的首页 DOI 或完整标题，需人工核对 PDF。",
+    title_outside_front_matter: "在首页后续版面或参考文献区域发现目标标题，但无法确认它是本文标题。请预览候选 PDF 后人工核对。",
     no_text: "PDF 未提取到可核验文字，可能是扫描件或受保护文件，需人工核对。",
     target_missing: "目标条目缺少可核验的 DOI 或完整标题，需人工核对。",
     extraction_unavailable: "当前 Zotero 的 PDF 提取接口不可用，需人工核对 PDF。",
@@ -146,6 +166,8 @@
       return result(dois[0] === target.doi ? "match" : "mismatch", dois[0] === target.doi ? "doi_match" : "doi_mismatch", target, evidence);
     }
     if (title.matched) return result("match", "title_match", target, evidence);
+    const wanted = strongTitle(target.title);
+    if (wanted && (" " + titleKey(firstPage) + " ").includes(" " + wanted + " ")) return result("unknown", "title_outside_front_matter", target, evidence);
     return result("unknown", "insufficient_identity", target, evidence);
   }
   function taggedError(code) { const error = new Error(code); error.code = code; return error; }

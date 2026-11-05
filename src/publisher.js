@@ -18,6 +18,50 @@
   function doi(value) {
     return String(value || "").match(/10\.\d{4,9}\/[^\s<>]+/i)?.[0].replace(/[.,;]+$/, "").toLowerCase() || "";
   }
+  function evidence(kind, confidence, url) {
+    const safe = httpURL(url);
+    if (safe) { const parsed = new URL(safe); parsed.search = ""; url = parsed.href; }
+    else url = null;
+    return { kind, confidence, source: "page", url };
+  }
+  function elsevierArticleRoutes(doc, pageURL) {
+    const page = new URL(pageURL);
+    const linkingHub = page.hostname.toLowerCase() === "linkinghub.elsevier.com";
+    const scienceDirect = /^(?:www\.)?sciencedirect\.com$/i.test(page.hostname);
+    const pii = linkingHub ? /^\/retrieve\/pii\/([A-Z0-9]{16,20})\/?$/i.exec(page.pathname)?.[1]
+      : scienceDirect ? /^\/science\/article\/(?:abs\/)?pii\/([A-Z0-9]{16,20})\/?$/i.exec(page.pathname)?.[1] : null;
+    if (!pii) return [];
+    const routes = [];
+    function add(raw) {
+      const address = httpURL(raw, pageURL);
+      if (!address) return;
+      const url = new URL(address);
+      if (!/^(?:www\.)?sciencedirect\.com$/i.test(url.hostname) || url.protocol !== "https:" || url.port) return;
+      const candidate = /^\/science\/article\/pii\/([A-Z0-9]{16,20})\/?$/i.exec(url.pathname)?.[1];
+      if (!candidate || candidate.toUpperCase() !== pii.toUpperCase()) return;
+      // This is an article address supplied by the publisher, never a guessed
+      // PDF endpoint. Do not retain routing keys or tracking query parameters.
+      url.search = "";
+      if (url.href !== pageURL && !routes.includes(url.href)) routes.push(url.href);
+    }
+    for (const anchor of doc.querySelectorAll("a[href]")) add(anchor.getAttribute("href"));
+    if (linkingHub) {
+      // Official Linking Hub's Article Locator supplies an encoded target in
+      // this field and/or the Refresh URL's Redirect parameter.
+      const encoded = doc.querySelector('input#redirectURL,input[name="redirectURL"]')?.getAttribute("value");
+      if (encoded) { try { add(decodeURIComponent(encoded)); } catch (_) {} }
+      for (const meta of doc.querySelectorAll("meta[http-equiv]")) {
+        if ((meta.getAttribute("http-equiv") || "").toLowerCase() !== "refresh") continue;
+        const raw = /(?:^|;)\s*url\s*=\s*['"]?([^'"]+)/i.exec(meta.getAttribute("content") || "")?.[1]?.trim();
+        const refresh = httpURL(raw, pageURL);
+        if (!refresh) continue;
+        const redirect = new URL(refresh);
+        if (redirect.hostname === page.hostname && redirect.pathname === "/retrieve/articleSelectSinglePerm") add(redirect.searchParams.get("Redirect"));
+        else add(refresh);
+      }
+    }
+    return routes.slice(0, 2);
+  }
   function abort() { const error = new Error("已取消获取全文。"); error.name = "AbortError"; return error; }
   function asBytes(value) {
     if (value instanceof Uint8Array) return value;
@@ -64,7 +108,7 @@
   }
   function discover(doc, pageURL, expectedDOI) {
     const documentDOI = doi(doc.querySelector('meta[name="citation_doi"],meta[name="dc.identifier"],meta[name="DC.Identifier"]')?.getAttribute("content"));
-    if (expectedDOI && documentDOI && expectedDOI !== documentDOI) return { candidates: [], needsLogin: false, mismatch: true };
+    if (expectedDOI && documentDOI && expectedDOI !== documentDOI) return { candidates: [], articleRoutes: [], needsLogin: false, accessReason: null, accessEvidence: evidence("article_mismatch", "explicit", pageURL), challenge: null, mismatch: true };
     const base = httpURL(doc.querySelector("base[href]")?.getAttribute("href"), pageURL) || pageURL;
     const candidates = [];
     function add(raw, evidence) {
@@ -98,14 +142,30 @@
     const cloudflare = challenge && (!!visible.querySelector('[id^="cf-chl"],#challenge-running,#challenge-stage,.cf-turnstile,iframe[src*="challenges.cloudflare.com"]') || /cloudflare|ray id/i.test(text));
     // Elsevier distinguishes personal Sign in from checking subscription access:
     // https://www.elsevier.support/elsevieraccess/answer/what-is-the-difference-between-sign-in-and-check-access
-    const institutionalAccess = /\b(?:check\s+)?access\s+(?:through|via)\s+(?:your|my|an?)\s+(?:institution|organi[sz]ation)\b|\b(?:sign|log)\s*in\s+(?:via|through|to)\s+(?:your|my)\s+(?:institution|organi[sz]ation)\b|\binstitutional\s+(?:log\s*in|sign\s*in)\b|通过(?:您的?|所在)?(?:机构|学校|单位)(?:登录|访问)/i.test(text + "\n" + labels);
+    const institutionPattern = /\b(?:check\s+)?access\s+(?:through|via)\s+(?:your|my|an?)\s+(?:institution|organi[sz]ation)\b|\b(?:sign|log)\s*in\s+(?:via|through|to)\s+(?:your|my|an?)\s+(?:institution|organi[sz]ation)\b|\binstitutional\s+(?:log\s*in|sign\s*in|access)\b|通过(?:您的?|所在)?(?:机构|学校|单位)(?:登录|访问)|机构登录|学校登录/i;
+    const institutionLink = [...visible.querySelectorAll('a[href],form[action]')].some(node => {
+      const address = httpURL(node.getAttribute("href") || node.getAttribute("action"), pageURL);
+      if (!address) return false;
+      const target = new URL(address);
+      return /^(?:www\.)?sciencedirect\.com$/i.test(target.hostname) && /^\/user\/institution\/login\/?$/i.test(target.pathname);
+    });
+    const institutionalAccess = institutionPattern.test(labels) || institutionLink;
     const purchase = /\b(?:purchase|buy)\s+(?:(?:this|the)\s+)?(?:pdf|article|full[\s-]*text)\b|购买(?:全文|文章|PDF)|订阅后(?:下载|查看)/i.test(labels);
     const scienceDirect = /(?:^|\.)sciencedirect\.com$/i.test(new URL(pageURL).hostname);
+    const blockText = [...visible.querySelectorAll("p,div,section,form")].map(node => node.textContent).join("\n").slice(0, 120000);
+    const institutionalHint = !institutionalAccess && (institutionPattern.test(text + "\n" + blockText) || scienceDirect && /(?:^|\n)\s*(?:check access|get access|other access options|access options)\s*(?:\n|$)/i.test(labels));
     const preview = scienceDirect && /\barticle\s+preview\b|\b(?:preview|abstract)\s+only\b/i.test(labels);
-    const accessReason = institutionalAccess ? "institutional_access" : purchase ? "purchase" : preview ? "preview" : null;
-    const loginGate = !!accessReason || /(?:sign|log)\s*in to (?:access|download|view)|登录后(?:下载|查看)|请先登录/i.test(text);
+    const genericLogin = password || /(?:sign|log)\s*in to (?:access|download|view)|登录后(?:下载|查看)|请先登录/i.test(text);
+    const accessReason = institutionalAccess ? "institutional_access" : institutionalHint ? "institutional_hint" : purchase ? "purchase" : preview ? "preview" : genericLogin ? "login_possible" : null;
+    const loginGate = !!accessReason;
+    const accessEvidence = challenge ? evidence("human_verification", "explicit", pageURL)
+      : institutionalAccess ? evidence("institutional_entry", "explicit", pageURL)
+      : institutionalHint ? evidence("institutional_hint", "possible", pageURL)
+      : purchase ? evidence("purchase", "explicit", pageURL) : preview ? evidence("preview", "explicit", pageURL)
+      : genericLogin ? evidence("login_hint", "possible", pageURL) : evidence("automatic_not_found", "unknown", pageURL);
     return { candidates: candidates.slice(0, MAX_CANDIDATES), needsLogin: password || challenge || loginGate,
-      accessReason, challenge: challenge ? (cloudflare ? "cloudflare" : "verification") : null, mismatch: false };
+      articleRoutes: elsevierArticleRoutes(doc, pageURL), accessReason, accessEvidence,
+      challenge: challenge ? (cloudflare ? "cloudflare" : "verification") : null, mismatch: false };
   }
 
   function create({ Zotero, Services, IOUtils, PathUtils, parseHTML, HiddenBrowser: BrowserClass, publisherSession }) {
@@ -172,7 +232,23 @@
       let loginURL = null;
       let challengeKind = null;
       let accessReason = null;
+      let accessEvidence = evidence("automatic_not_found", "unknown", articleURL || starts[0]);
       let lastURL = articleURL || starts[0] || null;
+      let publisherURL = articleURL || starts[0] || null;
+      let articleRouteCount = 0;
+
+      function rememberPublisherURL(url, source) {
+        if (source === "open_access") return;
+        const host = new URL(url).hostname, current = publisherURL ? new URL(publisherURL).hostname : "";
+        if (host === "doi.org" && current && current !== "doi.org") return;
+        if (host === "linkinghub.elsevier.com" && /^(?:www\.)?sciencedirect\.com$/i.test(current)) return;
+        publisherURL = url;
+      }
+
+      function noteRestriction(url) {
+        needsLogin = true; loginURL ||= url;
+        if (accessEvidence.confidence === "unknown") accessEvidence = { ...evidence("request_restricted", "possible", url), source: "response" };
+      }
 
       async function request(url, referrer) {
         check();
@@ -200,6 +276,7 @@
         const result = { response, bytes, url: httpURL(response.responseURL) || url, type: response.getResponseHeader?.("Content-Type") || "" };
         if (response.getResponseHeader?.("cf-mitigated") === "challenge") {
           challengeKind = "cloudflare"; needsLogin = true; loginURL ||= result.url; rememberGate(result.url, challengeKind);
+          accessEvidence = { ...evidence("human_verification", "explicit", result.url), source: "response" };
         }
         return result;
       }
@@ -223,7 +300,7 @@
           const attachment = await Zotero.Attachments.importFromFile({ file, parentItemID: item.id, libraryID: item.libraryID, title: "全文", contentType: "application/pdf" });
           // The import has committed. Cancellation now must not misreport it as absent.
           try { attachment.setField("url", sourceURL); await attachment.saveTx(); } catch (_) {}
-          return { attachmentID: attachment.id, source, sourceURL };
+          return { attachmentID: attachment.id, source, sourceURL, publisherURL };
         }
         finally {
           await IOUtils.remove(file, { ignoreAbsent: true }).catch(() => {});
@@ -239,18 +316,31 @@
       }
       function noteGate(result, url) {
         if (result.needsLogin) { needsLogin = true; loginURL ||= url; }
-        const rank = { preview: 1, purchase: 2, institutional_access: 3 };
+        const rank = { login_possible: 1, preview: 2, purchase: 3, institutional_hint: 4, institutional_access: 5 };
         if ((rank[result.accessReason] || 0) > (rank[accessReason] || 0)) accessReason = result.accessReason;
+        const evidenceRank = { automatic_not_found: 0, article_mismatch: 0, request_restricted: 1, login_hint: 2, preview: 3, purchase: 4, institutional_hint: 5, institutional_entry: 6, human_verification: 7 };
+        if ((evidenceRank[result.accessEvidence?.kind] || 0) > (evidenceRank[accessEvidence?.kind] || 0)) accessEvidence = result.accessEvidence;
         if (result.challenge) { challengeKind = result.challenge; rememberGate(url, result.challenge); }
       }
       function cachedGate(url) {
         const gate = gateFor(url);
         if (!gate) return false;
         needsLogin = true; loginURL ||= gate.url; challengeKind ||= gate.kind;
+        accessEvidence = { ...evidence("human_verification", "explicit", gate.url), source: "cached_response" };
         return true;
       }
       function caughtGate(error) {
-        if (error.name === "PublisherAccessGate") { needsLogin = true; loginURL ||= error.gate.url; challengeKind ||= error.gate.kind; }
+        if (error.name === "PublisherAccessGate") { needsLogin = true; loginURL ||= error.gate.url; challengeKind ||= error.gate.kind;
+          accessEvidence = { ...evidence("human_verification", "explicit", error.gate.url), source: "cached_response" }; }
+      }
+      async function tryArticleRoutes(routes, source) {
+        for (const route of routes || []) {
+          if (articleRouteCount >= 4 || visitedPages.has(route)) continue;
+          articleRouteCount++;
+          const result = await visitPage(route, source);
+          if (result) return result;
+        }
+        return null;
       }
       async function tryCandidates(candidates, source, depth = 0) {
         for (const candidate of candidates.slice(0, MAX_CANDIDATES)) {
@@ -266,7 +356,7 @@
             const result = await request(candidate.url, candidate.referrer);
             lastURL = result.url;
             if ([401,403,429].includes(result.response.status)) {
-              needsLogin = true; loginURL ||= candidate.referrer || result.url;
+              noteRestriction(candidate.referrer || result.url);
               if (result.bytes.length <= MAX_PAGE_BYTES && /html/i.test(result.type)) noteGate(discover(parse(decode(result.bytes, result.type), result.url), result.url, expectedDOI), result.url);
               continue;
             }
@@ -300,12 +390,18 @@
           let pageURL = httpURL(browser.currentURI?.spec) || url;
           let result = discover(parse(data.documentHTML, pageURL), pageURL, expectedDOI);
           noteGate(result, pageURL);
+          rememberPublisherURL(pageURL, source);
+          const routed = await tryArticleRoutes(result.articleRoutes, source);
+          if (routed) return routed;
           if (!result.candidates.length && !result.mismatch && !result.needsLogin) {
             await cancellable(Zotero.Promise.delay(1000), () => browser.destroy());
             data = await cancellable(browser.getPageData(["documentHTML"], { timeout: 10000 }), () => browser.destroy());
             pageURL = httpURL(browser.currentURI?.spec) || pageURL;
             result = discover(parse(data.documentHTML, pageURL), pageURL, expectedDOI);
             noteGate(result, pageURL);
+            rememberPublisherURL(pageURL, source);
+            const routed = await tryArticleRoutes(result.articleRoutes, source);
+            if (routed) return routed;
           }
           return await tryCandidates(result.candidates, source);
         }
@@ -324,8 +420,9 @@
           renderURL = result.url;
           visitedPages.add(renderURL);
           lastURL = renderURL;
+          rememberPublisherURL(renderURL, source);
           if ([401,403,429].includes(result.response.status)) {
-            needsLogin = true; loginURL ||= renderURL;
+            noteRestriction(renderURL);
             if (result.bytes.length <= MAX_PAGE_BYTES && /html/i.test(result.type)) noteGate(discover(parse(decode(result.bytes, result.type), result.url), result.url, expectedDOI), result.url);
           }
           if (result.response.status >= 200 && result.response.status < 300) {
@@ -337,6 +434,8 @@
               const found = await tryCandidates(discovered.candidates, source);
               if (found) return found;
               if (discovered.mismatch) return null;
+              const routed = await tryArticleRoutes(discovered.articleRoutes, source);
+              if (routed) return routed;
             }
           }
         }
@@ -375,14 +474,16 @@
       }
       check();
       return needsLogin
-        ? { state: "needs_login", challenge: challengeKind, accessReason, message: challengeKind === "cloudflare"
+        ? { state: "needs_login", challenge: challengeKind, accessReason, accessEvidence, publisherURL, message: challengeKind === "cloudflare"
           ? "该网站返回 Cloudflare 真人验证，同一站点已暂缓重复请求。请点击“浏览器下载并自动入库”，在日常使用的默认浏览器完成验证并点击 PDF 下载；保存到配置文件夹且确认匹配的新 PDF 会自动入库，也可使用科研通兜底。"
           : challengeKind ? "该网站要求人工验证，同一站点已暂缓重复请求。请点击“浏览器下载并自动入库”，在日常使用的默认浏览器完成验证并点击 PDF 下载；保存到配置文件夹且确认匹配的新 PDF 会自动入库，也可使用科研通兜底。"
           : accessReason === "institutional_access" ? "出版社页面提供机构访问入口，当前 Zotero 会话尚未取得全文。请点击“浏览器下载并自动入库”，在默认浏览器完成机构登录、确认本篇论文的订阅权限并点击 PDF 下载；保存到配置文件夹且确认匹配的新 PDF 会自动入库，也可使用科研通兜底。"
+          : accessReason === "institutional_hint" ? "页面有检查访问权限或机构登录的迹象，但尚未确认本篇论文可通过机构获取。请点击“浏览器下载并自动入库”，在默认浏览器检查机构登录和本篇订阅权限，再点击 PDF 下载；保存到配置文件夹且确认匹配的新 PDF 会自动入库。"
           : accessReason === "purchase" ? "出版社页面显示购买或订阅入口，当前会话尚未取得全文。如有机构访问权限，请点击“浏览器下载并自动入库”，在默认浏览器完成机构登录、检查订阅并点击 PDF 下载；保存到配置文件夹且确认匹配的新 PDF 会自动入库，也可使用科研通兜底。"
           : accessReason === "preview" ? "当前仅取得 ScienceDirect 论文预览或摘要页，尚未取得全文。请点击“浏览器下载并自动入库”，在默认浏览器完成机构登录、确认全文访问权限并点击 PDF 下载；保存到配置文件夹且确认匹配的新 PDF 会自动入库，也可使用科研通兜底。"
           : "网页提示登录、访问验证或请求限制。请点击“浏览器下载并自动入库”，在默认浏览器完成出版社或机构登录、检查访问权限并点击 PDF 下载；保存到配置文件夹且确认匹配的新 PDF 会自动入库，也可使用科研通兜底。", url: loginURL || lastURL }
-        : { state: "not_found", message: "网页、渲染后的下载入口和开放获取来源均未取得有效 PDF，可进入科研通兜底。", url: lastURL };
+        : { state: "not_found", accessReason: "automatic_not_found", accessEvidence: evidence("automatic_not_found", "unknown", publisherURL || lastURL), publisherURL,
+          message: "自动查找暂未取得有效 PDF；这不能判断你是否拥有机构访问权限。可先点击“浏览器下载并自动入库”，在日常浏览器查看这篇论文并尝试下载；仍无法获取时可使用科研通兜底。", url: publisherURL || lastURL };
     }
     return {
       clearAccessGate(url) { accessGates.delete(siteKey(url)); },
@@ -409,5 +510,5 @@
       },
     };
   }
-  global.FulltextPublisher = { create, discover, validPDF, findExistingPDF };
+  global.FulltextPublisher = { create, discover, validPDF, findExistingPDF, elsevierArticleRoutes };
 })(globalThis);

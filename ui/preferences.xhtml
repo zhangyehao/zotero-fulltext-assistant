@@ -16,13 +16,14 @@
     <html:p class="fta-secondary">可继续从文库追加，排队按加入顺序处理。</html:p>
     <html:details class="fta-help fta-history-help"><html:summary>任务记录与检查</html:summary><html:p class="fta-note fta-history-note">任务和已获取记录保存在本机，重启后仍可查看。列表随任务进度自动更新；Zotero 运行时按设置间隔检查等待应助的任务，关闭 Zotero 后停止检查。</html:p></html:details>
     <html:div id="fta-pref-task-filters" class="fta-task-filters" role="group" aria-label="任务结果筛选">
-      <html:button type="button" data-filter="unfinished" aria-pressed="true">未完成</html:button>
-      <html:button type="button" data-filter="success" aria-pressed="false">已获取</html:button>
+      <html:button type="button" data-filter="active" aria-pressed="false">进行中</html:button>
       <html:button type="button" data-filter="login" aria-pressed="false">需网页登录</html:button>
       <html:button type="button" data-filter="fallback" aria-pressed="false">待兜底</html:button>
-      <html:button type="button" data-filter="active" aria-pressed="false">进行中</html:button>
+      <html:button type="button" data-filter="success" aria-pressed="false">已获取</html:button>
+      <html:button type="button" data-filter="unfinished" aria-pressed="true">未完成</html:button>
       <html:button type="button" data-filter="all" aria-pressed="false">全部历史</html:button>
     </html:div>
+    <html:p id="fta-pref-task-scope" class="fta-note" role="status"></html:p>
     <html:div id="fta-pref-bulk-actions" class="fta-bulk-actions">
       <html:label class="fta-check" for="fta-pref-select-tasks"><html:input id="fta-pref-select-tasks" type="checkbox"/><html:span>选择当前列表可求助项</html:span></html:label>
       <html:button id="fta-pref-bulk-assist" type="button">为所选文献发起科研通求助</html:button>
@@ -36,6 +37,11 @@
   <html:section id="fta-pref-panel-settings" class="fta-section fta-panel" role="tabpanel" tabindex="0" hidden="hidden" aria-labelledby="fta-pref-tab-settings">
     <html:div class="fta-section-heading"><html:h2 id="fta-fetch-heading">下载设置</html:h2><html:span class="fta-secondary">按你的下载习惯设置</html:span></html:div>
     <html:form id="fta-pref-settings-form">
+      <html:div class="fta-settings-group">
+        <html:label for="fta-pref-language">界面语言</html:label>
+        <html:select id="fta-pref-language" aria-describedby="fta-pref-language-note"><html:option value="zh-CN" data-i18n-skip="true">简体中文</html:option><html:option value="zh-TW" data-i18n-skip="true">繁體中文</html:option><html:option value="en" data-i18n-skip="true">English</html:option></html:select>
+        <html:p id="fta-pref-language-note" class="fta-note">切换后立即保存并生效；其他未保存的设置、账号和链接输入会保留。</html:p>
+      </html:div>
       <html:div class="fta-settings-group">
         <html:h3 id="fta-pref-download-directories-label">浏览器下载文件夹</html:h3>
         <html:p class="fta-secondary">在默认浏览器下载 PDF 并保存到这些文件夹，明确匹配的全文会自动入库。</html:p>
