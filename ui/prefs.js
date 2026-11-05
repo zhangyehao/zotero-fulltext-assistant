@@ -18,11 +18,14 @@
     let settingsDirty = false;
     let accountDirty = false;
     let destroyed = false;
+    let activePage = "tasks";
+    let seenCaptureStamp = "";
     let taskFilter = "unfinished";
     let requestTarget = "";
     let bindingState = null;
     const selectedTasks = new Set();
     const bindings = [];
+    const pageTabs = [...$("fta-pref-tabs").querySelectorAll('[role="tab"]')];
     const taskLabels = {
       queued: "排队中", pending: "排队中", finding: "查找全文", searching: "查找全文", resolving: "正在获取",
       not_found: "未找到全文", needs_login: "需网页登录",
@@ -52,6 +55,8 @@
     const isBrowserActive = task => task.state === "manual_waiting";
     const isBrowserRoute = task => ["manual", "browser"].includes(task.acquisitionMode) || ["manual_waiting", "manual_review", "browser_waiting", "browser_scanning", "browser_downloading"].includes(task.state);
     const isAcquired = task => ["imported", "completed"].includes(task.state);
+    const isAssistComplete = task => Boolean(task.assistReceipt && task.assistReceipt.adoption === "accepted" && task.assistReceipt.messages === "done" && !task.assistReceipt.needsReconcile);
+    const needsAssistCompletion = task => isAcquired(task) && Boolean(task.assistReceipt) && !isAssistComplete(task);
     const currentTasks = () => Array.isArray(snapshot.tasks) ? snapshot.tasks : [];
     const currentPoints = () => {
       const value = String($("fta-pref-points").value || "").trim();
@@ -62,7 +67,7 @@
     const isFallback = task => !task.requestURL && !task.requestID && !task.attachmentID && ["not_found", "needs_login", "pending_login", "paused", "error", "failed", "needs_review", "captcha", "manual_waiting", "manual_review", "browser_waiting", "browser_scanning", "browser_downloading"].includes(task.state);
     const canAssist = task => isFallback(task) && Boolean(String(task.doi || "").trim());
     function matchesFilter(task, filter) {
-      if (filter === "unfinished") return !isAcquired(task);
+      if (filter === "unfinished") return !isAcquired(task) || needsAssistCompletion(task);
       if (filter === "success") return isAcquired(task);
       if (filter === "login") return ["needs_login", "pending_login", "captcha"].includes(task.state);
       if (filter === "fallback") return isFallback(task);
@@ -70,6 +75,27 @@
       return true;
     }
     function on(node, name, handler) { node.addEventListener(name, handler); bindings.push(() => node.removeEventListener(name, handler)); }
+    function renderNavigation() {
+      root.dataset.activePage = activePage;
+      for (const tab of pageTabs) {
+        const selected = tab.dataset.page === activePage;
+        tab.setAttribute("aria-selected", String(selected));
+        tab.setAttribute("tabindex", selected ? "0" : "-1");
+        $(tab.getAttribute("aria-controls")).hidden = !selected;
+      }
+      $("fta-pref-tab-settings").dataset.dirty = String(settingsDirty);
+      $("fta-pref-tab-settings").setAttribute("aria-label", settingsDirty ? "下载设置，有未保存的更改" : "下载设置");
+    }
+    function selectPage(page, focus = false) {
+      const tab = pageTabs.find(node => node.dataset.page === page);
+      if (destroyed || !tab) return;
+      activePage = page;
+      renderNavigation();
+      if (focus) {
+        tab.focus();
+        tab.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+      }
+    }
     function status(message, error = false, target = "fta-pref-status") {
       $(target).textContent = String(message || "");
       $(target).dataset.error = String(error);
@@ -84,6 +110,11 @@
       if (className) node.className = className;
       if (text !== undefined) node.textContent = String(text);
       return node;
+    }
+    function titleText(value) {
+      // Strip only Zotero inline formatting. Never parse source markup; leave
+      // unknown tags and mathematical comparisons/angle brackets as safe text.
+      return String(value || "").replace(/<\/(?:i|b|em|strong|sub|sup|span)\s*>|<(?:i|b|em|strong|sub|sup|span)(?:\s+[a-z_:][\w:.-]*(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*\s*\/?>/gi, "");
     }
     function button(label, method, args, disabled = false, success = "") {
       const node = make("button", "", label);
@@ -117,6 +148,21 @@
     function directoryPauseNote(result) {
       return Number.isSafeInteger(result?.paused) && result.paused > 0 ? " 已暂停 " + result.paused + " 个等待下载的任务；请点击各任务的“浏览器下载并自动入库”，按新目录重新开始检查。" : "";
     }
+    function renderCaptureSummary() {
+      const summary = snapshot.captureSummary;
+      const stamp = summary?.id ?? summary?.at ?? "";
+      if (stamp && stamp !== seenCaptureStamp) {
+        seenCaptureStamp = stamp;
+        selectPage("tasks");
+      }
+      const box = $("fta-pref-batch-summary");
+      box.hidden = !summary;
+      const message = summary ? String(summary.message || "本次选择已处理，结果见任务列表。") : "";
+      const time = summary ? dateText(summary.at) : "";
+      if ($("fta-pref-batch-message").textContent !== message) $("fta-pref-batch-message").textContent = message;
+      if ($("fta-pref-batch-time").textContent !== time) $("fta-pref-batch-time").textContent = time;
+      box.dataset.tone = Number(summary?.failed) > 0 ? "warning" : "";
+    }
     function renderDirectories() {
       const list = $("fta-pref-download-directories");
       list.replaceChildren();
@@ -133,9 +179,9 @@
       }
     }
     function renderSelection() {
-      $("fta-pref-bulk-actions").hidden = taskFilter === "success";
-      $("fta-pref-bulk-note").hidden = taskFilter === "success";
       const eligible = currentTasks().filter(task => matchesFilter(task, taskFilter) && canAssist(task));
+      $("fta-pref-bulk-actions").hidden = !eligible.length;
+      $("fta-pref-bulk-note").hidden = !eligible.length;
       const selected = eligible.filter(task => selectedTasks.has(task.id));
       const all = $("fta-pref-select-tasks");
       all.disabled = busy || !eligible.length || typeof app.requestAssist !== "function";
@@ -158,7 +204,7 @@
       unbound.selected = !requestTarget;
       select.append(unbound);
       for (const task of available) {
-        const name = task.title || task.doi || "未命名文献";
+        const name = titleText(task.title) || task.doi || "未命名文献";
         const option = make("option", "", name + (task.doi && task.doi !== name ? " — " + task.doi : ""));
         option.value = task.id;
         option.selected = task.id === requestTarget;
@@ -197,7 +243,7 @@
       placeholder.selected = !state.itemID;
       select.append(placeholder);
       for (const candidate of state.candidates) {
-        const name = candidate.title || candidate.doi || "未命名文献";
+        const name = titleText(candidate.title) || candidate.doi || "未命名文献";
         const option = make("option", "", [name, candidate.doi && candidate.doi !== name ? candidate.doi : "", candidate.libraryName].filter(Boolean).join(" — "));
         option.value = String(candidate.itemID);
         option.selected = option.value === state.itemID;
@@ -231,6 +277,7 @@
     }
     function renderTasks() {
       const tasks = currentTasks();
+      const queuePositions = new Map(tasks.filter(task => task.state === "queued").map((task, index) => [task.id, index + 1]));
       const visible = tasks.filter(task => matchesFilter(task, taskFilter));
       if (taskFilter === "success") visible.sort((a, b) => String(b.completedAt || b.importedAt || b.updatedAt || "").localeCompare(String(a.completedAt || a.importedAt || a.updatedAt || "")));
       if (bindingState && !visible.some(task => task.id === bindingState.taskId && task.state === "available" && !task.itemID)) bindingState = null;
@@ -240,9 +287,17 @@
       list.replaceChildren();
       $("fta-pref-task-count").textContent = String(tasks.length);
       $("fta-pref-task-empty").hidden = visible.length > 0;
-      $("fta-pref-task-empty").textContent = tasks.length ? taskFilter === "unfinished" ? "当前没有未完成任务。已获取的记录可在“已获取”中查看。" : "当前筛选没有任务。" : "还没有任务。在文库多选文献，右击“全文助手：批量获取全文”开始批量获取。";
-      const waiting = tasks.filter(task => matchesFilter(task, "active")).length;
-      $("fta-pref-task-summary").textContent = "显示 " + visible.length + "/" + tasks.length + " 项" + (waiting ? " · " + waiting + " 项进行中" : "");
+      $("fta-pref-task-empty").textContent = tasks.length ? taskFilter === "unfinished" ? "当前没有未完成任务。已获取的记录可在“已获取”中查看。" : "当前筛选没有任务。" : "还没有任务。在文库多选文献，右击“全文助手 → 批量获取全文”开始批量获取。";
+      list.hidden = !visible.length;
+      const summary = ["显示 " + visible.length + "/" + tasks.length + " 项"];
+      const acquiring = tasks.filter(task => ["finding", "searching", "resolving", "downloading", "validating"].includes(task.state)).length;
+      const waitingAssist = tasks.filter(task => task.state === "waiting").length;
+      const waitingBrowser = tasks.filter(isBrowserActive).length;
+      if (acquiring) summary.push("正在获取 " + acquiring + " 项");
+      if (queuePositions.size) summary.push("排队 " + queuePositions.size + " 项");
+      if (waitingAssist) summary.push("等待应助 " + waitingAssist + " 项");
+      if (waitingBrowser) summary.push("等待浏览器下载 " + waitingBrowser + " 项");
+      $("fta-pref-task-summary").textContent = summary.join(" · ");
       for (const node of $("fta-pref-task-filters").querySelectorAll("button")) {
         const filter = node.dataset.filter;
         node.textContent = filterLabels[filter] + " " + tasks.filter(task => matchesFilter(task, filter)).length;
@@ -253,12 +308,13 @@
         const row = make("article", "fta-row");
         row.dataset.taskId = String(task.id);
         const main = make("div", "fta-row-main");
+        const name = titleText(task.title) || task.doi || "未命名文献";
         if (isFallback(task)) {
           const checkbox = make("input", "fta-task-select");
           checkbox.type = "checkbox";
           checkbox.checked = selectedTasks.has(task.id);
           checkbox.disabled = busy || !canAssist(task) || typeof app.requestAssist !== "function";
-          checkbox.setAttribute("aria-label", "选择文献：" + (task.title || task.doi || "未命名文献"));
+          checkbox.setAttribute("aria-label", "选择文献：" + name);
           if (!canAssist(task)) checkbox.title = "请先在原文献条目补全 DOI";
           checkbox.addEventListener("change", () => {
             if (busy || checkbox.disabled) return;
@@ -267,14 +323,16 @@
           });
           main.append(checkbox);
         }
-        main.append(make("div", "fta-row-title", task.title || task.doi || "未命名文献"));
+        main.append(make("div", "fta-row-title", name));
         const acquired = isAcquired(task);
+        const assistPending = needsAssistCompletion(task);
+        const receiptLabel = assistPending ? task.assistReceipt.needsReconcile ? "已获取 · 采纳待核实" : task.assistReceipt.adoption === "accepted" ? "已采纳 · 待已读" : "已获取 · 待采纳" : acquired && isAssistComplete(task) ? "已采纳 · 对应消息已读" : "";
         const unboundAvailable = task.state === "available" && !task.itemID;
-        const badge = make("span", "fta-status-badge", unboundAvailable ? "待关联文献" : taskLabels[task.state] || "待处理");
+        const badge = make("span", "fta-status-badge", receiptLabel || (unboundAvailable ? "待关联文献" : task.state === "queued" ? "排队中 · 第 " + queuePositions.get(task.id) + " 位" : taskLabels[task.state] || "待处理"));
         if (acquired) badge.dataset.tone = "success";
         if (["error", "failed"].includes(task.state)) badge.dataset.tone = "error";
         if (["pending_login", "needs_login", "not_found", "needs_review", "captcha", "submission_unknown", "manual_review"].includes(task.state)) badge.dataset.tone = "warning";
-        if (unboundAvailable) badge.dataset.tone = "warning";
+        if (unboundAvailable || assistPending) badge.dataset.tone = "warning";
         main.append(badge);
         row.append(main);
         const completedDate = acquired ? dateText(task.completedAt || task.importedAt || task.updatedAt, true) : "";
@@ -284,7 +342,7 @@
         const pointsLabel = task.requestID && task.requestedPoints ? "悬赏 " + task.requestedPoints + " 积分" : "";
         const meta = (acquired ? [completedDate ? "完成 " + completedDate : "完成日期未记录", "来源：" + (sourceLabels[task.source] || "未记录"), route, task.doi] : [task.doi, task.requestID ? "求助 " + task.requestID : "", pointsLabel, route ? "来源：科研通" : "", route, task.lastCheckedAt ? "最近检查 " + dateText(task.lastCheckedAt) : ""]).filter(Boolean);
         if (meta.length) row.append(make("div", "fta-row-meta", meta.join(" · ")));
-        const note = unboundAvailable ? "应助文件已就绪，但此任务仅跟踪求助，尚未关联 Zotero 文献。请先关联文献，才能下载到文库。" : acquired ? "" : task.message || task.lastError || browserNotes[task.state];
+        const note = unboundAvailable ? "应助文件已就绪，但此任务仅跟踪求助，尚未关联 Zotero 文献。请先关联文献，才能下载到文库。" : assistPending ? task.assistReceipt.lastError || (task.assistReceipt.needsReconcile ? "PDF 已入库；采纳结果尚未核实，请先核实网站状态。" : task.assistReceipt.adoption === "accepted" ? "应助文件已采纳；仍需将这份文件对应的上传消息标记已读。" : "PDF 已入库；仍需采纳这份应助文件并标记对应上传消息已读。") : acquired ? task.source === "ablesci" && !task.assistReceipt ? task.lastError || "旧版记录可核验后补采纳：仅当网站文件与已保存 PDF 完全一致且论文身份匹配时，才采纳并处理对应消息。" : "" : task.message || task.lastError || browserNotes[task.state];
         if (note) row.append(make("p", "fta-row-note", note));
         const actions = make("div", "fta-row-actions");
         const done = ["imported", "completed", "closed"].includes(task.state);
@@ -301,17 +359,22 @@
         const openMethod = typeof app.openTask === "function" ? "openTask" : "openRequest";
         const canOpen = openMethod === "openTask" ? Boolean(task.attachmentID || task.requestURL || task.officialURL || task.doi) : Boolean(task.requestURL);
         actions.append(button(task.attachmentID ? "打开全文" : hasRequest ? "查看已有求助" : "打开网页", openMethod, [task.id], !canOpen));
+        if (acquired && task.attachmentID && hasRequest) actions.append(button("查看已有求助", "openRequest", [task.id]));
+        if (assistPending) actions.append(button(task.assistReceipt.needsReconcile ? "核实采纳状态" : "重试采纳与已读", "retryAssistCompletion", [task.id], false, "采纳与对应消息的处理结果已更新，请查看任务状态。"));
+        if (acquired && task.source === "ablesci" && hasRequest && task.attachmentID && !task.assistReceipt) actions.append(button("核验并补采纳", "verifyAssistCompletion", [task.id], false, result => result?.completed ? "已核验原文件，采纳与对应消息已读均已完成。" : result?.message || "核验结果已更新，请查看任务提示。"));
         if (task.itemID && !acquired && (isFallback(task) || isBrowserRoute(task) || ["needs_login", "needs_review", "error", "failed", "pending_login", "captcha", "paused"].includes(task.state))) {
           if (!hasRequest) actions.append(button("浏览器下载并自动入库", "openSystemBrowserTask", [task.id], false, manualDownloadMessage));
           actions.append(button("选择已下载的PDF", "importLocalPDF", [task.id], false, result => result?.cancelled ? "已取消选择文件。" : result?.needsReview ? "请先预览所选 PDF，核对后再确认导入。" : "本地 PDF 处理结果已更新。"));
         }
         if (task.state === "manual_review") {
+          const assistReview = Boolean(task.assistReview?.fileID && task.assistReview?.createdAt);
           if (task.pendingFilename) row.append(make("p", "fta-note", "待核对文件：" + task.pendingFilename));
-          if (task.pendingTitle) row.append(make("p", "fta-note", "待关联文献：" + task.pendingTitle));
+          if (task.pendingTitle) row.append(make("p", "fta-note", "待关联文献：" + titleText(task.pendingTitle)));
           if (task.pendingSummary) row.append(make("p", "fta-note", task.pendingSummary));
+          if (assistReview) row.append(make("p", "fta-note", "确认后将入库并采纳这份应助文件，结算该求助的原悬赏" + (Number.isSafeInteger(task.requestedPoints) && task.requestedPoints > 0 ? "（" + task.requestedPoints + " 积分）" : "") + "；随后只将对应上传消息标记已读。"));
           actions.append(button("预览待核对 PDF", "previewDownloadedPDF", [task.id], !task.pendingFilename, "请核对 PDF 的标题、作者和 DOI，再决定是否导入。"));
-          actions.append(button("我已核对，是这篇论文", "confirmDownloadedPDF", [task.id], !task.pendingFilename, "PDF 已保存到原文献。"));
-          actions.append(button("取消这次导入", "dismissDownloadedPDF", [task.id], false, "已取消，任务保留。可重新选择文件，或点击“浏览器下载并自动入库”重新开始检查。"));
+          actions.append(button(assistReview ? "确认对应论文并入库、采纳" : "我已核对，是这篇论文", "confirmDownloadedPDF", [task.id], !task.pendingFilename, assistReview ? "核验与入库结果已更新，采纳及对应消息状态见任务列表。" : "PDF 已保存到原文献。"));
+          actions.append(button("取消这次导入", "dismissDownloadedPDF", [task.id], false, assistReview ? "已取消这次应助文件导入，任务保留；未确认的文件不会因此采纳。" : "已取消，任务保留。可重新选择文件，或点击“浏览器下载并自动入库”重新开始检查。"));
         }
         if (isBrowserActive(task) && !hasRequest) actions.append(button("暂停监控", "pauseTask", [task.id], false, "已暂停下载文件夹检查；可重新点击“浏览器下载并自动入库”恢复。"));
         else if (["paused", "error", "failed", "not_found", "needs_login", "pending_login", "needs_review"].includes(task.state) && (!isBrowserRoute(task) || hasRequest)) {
@@ -380,6 +443,8 @@
         $("fta-pref-poll").value = String(settings.pollSeconds ?? 60);
         $("fta-pref-auto-download").checked = settings.autoDownload !== false;
       }
+      renderNavigation();
+      renderCaptureSummary();
       renderDirectories();
       renderTasks();
       renderRequestTargets();
@@ -394,6 +459,21 @@
       try { const result = await action(); if (!destroyed) status(typeof message === "function" ? message(result) : message || "已更新。"); return result; }
       catch (error) { if (!destroyed) status(sensitive ? "登录未完成，请检查账号密码或使用网页登录完成验证。" : error?.message || "操作未完成，请稍后再试。", true); }
       finally { busy = false; if (!destroyed) render(); }
+    }
+    for (const tab of pageTabs) {
+      on(tab, "click", () => selectPage(tab.dataset.page));
+      on(tab, "keydown", event => {
+        if (event.altKey || event.ctrlKey || event.metaKey) return;
+        const index = pageTabs.indexOf(tab);
+        let next;
+        if (event.key === "ArrowRight") next = (index + 1) % pageTabs.length;
+        else if (event.key === "ArrowLeft") next = (index + pageTabs.length - 1) % pageTabs.length;
+        else if (event.key === "Home") next = 0;
+        else if (event.key === "End") next = pageTabs.length - 1;
+        else return;
+        event.preventDefault();
+        selectPage(pageTabs[next].dataset.page, true);
+      });
     }
     on($("fta-pref-username"), "input", () => { accountDirty = true; });
     on($("fta-pref-password"), "input", () => { accountDirty = true; });
@@ -421,6 +501,7 @@
       settingsDirty = true;
       status(currentPoints() === null ? "悬赏积分必须是 1–10000 的整数。" : "有未保存的更改", currentPoints() === null, "fta-pref-save-state");
       $("fta-pref-points").setAttribute("aria-invalid", String(currentPoints() === null));
+      renderNavigation();
       renderTasks();
     });
     on($("fta-pref-settings-form"), "submit", event => {

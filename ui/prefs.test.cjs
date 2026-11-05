@@ -16,7 +16,7 @@ let cancelLocalImport = false;
 let reviewLocalImport = false;
 let cancelDirectory = false;
 const model = {
-  version: "0.5.0", settings: { points: 10, pollSeconds: 60, autoDownload: true, downloadDirectories: ["D:\\Downloads"], downloadDirectory: "D:\\Downloads" },
+  version: "0.6.0", settings: { points: 10, pollSeconds: 60, autoDownload: true, downloadDirectories: ["D:\\Downloads"], downloadDirectory: "D:\\Downloads" },
   session: { status: "signed_out", username: "", hasSavedPassword: false, message: "尚未登录" },
   tasks: [], messages: [], messagesStatus: { state: "idle" }
 };
@@ -49,6 +49,8 @@ const app = {
     renderListener(); return { added, directories: model.settings.downloadDirectories };
   },
   checkTask: async id => calls.push(["check", id]),
+  retryAssistCompletion: async id => calls.push(["assistCompletion", id]),
+  verifyAssistCompletion: async id => { calls.push(["verifyAssistCompletion", id]); return { completed: false, message: "原文件核验结果已更新。" }; },
   openRequest: async id => calls.push(["open", id]),
   pauseTask: async id => { calls.push(["pause", id]); model.tasks.find(task => task.id === id).state = "paused"; renderListener(); },
   retryTask: async (id, options) => { calls.push(["retry", id, options ? { ...options } : null]); const task = model.tasks.find(task => task.id === id); task.state = "waiting"; if (options?.points) task.requestedPoints = options.points; renderListener(); },
@@ -126,6 +128,14 @@ context.FulltextPreferences.mount(root);
 context.FulltextPreferences.mount(root);
 assert.equal(subscriptions, 1, "mount is idempotent");
 const get = id => document.getElementById(id);
+const pageTab = page => get("fta-pref-tab-" + page);
+const pagePanel = page => get("fta-pref-panel-" + page);
+let focusedTab = "";
+for (const tab of get("fta-pref-tabs").querySelectorAll('[role="tab"]')) tab.focus = () => { focusedTab = tab.id; };
+const tabKey = (page, key, modifiers = {}) => {
+  const event = new window.Event("keydown", { bubbles: true, cancelable: true });
+  Object.assign(event, { key, ...modifiers }); pageTab(page).dispatchEvent(event); return event;
+};
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const submit = id => get(id).dispatchEvent(new window.Event("submit", { cancelable: true }));
 const input = (id, value) => { get(id).value = value; get(id).dispatchEvent(new window.Event("input")); };
@@ -183,6 +193,54 @@ async function publisherControls(taskId = "publisher-task", overrides = {}) {
   return { app, calls, get: id => document.getElementById(id), close: () => handlers.unload() };
 }
 (async () => {
+  assert.equal(root.dataset.activePage, "tasks");
+  assert.equal(get("fta-pref-tabs").getAttribute("role"), "tablist");
+  assert.equal(get("fta-pref-tabs").getAttribute("aria-orientation"), "horizontal");
+  const pages = ["tasks", "settings", "account", "messages"];
+  for (const page of pages) {
+    assert.equal(pageTab(page).getAttribute("aria-controls"), pagePanel(page).id);
+    assert.equal(pagePanel(page).getAttribute("aria-labelledby"), pageTab(page).id);
+    assert.equal(pagePanel(page).getAttribute("role"), "tabpanel");
+    assert.equal(pagePanel(page).hidden, page !== "tasks");
+    assert.equal(pageTab(page).getAttribute("aria-selected"), String(page === "tasks"));
+    assert.equal(pageTab(page).getAttribute("tabindex"), page === "tasks" ? "0" : "-1");
+  }
+  const beforeNavigation = calls.length;
+  pageTab("settings").click();
+  assert.equal(root.dataset.activePage, "settings");
+  assert.equal(pagePanel("tasks").hidden, true);
+  assert.equal(pagePanel("settings").hidden, false);
+  assert.equal(tabKey("settings", "ArrowRight").defaultPrevented, true);
+  assert.equal(root.dataset.activePage, "account");
+  assert.equal(focusedTab, "fta-pref-tab-account");
+  tabKey("account", "End"); assert.equal(root.dataset.activePage, "messages");
+  tabKey("messages", "ArrowRight"); assert.equal(root.dataset.activePage, "tasks", "right arrow wraps to first tab");
+  tabKey("tasks", "ArrowLeft"); assert.equal(root.dataset.activePage, "messages", "left arrow wraps to last tab");
+  tabKey("messages", "Home"); assert.equal(root.dataset.activePage, "tasks");
+  assert.equal(tabKey("tasks", "ArrowDown").defaultPrevented, false, "vertical arrows keep normal scrolling behavior");
+  tabKey("tasks", "ArrowRight", { ctrlKey: true });
+  assert.equal(root.dataset.activePage, "tasks", "modified shortcuts are not intercepted");
+  assert.equal(calls.length, beforeNavigation, "tab navigation does not perform backend actions");
+  assert.equal(get("fta-pref-batch-summary").hidden, true);
+  pageTab("account").click();
+  model.captureSummary = { id: "capture-1", at: "2026-11-05T12:30:00Z", selected: 4, queued: 1, skippedExistingPDF: 2, ignored: 1, message: "加入 1 项；已有 PDF 跳过 2 项。<img src=x onerror=bad>" };
+  renderListener();
+  assert.equal(root.dataset.activePage, "tasks", "a new batch summary opens the task tab");
+  assert.equal(get("fta-pref-batch-summary").hidden, false);
+  assert.match(get("fta-pref-batch-message").textContent, /加入 1 项；已有 PDF 跳过 2 项/);
+  assert.equal(get("fta-pref-batch-summary").querySelector("img"), null);
+  assert.ok(get("fta-pref-batch-time").textContent);
+  pageTab("settings").click(); renderListener();
+  assert.equal(root.dataset.activePage, "settings", "an ordinary snapshot update does not steal the selected tab");
+  model.captureSummary = { ...model.captureSummary, at: "2026-11-05T12:31:00Z" }; renderListener();
+  assert.equal(root.dataset.activePage, "settings", "a stable batch ID takes precedence over timestamp changes");
+  model.captureSummary = { ...model.captureSummary, id: "capture-2", failed: 1, message: "加入 0 项，检查失败 1 项。" }; renderListener();
+  assert.equal(root.dataset.activePage, "tasks");
+  assert.equal(get("fta-pref-batch-summary").dataset.tone, "warning");
+  model.captureSummary = null; renderListener();
+  assert.equal(get("fta-pref-batch-summary").hidden, true);
+  assert.equal(get("fta-pref-bulk-actions").hidden, true, "an empty task page does not show unusable paid actions");
+  assert.equal(get("fta-pref-bulk-note").hidden, true);
   assert.equal(get("fta-pref-task-count").textContent, "0");
   assert.equal(get("fta-pref-task-empty").hidden, false);
   assert.equal(get("fta-pref-account-state").textContent, "未登录");
@@ -190,7 +248,7 @@ async function publisherControls(taskId = "publisher-task", overrides = {}) {
   assert.equal(root.textContent.includes("QxRqAb"), false);
   assert.equal(root.textContent.includes("打开全文助手"), false);
   assert.match(root.textContent, /在文库多选文献/);
-  assert.match(root.textContent, /全文助手：批量获取全文/);
+  assert.match(root.textContent, /全文助手 → 批量获取全文/);
   assert.equal(get("fta-pref-poll").getAttribute("max"), "3600");
   assert.match(get("fta-pref-poll").parentElement.textContent, /科研通应助检查间隔（秒）/);
   assert.equal(get("fta-pref-bulk-assist").disabled, true);
@@ -198,9 +256,11 @@ async function publisherControls(taskId = "publisher-task", overrides = {}) {
   assert.equal(get("fta-pref-save-login").textContent, "保存并打开登录");
   assert.equal(filterButton("unfinished").getAttribute("aria-pressed"), "true", "a new settings view defaults to unfinished tasks");
   assert.match(root.textContent, /任务和已获取记录保存在本机/);
+  assert.match(root.textContent, /可继续从文库追加，排队按加入顺序处理/);
   assert.match(root.textContent, /关闭 Zotero 后停止检查/);
   assert.match(root.textContent, /优先使用账号当前的免积分高速权益，否则使用普通免费线路/);
   assert.match(root.textContent, /不自动购买高速下载/);
+  assert.match(root.textContent, /只将该文件对应的上传消息标记已读，不会将所有消息标为已读/);
   assert.doesNotMatch(root.textContent, /专用 Edge|继续专用 Edge/);
   assert.match(root.textContent, /“浏览器下载并自动入库”使用平常的默认浏览器/);
   assert.match(root.textContent, /不递归扫描子目录/);
@@ -288,6 +348,9 @@ async function publisherControls(taskId = "publisher-task", overrides = {}) {
   assert.equal(calls.filter(c => c[0] === "login").length, 0);
   input("fta-pref-username", "tester@example.invalid");
   input("fta-pref-password", "test-only-secret");
+  pageTab("tasks").click(); pageTab("messages").click(); pageTab("account").click();
+  assert.equal(get("fta-pref-username").value, "tester@example.invalid");
+  assert.equal(get("fta-pref-password").value, "test-only-secret", "navigation preserves the account draft until explicit login or destruction");
   submit("fta-pref-account-form");
   assert.equal(get("fta-pref-password").value, "", "password cleared immediately before login call");
   await flush();
@@ -312,9 +375,25 @@ async function publisherControls(taskId = "publisher-task", overrides = {}) {
   input("fta-pref-points", "25"); input("fta-pref-poll", "120");
   get("fta-pref-auto-download").checked = false;
   get("fta-pref-auto-download").dispatchEvent(new window.Event("input"));
+  pageTab("settings").click();
+  assert.equal(pageTab("settings").dataset.dirty, "true");
+  assert.match(pageTab("settings").getAttribute("aria-label"), /未保存/);
+  const draftPointsNode = get("fta-pref-points");
+  const beforeDraftNavigation = calls.length;
+  for (const page of ["messages", "account", "tasks", "settings"]) pageTab(page).click();
   renderListener();
   assert.equal(get("fta-pref-points").value, "25", "dirty input survives state update");
+  assert.equal(get("fta-pref-points"), draftPointsNode, "tabs retain the actual form controls rather than remounting them");
+  assert.equal(get("fta-pref-poll").value, "120");
+  assert.equal(get("fta-pref-auto-download").checked, false);
+  assert.equal(calls.length, beforeDraftNavigation, "switching tabs neither saves nor resets a draft");
+  model.captureSummary = { id: "capture-with-draft", at: "2026-11-05T12:35:00Z", queued: 1, message: "加入 1 项。" }; renderListener();
+  assert.equal(root.dataset.activePage, "tasks");
+  pageTab("settings").click();
+  assert.equal(get("fta-pref-points").value, "25", "a new batch can open tasks without discarding an unsaved settings draft");
+  model.captureSummary = null;
   submit("fta-pref-settings-form"); await flush();
+  assert.equal(pageTab("settings").dataset.dirty, "false");
   assert.equal(model.settings.points, 25);
   assert.equal(model.settings.pollSeconds, 120);
   assert.equal(model.settings.autoDownload, false);
@@ -329,6 +408,51 @@ async function publisherControls(taskId = "publisher-task", overrides = {}) {
   for (const invalid of ["3601", "59", "120.5", ""]) { input("fta-pref-poll", invalid); submit("fta-pref-settings-form"); await flush(); }
   assert.equal(calls.filter(c => c[0] === "save").length, validPollCount);
   input("fta-pref-poll", "120");
+  model.tasks = [
+    { id: "queue-done", state: "imported" },
+    { id: "queue-first", state: "queued" },
+    { id: "queue-remote", state: "waiting", requestID: "ExistingRequest" },
+    { id: "queue-working", state: "resolving" },
+    { id: "queue-warning", state: "needs_login" },
+    { id: "queue-second", state: "queued" },
+    { id: "queue-browser", state: "manual_waiting" }
+  ];
+  renderListener();
+  const badgeText = id => taskRow(id).querySelector(".fta-status-badge").textContent;
+  assert.equal(badgeText("queue-first"), "排队中 · 第 1 位");
+  assert.equal(badgeText("queue-second"), "排队中 · 第 2 位");
+  model.tasks.push({ id: "queue-third", state: "queued" }, { id: "queue-fourth", state: "queued" });
+  renderListener();
+  assert.equal(get("fta-pref-task-summary").textContent, "显示 8/9 项 · 正在获取 1 项 · 排队 4 项 · 等待应助 1 项 · 等待浏览器下载 1 项");
+  assert.equal(badgeText("queue-third"), "排队中 · 第 3 位", "a second batch joins after the first queued batch");
+  assert.equal(badgeText("queue-fourth"), "排队中 · 第 4 位");
+  assert.equal(badgeText("queue-remote"), "等待应助", "remote waiting is not a numbered download queue slot");
+  assert.equal(badgeText("queue-warning"), "需网页登录");
+  assert.equal(taskRow("queue-warning").querySelector(".fta-status-badge").dataset.tone, "warning");
+  filterButton("all").click();
+  assert.equal(badgeText("queue-third"), "排队中 · 第 3 位", "completed history does not affect queue ranks");
+  filterButton("active").click();
+  assert.equal(get("fta-pref-task-list").children.length, 7, "active filter retains queued, acquiring and waiting tasks");
+  assert.equal(badgeText("queue-fourth"), "排队中 · 第 4 位", "rank comes from the full snapshot, not visible row indices");
+  assert.equal(taskRow("queue-warning"), null);
+  model.tasks.find(task => task.id === "queue-first").state = "resolving";
+  model.tasks.find(task => task.id === "queue-working").state = "imported";
+  renderListener();
+  assert.equal(badgeText("queue-first"), "正在获取");
+  assert.equal(badgeText("queue-second"), "排队中 · 第 1 位");
+  assert.equal(badgeText("queue-third"), "排队中 · 第 2 位");
+  assert.equal(badgeText("queue-fourth"), "排队中 · 第 3 位");
+  filterButton("unfinished").click();
+  assert.equal(badgeText("queue-third"), "排队中 · 第 2 位", "switching filters keeps the updated global rank");
+  const formattedTitle = '<i>OXTR</i> and <I>Eda</I>: <b>B</b><em>E</em><strong>S</strong> H<sub>2</sub>O x<sup>2</sup> <span class="nocase" title="a > b" onclick="bad()">Gene</span>; p < 0.05, a < b > c, <x>, <i + j>';
+  const plainTitle = 'OXTR and Eda: BES H2O x2 Gene; p < 0.05, a < b > c, <x>, <i + j>';
+  model.tasks = [{ id: "formatted-title", itemID: 700, title: formattedTitle, doi: "10.1234/format", state: "not_found" }];
+  renderListener();
+  assert.equal(taskRow("formatted-title").querySelector(".fta-row-title").textContent, plainTitle);
+  assert.equal(taskCheckbox("formatted-title").getAttribute("aria-label"), "选择文献：" + plainTitle);
+  assert.equal(get("fta-pref-request-target").querySelector('option[value="formatted-title"]').textContent, plainTitle + " — 10.1234/format");
+  assert.equal(taskRow("formatted-title").querySelector("i,b,em,strong,sub,sup,[onclick]"), null, "formatting is converted to text without parsing markup or attributes");
+  assert.equal(model.tasks[0].title, formattedTitle, "display normalization never mutates source metadata");
   model.tasks = [{ id: "t1", title: "<img src=x onerror=bad> paper", doi: "10.1234/test", state: "waiting", requestURL: "https://www.ablesci.com/assist/detail?id=EXAMPLE", requestedPoints: 25 }];
   renderListener();
   assert.equal(get("fta-pref-task-list").querySelector("img"), null);
@@ -350,7 +474,7 @@ async function publisherControls(taskId = "publisher-task", overrides = {}) {
   ];
   renderListener();
   assert.equal(get("fta-pref-task-count").textContent, "4");
-  assert.equal(get("fta-pref-task-summary").textContent, "显示 3/4 项 · 1 项进行中");
+  assert.equal(get("fta-pref-task-summary").textContent, "显示 3/4 项 · 正在获取 1 项");
   assert.equal(taskRow("batch-1"), null, "completed tasks are absent from the default work list");
   for (const label of ["未找到全文", "需网页登录", "正在获取"]) assert.ok(get("fta-pref-task-list").textContent.includes(label), label);
   assert.equal([...get("fta-pref-task-list").querySelectorAll("button")].filter(b => b.textContent.startsWith("科研通求助")).length, 2);
@@ -409,6 +533,9 @@ async function publisherControls(taskId = "publisher-task", overrides = {}) {
   assert.equal(taskCheckbox("select-7"), null, "uncertain submissions cannot be selected");
   changeChecked(get("fta-pref-select-tasks"), true);
   assert.match(get("fta-pref-selection-summary").textContent, /已选 4 篇 · 本次悬赏合计 100 积分/, "explicit action uses the saved current default, not old task budgets");
+  pageTab("settings").click(); pageTab("messages").click(); pageTab("tasks").click();
+  assert.match(get("fta-pref-selection-summary").textContent, /已选 4 篇/);
+  assert.equal(filterButton("fallback").getAttribute("aria-pressed"), "true", "page tabs preserve the task filter and explicit selections");
   assert.match(get("fta-pref-bulk-assist").textContent, /每篇 25 积分/);
   changeChecked(taskCheckbox("select-3"), false);
   assert.equal(get("fta-pref-select-tasks").indeterminate, true);
@@ -526,6 +653,8 @@ async function publisherControls(taskId = "publisher-task", overrides = {}) {
   assert.equal(get("fta-pref-binding-target").value, "", "candidate selection starts empty even if there is a likely match");
   assert.equal(get("fta-pref-binding-target").querySelectorAll("option").length, 3, "invalid and duplicate item IDs are removed");
   assert.equal(get("fta-pref-binding-target").querySelector("strong"), null, "candidate titles are inserted as text");
+  assert.equal(get("fta-pref-binding-target").querySelector('option[value="501"]').textContent, "对应文献 — 10.1234/bind — 我的文库", "binding candidates remove inline formatting too");
+  assert.equal(bindingCandidates[0].title, "<strong>对应文献</strong>");
   assert.equal(rowButton("确认关联").disabled, true);
   rowButton("确认关联").click(); await flush();
   assert.equal(calls.filter(call => call[0] === "bind").length, beforeBindCount);
@@ -700,7 +829,7 @@ async function publisherControls(taskId = "publisher-task", overrides = {}) {
   rowButton("选择已下载的PDF").click(); await flush();
   assert.equal(model.tasks[0].state, "manual_review");
   assert.match(taskRow("manual-login").textContent, /待核对文件：<img src=x onerror=bad>.pdf/);
-  assert.equal(taskRow("manual-login").textContent.includes("待关联文献：<b>PDF title</b>"), true);
+  assert.equal(taskRow("manual-login").textContent.includes("待关联文献：PDF title"), true);
   assert.match(taskRow("manual-login").textContent, /身份仍不确定/);
   assert.equal(taskRow("manual-login").querySelector("img"), null);
   assert.equal(taskRow("manual-login").querySelector("b"), null);
@@ -760,6 +889,63 @@ async function publisherControls(taskId = "publisher-task", overrides = {}) {
   assert.equal(get("fta-pref-messages-state").hidden, false);
   assert.equal(get("fta-pref-messages-state").dataset.error, "true");
   assert.match(get("fta-pref-messages-state").textContent, /暂时无法读取消息/);
+  const assistTaskBase = { state: "imported", source: "ablesci", itemID: 800, attachmentID: 801, requestID: "ReceiptFixture", requestURL: "https://www.ablesci.com/assist/detail?id=ReceiptFixture", doi: "10.1234/receipt", requestedPoints: 10 };
+  model.tasks = [
+    { ...assistTaskBase, id: "receipt-pending", title: "全文已入库，待采纳", lastError: "旧下载错误不应再显示", assistReceipt: { adoption: "pending", messages: "pending", needsReconcile: false, lastError: "采纳暂时失败 <img src=x onerror=bad>", nextCheckAt: "2026-11-05T14:00:00Z" } },
+    { ...assistTaskBase, id: "receipt-read", title: "等待对应消息已读", assistReceipt: { adoption: "accepted", messages: "pending", needsReconcile: false, lastError: "" } },
+    { ...assistTaskBase, id: "receipt-unknown", title: "提交结果待核实", assistReceipt: { adoption: "pending", messages: "pending", needsReconcile: true, lastError: "请先核实网站状态" } },
+    { ...assistTaskBase, id: "receipt-done", title: "已完成收尾", assistReceipt: { adoption: "accepted", messages: "done", needsReconcile: false, lastError: "" } },
+    { ...assistTaskBase, id: "receipt-legacy", title: "旧版已获取历史", assistReceipt: null }
+  ];
+  filterButton("unfinished").click(); renderListener();
+  assert.equal(get("fta-pref-task-list").children.length, 3, "downloaded files with pending completion stay in unfinished");
+  assert.equal(badgeText("receipt-pending"), "已获取 · 待采纳");
+  assert.equal(badgeText("receipt-read"), "已采纳 · 待已读");
+  assert.equal(badgeText("receipt-unknown"), "已获取 · 采纳待核实");
+  assert.equal(taskRow("receipt-pending").querySelector(".fta-status-badge").dataset.tone, "warning");
+  assert.match(taskRow("receipt-pending").textContent, /采纳暂时失败 <img src=x onerror=bad>/);
+  assert.doesNotMatch(taskRow("receipt-pending").textContent, /旧下载错误/);
+  assert.equal(taskRow("receipt-pending").querySelector("img"), null);
+  assert.deepEqual(labels("receipt-pending"), ["打开全文", "查看已有求助", "重试采纳与已读"]);
+  assert.deepEqual(labels("receipt-unknown"), ["打开全文", "查看已有求助", "核实采纳状态"]);
+  assert.equal(get("fta-pref-bulk-actions").hidden, true, "completion retries cannot create a new paid request");
+  const receiptButton = (id, label) => [...taskRow(id).querySelectorAll("button")].find(button => button.textContent === label);
+  receiptButton("receipt-pending", "打开全文").click(); await flush();
+  assert.deepEqual(calls.at(-1), ["openTask", "receipt-pending"]);
+  receiptButton("receipt-pending", "查看已有求助").click(); await flush();
+  assert.deepEqual(calls.at(-1), ["open", "receipt-pending"]);
+  receiptButton("receipt-pending", "重试采纳与已读").click(); await flush();
+  assert.deepEqual(calls.at(-1), ["assistCompletion", "receipt-pending"]);
+  receiptButton("receipt-unknown", "核实采纳状态").click(); await flush();
+  assert.deepEqual(calls.at(-1), ["assistCompletion", "receipt-unknown"]);
+  filterButton("success").click();
+  assert.equal(get("fta-pref-task-list").children.length, 5, "all acquired PDFs remain accessible in completed history");
+  assert.equal(badgeText("receipt-pending"), "已获取 · 待采纳");
+  assert.equal(badgeText("receipt-done"), "已采纳 · 对应消息已读");
+  assert.equal(badgeText("receipt-legacy"), "已获取", "legacy history never claims adoption without a receipt");
+  assert.equal(labels("receipt-done").includes("重试采纳与已读"), false);
+  assert.equal(labels("receipt-legacy").includes("重试采纳与已读"), false);
+  const legacyVerify = receiptButton("receipt-legacy", "核验并补采纳");
+  assert.ok(legacyVerify, "legacy acquired assistance history offers explicit provenance verification");
+  assert.equal(legacyVerify.disabled, false);
+  const beforeLegacyVerify = calls.length;
+  legacyVerify.click(); await flush();
+  assert.deepEqual(calls.slice(beforeLegacyVerify), [["verifyAssistCompletion", "receipt-legacy"]], "legacy verification does not invoke download or a new assistance request");
+  assert.match(get("fta-pref-status").textContent, /原文件核验结果已更新/);
+  model.tasks[0].assistReceipt = { adoption: "accepted", messages: "done", needsReconcile: false, lastError: "" };
+  filterButton("unfinished").click(); renderListener();
+  assert.equal(taskRow("receipt-pending"), null, "finished receipt leaves unfinished while the PDF remains in history");
+  model.tasks = [{ ...assistTaskBase, id: "assist-review", state: "manual_review", attachmentID: null, title: "<i>待核对文献</i>", pendingFilename: "应助文件.pdf", pendingTitle: "<i>待核对文献</i>", pendingSummary: "身份尚不明确", assistReview: { fileID: "FileFixture", createdAt: "2026-11-05T13:00:00Z" }, assistReceipt: null }];
+  renderListener();
+  assert.ok(labels("assist-review").includes("确认对应论文并入库、采纳"));
+  assert.equal(labels("assist-review").includes("我已核对，是这篇论文"), false);
+  assert.match(taskRow("assist-review").textContent, /结算该求助的原悬赏（10 积分）/);
+  assert.match(taskRow("assist-review").textContent, /只将对应上传消息标记已读/);
+  const beforeReviewConfirm = calls.filter(call => call[0] === "confirmPDF").length;
+  rowButton("预览待核对 PDF").click(); await flush();
+  assert.equal(calls.filter(call => call[0] === "confirmPDF").length, beforeReviewConfirm, "previewing an assistance file does not adopt it");
+  rowButton("确认对应论文并入库、采纳").click(); await flush();
+  assert.deepEqual(calls.at(-1), ["confirmPDF", "assist-review"]);
   model.tasks = [
     { id: "bind-1", title: "明确选择的文献", doi: "10.1234/bind", itemID: 10, state: "not_found" },
     { id: "bind-2", title: "批量最后一篇", doi: "10.1234/other", itemID: 11, state: "not_found" },
@@ -775,6 +961,7 @@ async function publisherControls(taskId = "publisher-task", overrides = {}) {
   assert.deepEqual(calls.at(-1), ["add", "https://www.ablesci.com/assist/detail?id=EXAMPLE", null]);
   assert.match(get("fta-pref-status").textContent, /未关联文献/);
   chooseTarget("bind-1");
+  pageTab("account").click(); pageTab("tasks").click();
   renderListener();
   assert.equal(targetSelect.value, "bind-1", "explicit target survives an unrelated snapshot refresh");
   input("fta-pref-request-url", "https://www.ablesci.com/assist/detail?id=EXPLICIT"); submit("fta-pref-add-form"); await flush();
@@ -788,11 +975,26 @@ async function publisherControls(taskId = "publisher-task", overrides = {}) {
   get("fta-pref-logout").click(); await flush();
   assert.equal(get("fta-pref-account-state").textContent, "未登录");
   assert.equal(get("fta-pref-account-identity").hidden, true);
-  for (const method of ["check", "open", "openTask", "assist", "download", "pause", "retry", "message", "messages", "add", "web", "logout", "bindingCandidates", "bind", "systemBrowser", "localPDF", "previewPDF", "confirmPDF", "dismissPDF"]) assert.ok(calls.some(c => c[0] === method), method);
+  for (const method of ["check", "open", "openTask", "assist", "download", "pause", "retry", "assistCompletion", "message", "messages", "add", "web", "logout", "bindingCandidates", "bind", "systemBrowser", "localPDF", "previewPDF", "confirmPDF", "dismissPDF"]) assert.ok(calls.some(c => c[0] === method), method);
   const ids = [...root.querySelectorAll("[id]")].map(node => node.id);
   assert.equal(ids.length, new Set(ids).size);
+  model.tasks = Array.from({ length: 8 }, (_, index) => ({ id: "all-done-" + index, state: "imported", attachmentID: 1000 + index, title: "已获取文献 " + index }));
+  filterButton("unfinished").click(); renderListener();
+  assert.equal(get("fta-pref-task-empty").hidden, false);
+  assert.match(get("fta-pref-task-empty").textContent, /当前没有未完成任务/);
+  assert.equal(get("fta-pref-task-list").hidden, true);
+  assert.equal(get("fta-pref-bulk-actions").hidden, true);
+  assert.equal(get("fta-pref-bulk-note").hidden, true);
+  filterButton("success").click();
+  assert.equal(get("fta-pref-task-list").hidden, false);
+  assert.equal(get("fta-pref-task-list").children.length, 8);
+  assert.equal(get("fta-pref-bulk-actions").hidden, true);
+  assert.equal(get("fta-pref-bulk-note").hidden, true, "completed history keeps the paid-selection toolbar collapsed");
+  pageTab("messages").click();
   context.FulltextPreferences.destroy();
   assert.equal(subscriptions, 0);
+  pageTab("settings").click();
+  assert.equal(root.dataset.activePage, "messages", "destroy removes page navigation handlers");
   const publisher = await publisherControls();
   assert.equal(publisher.get("publisher-external"), null);
   assert.equal(publisher.get("publisher-system").textContent, "浏览器下载并自动入库");
@@ -829,5 +1031,5 @@ async function publisherControls(taskId = "publisher-task", overrides = {}) {
   const unsupported = await publisherControls("publisher-task", { openSystemBrowserTask: undefined });
   assert.equal(unsupported.get("publisher-system").disabled, true);
   unsupported.close();
-  console.log("Preferences tests passed: embedded mount, credentials, live action budgets, download folders, manual browser monitoring and explicit PDF review, continuous AbleSci fallback, completion history, batch selection, explicit binding, safe text, cleanup.");
+  console.log("Preferences tests passed: horizontal accessible tabs, keyboard navigation, preserved drafts, batch summaries, comfortable empty/history states, credentials, live budgets, download folders, PDF review, AbleSci fallback, binding, safe text, cleanup.");
 })().catch(error => { console.error(error); process.exitCode = 1; });

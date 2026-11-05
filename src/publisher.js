@@ -33,6 +33,35 @@
     const tail = String.fromCharCode(...bytes.subarray(Math.max(0, bytes.length - 8192)));
     return tail.includes("%%EOF");
   }
+  // Check every local attachment. Linked files count; web links and missing or
+  // incomplete files do not. Only read the envelope, even for very large PDFs.
+  async function findExistingPDF(item, { Zotero, IOUtils }) {
+    for (const id of item?.getAttachments?.() || []) {
+      try {
+        const attachment = await Zotero.Items.getAsync(id);
+        if (!attachment || attachment.deleted ||
+            (attachment.parentID && attachment.parentID !== item.id) ||
+            (attachment.libraryID && attachment.libraryID !== item.libraryID)) continue;
+        if (attachment.isFileAttachment?.() === false ||
+            attachment.attachmentLinkMode === (Zotero.Attachments?.LINK_MODE_LINKED_URL ?? 3)) continue;
+        if (attachment.attachmentContentType !== "application/pdf" &&
+            !/\.pdf$/i.test(attachment.attachmentFilename || "")) continue;
+        const file = await attachment.getFilePathAsync?.();
+        if (!file || /^https?:\/\//i.test(file)) continue;
+        const info = await IOUtils.stat(file);
+        if (info.type !== "regular" || !Number.isSafeInteger(info.size) || info.size < 32) continue;
+        const head = asBytes(await IOUtils.read(file, { maxBytes: 32 }));
+        if (!/^%PDF-\d\.\d(?:\s|$)/.test(String.fromCharCode(...head).replace(/^\xEF\xBB\xBF/, "").trimStart())) continue;
+        const tail = asBytes(await IOUtils.read(file, { offset: Math.max(0, info.size - 8192), maxBytes: 8192 }));
+        if (!String.fromCharCode(...tail).includes("%%EOF")) continue;
+        const after = await IOUtils.stat(file);
+        if (after.type !== "regular" || after.size !== info.size || after.lastModified !== info.lastModified) continue;
+        return attachment.id;
+      }
+      catch (_) { /* Missing/unreadable attachments must not hide a later PDF. */ }
+    }
+    return null;
+  }
   function discover(doc, pageURL, expectedDOI) {
     const documentDOI = doi(doc.querySelector('meta[name="citation_doi"],meta[name="dc.identifier"],meta[name="DC.Identifier"]')?.getAttribute("content"));
     if (expectedDOI && documentDOI && expectedDOI !== documentDOI) return { candidates: [], needsLogin: false, mismatch: true };
@@ -112,15 +141,7 @@
       try { return new Decoder(charset).decode(bytes); }
       catch (_) { return new Decoder("utf-8").decode(bytes); }
     };
-    async function existingPDF(item) {
-      for (const id of item.getAttachments?.() || []) {
-        const attachment = await Zotero.Items.getAsync(id);
-        if (!attachment || attachment.deleted || (attachment.attachmentContentType !== "application/pdf" && !/\.pdf$/i.test(attachment.attachmentFilename || ""))) continue;
-        const file = await attachment.getFilePathAsync?.();
-        if (file && await IOUtils.exists(file)) return attachment.id;
-      }
-      return null;
-    }
+    const existingPDF = item => findExistingPDF(item, { Zotero, IOUtils });
     async function run(item, { onProgress = () => {}, isCancelled = () => false } = {}) {
       if (!item?.id || !item.isRegularItem?.()) throw new Error("请选择已保存的普通文献条目。");
       const check = () => { if (isCancelled()) throw abort(); };
@@ -388,5 +409,5 @@
       },
     };
   }
-  global.FulltextPublisher = { create, discover, validPDF };
+  global.FulltextPublisher = { create, discover, validPDF, findExistingPDF };
 })(globalThis);

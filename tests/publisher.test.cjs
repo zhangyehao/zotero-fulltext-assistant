@@ -12,7 +12,7 @@ function setup({url='https://publisher.test/article/one',doi='',pages={},rendere
   const files=new Map(),attachments=[],requests=[],imports=[],progress=[],hidden=[];
   let nextID=100,tempID=0,renderedOnce=false,active=0,maxActive=0;
   const item={id:1,libraryID:1,isRegularItem:()=>true,getField(name){return {url,DOI:doi}[name]||'';},getAttachments(){return attachments.map(value=>value.id);}};
-  const IOUtils={async exists(file){return files.has(file);},async write(file,bytes){files.set(file,bytes);},async remove(file){files.delete(file);}};
+  const IOUtils={async exists(file){return files.has(file);},async stat(file){if(!files.has(file))throw new Error('Missing fixture file');return {type:'regular',size:files.get(file).length,lastModified:1};},async read(file,{offset=0,maxBytes}={}){if(!files.has(file))throw new Error('Missing fixture file');return files.get(file).slice(offset,maxBytes===undefined?undefined:offset+maxBytes);},async write(file,bytes){files.set(file,bytes);},async remove(file){files.delete(file);}};
   const Zotero={Promise:{delay(ms){return new Promise(resolve=>setTimeout(resolve,Math.min(ms,5)));}},Items:{async getAsync(id){return attachments.find(value=>value.id===id);}},HTTP:{async request(method,address,options){
     requests.push({method,url:address,options});active++;maxActive=Math.max(maxActive,active);
     try {
@@ -80,6 +80,39 @@ test('a PDF attached while the download is in flight is not imported twice',asyn
   const write=env.IOUtils.write;
   env.IOUtils.write=async(file,bytes)=>{await write(file,bytes);env.files.set('/storage/external.pdf',pdf());env.attachments.push({id:999,attachmentContentType:'application/pdf',async getFilePathAsync(){return '/storage/external.pdf';}});};
   const result=await env.publisher.acquire(env.item);assert.equal(result.attachmentID,999);assert.equal(result.source,'existing');assert.equal(env.imports.length,0);
+});
+
+test('the shared local PDF check includes linked files and scans past missing or malformed candidates',async()=>{
+  const env=setup();
+  env.attachments.push(
+    {id:1,attachmentContentType:'application/pdf',async getFilePathAsync(){return '/missing.pdf';}},
+    {id:2,attachmentContentType:'application/pdf',async getFilePathAsync(){return '/html.pdf';}},
+    {id:3,attachmentContentType:'application/pdf',attachmentLinkMode:3,async getFilePathAsync(){throw new Error('linked URL must not be accessed');}},
+    {id:4,attachmentContentType:'application/pdf',deleted:true,async getFilePathAsync(){return '/good.pdf';}},
+    {id:5,attachmentContentType:'application/pdf',attachmentLinkMode:2,isFileAttachment:()=>true,async getFilePathAsync(){return '/good.pdf';}}
+  );
+  env.files.set('/html.pdf',new TextEncoder().encode(html('0'.repeat(1500))));env.files.set('/good.pdf',pdf());
+  assert.equal(await env.api.findExistingPDF(env.item,env),5);
+  const result=await env.publisher.acquire(env.item);assert.equal(result.attachmentID,5);assert.equal(env.requests.length,0);
+});
+
+test('existing local PDFs use bounded reads without the download size cap',async()=>{
+  const env=setup(),size=120*1024*1024,reads=[];
+  env.attachments.push({id:8,attachmentFilename:'large.PDF',async getFilePathAsync(){return '/large.pdf';}});
+  env.IOUtils.stat=async()=>({type:'regular',size,lastModified:1});
+  env.IOUtils.read=async(file,options)=>{reads.push(options);return new TextEncoder().encode(options.offset?'\n%%EOF\n':'%PDF-1.7\n');};
+  assert.equal(await env.api.findExistingPDF(env.item,env),8);
+  assert.deepEqual(reads.map(o=>({offset:o.offset||0,maxBytes:o.maxBytes})),[{offset:0,maxBytes:32},{offset:size-8192,maxBytes:8192}]);
+});
+
+test('local PDF detection rejects directories, wrong parents, absent EOF and files changing during inspection',async()=>{
+  for(const mode of ['directory','wrong-parent','truncated','changed']){
+    const env=setup();env.attachments.push({id:8,parentID:mode==='wrong-parent'?9:1,attachmentContentType:'application/pdf',async getFilePathAsync(){return '/existing.pdf';}});
+    env.files.set('/existing.pdf',mode==='truncated'?pdf().slice(0,-10):pdf());
+    let stats=0;const stat=env.IOUtils.stat;
+    env.IOUtils.stat=async file=>({...await stat(file),type:mode==='directory'?'directory':'regular',lastModified:mode==='changed'?++stats:1});
+    assert.equal(await env.api.findExistingPDF(env.item,env),null,mode);
+  }
 });
 
 test('cancellation aborts a pending HTTP request and never imports its eventual response',async()=>{

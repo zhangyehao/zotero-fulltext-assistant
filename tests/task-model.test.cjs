@@ -9,6 +9,128 @@ const input = { libraryID: 1, itemKey: "ABCD1234", itemID: 42, doi: "10.1038/NN.
 function task(overrides = {}, id = "task-1") {
   return model.createTask({ ...input, ...overrides }, { now: () => T0, id: () => id });
 }
+const T2 = "2026-11-04T03:04:00.000Z";
+function receipt(overrides = {}) {
+  return { requestID: "AbC123", fileID: "File987", accountID: "Account42", attachmentID: 81,
+    sha256: "ab".repeat(32), doi: "10.1038/nn.4346", title: "Example paper", verifiedBy: "doi", verifiedAt: T0,
+    adoption: "pending", messages: "pending", needsReconcile: false, attempts: 0, nextCheckAt: null, lastError: "", acceptedAt: null, readAt: null, ...overrides };
+}
+function receivedTask(overrides = {}) {
+  return task({ requestURL, state: "imported", source: "ablesci", attachmentID: 81, assistReceipt: receipt(), ...overrides });
+}
+
+test("verified assistance receipts persist without inventing evidence for legacy imported history", () => {
+  const current=receivedTask();assert.deepEqual(current.assistReceipt,receipt());
+  const restored=model.deserializeQueue(model.serializeQueue([current])).tasks[0];assert.deepEqual(restored,current);
+  assert.notEqual(restored.assistReceipt,current.assistReceipt);
+  const legacy={...current};delete legacy.assistReceipt;
+  assert.equal(model.sanitizeTask(legacy).assistReceipt,null);
+  assert.equal(model.deserializeQueue(model.serializeQueue([legacy])).tasks[0].assistReceipt,null);
+  assert.equal(task().assistReceipt,null);
+});
+
+test("a fresh receipt can be committed atomically with its imported attachment", () => {
+  const pending=task({requestURL,state:"downloading"});
+  const imported=model.updateTask(pending,{state:"imported",source:"ablesci",attachmentID:81,assistReceipt:receipt()},{now:T1});
+  assert.deepEqual(imported.assistReceipt,receipt());assert.equal(pending.assistReceipt,null);
+});
+
+test("receipt adoption and message progress can resume independently without changing completed history", () => {
+  const imported=receivedTask();
+  const failed=model.updateTask(imported,{assistReceipt:{...imported.assistReceipt,attempts:1,nextCheckAt:T2,lastError:"network unavailable"}},{now:T1});
+  const saved=model.deserializeQueue(model.serializeQueue([failed])).tasks[0];
+  assert.equal(saved.state,"imported");assert.equal(saved.attachmentID,81);assert.equal(saved.completedAt,T0);assert.equal(saved.assistReceipt.adoption,"pending");assert.equal(saved.assistReceipt.attempts,1);
+  const accepted=model.updateTask(saved,{assistReceipt:{...saved.assistReceipt,adoption:"accepted",acceptedAt:T1,nextCheckAt:T2}},{now:T1});
+  assert.equal(accepted.assistReceipt.messages,"pending");assert.equal(accepted.assistReceipt.acceptedAt,T1);
+  const done=model.updateTask(accepted,{assistReceipt:{...accepted.assistReceipt,messages:"done",readAt:T2,lastError:"",nextCheckAt:null}},{now:T2});
+  assert.equal(done.assistReceipt.adoption,"accepted");assert.equal(done.assistReceipt.messages,"done");assert.equal(done.assistReceipt.readAt,T2);assert.equal(done.completedAt,T0);
+});
+
+test("invalid receipt identities and digests discard only receipt evidence", () => {
+  const malformed=[null,[],"invalid",{},receipt({requestID:"Other"}),receipt({attachmentID:82}),receipt({attachmentID:0}),receipt({attachmentID:1.5}),receipt({doi:"10.1234/other"}),receipt({doi:"not a doi"}),receipt({sha256:"a".repeat(63)}),receipt({sha256:"g".repeat(64)})];
+  for(const name of ["requestID","fileID","accountID"])for(const value of [""," ","a_b","x/1","a".repeat(129),42])malformed.push(receipt({[name]:value}));
+  for(const value of malformed){const normalized=receivedTask({assistReceipt:value});assert.equal(normalized.assistReceipt,null);assert.equal(normalized.id,"task-1");assert.equal(normalized.state,"imported");assert.equal(normalized.attachmentID,81);assert.equal(model.deserializeQueue(model.serializeQueue([normalized])).tasks.length,1);}
+});
+
+test("receipts require the exact imported AbleSci task and cannot migrate to other identity or attachments", () => {
+  for(const patch of [{state:"available"},{source:"existing"},{requestURL:"https://www.ablesci.com/assist/detail?id=Other"},{attachmentID:null}])assert.equal(receivedTask(patch).assistReceipt,null);
+  const current=receivedTask();
+  for(const patch of [{libraryID:2},{itemID:43},{itemKey:"DIFF5678"},{doi:"10.1234/other"},{title:"Changed paper"},{attachmentID:82},{requestURL:"https://www.ablesci.com/assist/detail?id=Other"}]){
+    assert.equal(model.updateTask(current,patch,{now:T1}).assistReceipt,null);
+    assert.equal(model.updateTask(current,{...patch,assistReceipt:current.assistReceipt},{now:T1}).assistReceipt,null);
+  }
+  assert.deepEqual(model.updateTask(current,{lastError:"",requestedPoints:30},{now:T1}).assistReceipt,current.assistReceipt);
+  assert.deepEqual(model.updateTask(current,{doi:"https://doi.org/10.1038/NN.4346"},{now:T1}).assistReceipt,current.assistReceipt);
+});
+
+test("receipt proof methods, action states and retry counts are restricted", () => {
+  for(const verifiedBy of ["doi","title","manual"])assert.equal(receivedTask({assistReceipt:receipt({verifiedBy})}).assistReceipt.verifiedBy,verifiedBy);
+  for(const patch of [{verifiedBy:"automatic"},{adoption:"sending"},{adoption:""},{messages:"read"},{attempts:-1},{attempts:1.5},{attempts:NaN},{attempts:"1"},{attempts:null},{verifiedBy:"title",title:""}])assert.equal(receivedTask({assistReceipt:receipt(patch)}).assistReceipt,null);
+  assert.equal(receivedTask({doi:"",assistReceipt:receipt({doi:"",verifiedBy:"doi"})}).assistReceipt,null);
+  assert.equal(receivedTask({doi:"",assistReceipt:receipt({doi:"",verifiedBy:"title"})}).assistReceipt.verifiedBy,"title");
+  assert.equal(receivedTask({assistReceipt:receipt({attempts:undefined})}).assistReceipt.attempts,0);
+});
+
+test("receipt dates must describe verification before adoption and adoption before completed message handling", () => {
+  const prior="2026-11-04T02:59:00.000Z";
+  const invalid=[{verifiedAt:null},{verifiedAt:"yesterday"},{nextCheckAt:prior},{acceptedAt:T1},{readAt:T1},{adoption:"accepted"},{adoption:"accepted",acceptedAt:prior},{messages:"done"},{adoption:"accepted",acceptedAt:T1,messages:"done"},{adoption:"accepted",acceptedAt:T1,messages:"done",readAt:T0},{adoption:"accepted",acceptedAt:T1,messages:"pending",readAt:T2}];
+  for(const patch of invalid)assert.equal(receivedTask({assistReceipt:receipt(patch)}).assistReceipt,null,JSON.stringify(patch));
+  const same=receivedTask({assistReceipt:receipt({adoption:"accepted",acceptedAt:T0,messages:"done",readAt:T0})});assert(same.assistReceipt);
+});
+
+test("receipt normalization uses a strict allowlist and redacts persisted error credentials", () => {
+  const raw=receipt({sha256:"AB".repeat(32),doi:"https://doi.org/10.1038/NN.4346",title:"x".repeat(2200),lastError:"Authorization: Bearer private-receipt-secret",cookie:"private-cookie",downloadURL:"https://server.test/?token=private-token"});
+  const current=receivedTask({assistReceipt:raw}),saved=model.serializeQueue([current]);
+  assert.equal(current.assistReceipt.sha256,"ab".repeat(32));assert.equal(current.assistReceipt.doi,"10.1038/nn.4346");assert.equal(current.assistReceipt.title.length,2000);assert.equal(saved.includes("private-"),false);
+  assert.equal(Object.hasOwn(current.assistReceipt,"downloadURL"),false);assert.equal(Object.hasOwn(current.assistReceipt,"cookie"),false);raw.fileID="Changed";assert.equal(current.assistReceipt.fileID,"File987");
+});
+
+test("a persisted uncertain adoption requires reconciliation until acceptance is verified", () => {
+  const pending=receivedTask({assistReceipt:receipt({needsReconcile:true})});
+  assert.equal(model.deserializeQueue(model.serializeQueue([pending])).tasks[0].assistReceipt.needsReconcile,true);
+  const accepted=model.updateTask(pending,{assistReceipt:{...pending.assistReceipt,adoption:"accepted",acceptedAt:T1}},{now:T1});
+  assert.equal(accepted.assistReceipt.needsReconcile,false);
+  assert.equal(receivedTask({assistReceipt:receipt({needsReconcile:undefined})}).assistReceipt.needsReconcile,false);
+  assert.equal(receivedTask({assistReceipt:receipt({needsReconcile:"true"})}).assistReceipt,null);
+});
+
+function review(overrides={}) {
+  return {requestID:"AbC123",fileID:"File987",accountID:"Account42",sha256:"ab".repeat(32),doi:"10.1038/nn.4346",title:"Example paper",createdAt:T0,...overrides};
+}
+function reviewedTask(overrides={}) {
+  return task({requestURL,state:"manual_review",assistReview:review(),...overrides});
+}
+
+test("unknown assistance PDF review evidence persists without a path or an imported receipt", () => {
+  const current=reviewedTask({assistReview:review({path:"C:\\private\\review.pdf",downloadURL:"https://private.test/?token=secret",sha256:"AB".repeat(32)})});
+  const restored=model.deserializeQueue(model.serializeQueue([current])).tasks[0];
+  assert.deepEqual(restored.assistReview,review());assert.equal(restored.assistReceipt,null);assert.equal(restored.attachmentID,null);assert.equal(restored.state,"manual_review");
+  assert.equal(Object.hasOwn(restored.assistReview,"path"),false);assert.equal(Object.hasOwn(restored.assistReview,"downloadURL"),false);
+  assert.equal(reviewedTask({source:"browser_download"}).assistReview.fileID,"File987","review evidence does not require an import source");
+  const legacy={...current};delete legacy.assistReview;assert.equal(model.sanitizeTask(legacy).assistReview,null);assert.equal(task().assistReview,null);
+});
+
+test("malformed or mismatched review evidence is stripped without discarding history", () => {
+  const invalid=[null,[],{},"bad",review({requestID:"Other"}),review({fileID:"bad-id"}),review({accountID:"a".repeat(129)}),review({sha256:"a"}),review({doi:"10.1234/other"}),review({doi:"broken"}),review({createdAt:null}),review({createdAt:"2026-11-04"})];
+  for(const assistReview of invalid){const current=reviewedTask({assistReview});assert.equal(current.assistReview,null);assert.equal(current.id,"task-1");assert.equal(current.state,"manual_review");assert.equal(model.deserializeQueue(model.serializeQueue([current])).tasks.length,1);}
+  for(const patch of [{state:"paused"},{state:"imported"},{attachmentID:81},{attachmentID:0},{requestURL:"https://www.ablesci.com/assist/detail?id=Other"}])assert.equal(reviewedTask(patch).assistReview,null);
+});
+
+test("changing a reviewed task identity discards both evidence objects even if a patch reuses them", () => {
+  const current=reviewedTask();
+  for(const patch of [{libraryID:2},{itemID:43},{itemKey:"DIFF5678"},{doi:"10.1234/other"},{title:"Changed paper"},{requestURL:"https://www.ablesci.com/assist/detail?id=Other"}]){
+    const updated=model.updateTask(current,{...patch,assistReview:current.assistReview},{now:T1});assert.equal(updated.assistReview,null);assert.equal(updated.assistReceipt,null);
+  }
+  assert.deepEqual(model.updateTask(current,{lastError:"Please inspect the PDF"},{now:T1}).assistReview,current.assistReview);
+});
+
+test("manual confirmation atomically replaces the explicit review with a verified receipt", () => {
+  const current=reviewedTask(),patch={state:"imported",source:"ablesci",attachmentID:81,assistReceipt:receipt({verifiedBy:"manual",verifiedAt:T1}),assistReview:null};
+  const accepted=model.updateTask(current,patch,{now:T1});
+  assert.equal(accepted.assistReview,null);assert.deepEqual(accepted.assistReceipt,patch.assistReceipt);assert.equal(current.assistReceipt,null);assert(current.assistReview);
+  const implicit={...patch};delete implicit.assistReview;assert.equal(model.updateTask(current,implicit,{now:T1}).assistReceipt,null);
+  const moved=model.updateTask(current,{...patch,itemID:43},{now:T1});assert.equal(moved.assistReceipt,null);assert.equal(moved.assistReview,null);
+});
 
 test("completion date and known download route persist without changing on later updates", () => {
   const pending=task({state:"waiting"}),done=model.updateTask(pending,{state:"imported",downloadRoute:"highspeed"},{now:()=>T1});

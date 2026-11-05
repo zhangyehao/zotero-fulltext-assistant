@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const { webcrypto } = require('node:crypto');
+const { webcrypto, createHash } = require('node:crypto');
 const MODEL = require('../src/task-model.js');
 const appSource = fs.readFileSync(path.join(__dirname,'../src/app.js'),'utf8');
 const publisherSource = fs.readFileSync(path.join(__dirname,'../src/publisher.js'),'utf8');
@@ -40,15 +40,15 @@ function environment({acquire,initialTasks,initialIntents,realPublisher=false,wr
   vm.runInNewContext(downloadFoldersSource,scope);
   const createWatch=scope.FulltextDownloadWatch.create;
   scope.FulltextDownloadWatch.create=options=>createWatch({...options,now:watchNow||(()=>clock)});
-  if(!realPublisher)scope.FulltextPublisher={validPDF:scope.FulltextPublisher.validPDF,create(){return {async acquire(value,options){publisherCalls.push({item:value,options});active++;peak=Math.max(peak,active);try{return await(acquire?acquire(value,options):{attachmentID:800+value.id,source:'publisher'});}finally{active--;}}};}};
+  if(!realPublisher)scope.FulltextPublisher={validPDF:scope.FulltextPublisher.validPDF,findExistingPDF:scope.FulltextPublisher.findExistingPDF,create(){return {async acquire(value,options){publisherCalls.push({item:value,options});active++;peak=Math.max(peak,active);try{return await(acquire?acquire(value,options):{attachmentID:800+value.id,source:'publisher'});}finally{active--;}}};}};
   vm.runInNewContext(appSource,scope);
   Zotero.Search=class{addCondition(field,operator,value){this.doi=value;}async search(){return [...items.values()].filter(value=>value.getField&&value.getField('DOI').toLowerCase()===this.doi).map(value=>value.id);}};
   IOUtils.stat=async file=>{if(directories.has(file))return {type:'directory',size:0};if(!files.has(file))throw new Error('Fixture file missing');return {type:'regular',size:files.get(file)?.length||0,lastModified:1,...fileMetadata.get(file)};};
-  IOUtils.read=async file=>files.get(file);
+  IOUtils.read=async (file,{offset=0,maxBytes}={})=>{if(!files.has(file))throw new Error('Fixture file missing');return files.get(file).slice(offset,maxBytes===undefined?undefined:offset+maxBytes);};
   IOUtils.getChildren=async directory=>{if(!directories.has(directory))throw new Error('Fixture directory missing');return [...files.keys()].filter(file=>path.win32.dirname(file)===directory);};
   Zotero.launchURL=async url=>openedURLs.push(url);Zotero.launchFile=async file=>openedFiles.push(file);
   const identity=pdfIdentity||{async inspect(file,paper,options){identityCalls.push({file,paper,bytes:options?.bytes});return {status:'match',matchedBy:'doi',message:'Fixture DOI match'};}};
-  const app=scope.FulltextApp.create({Zotero,Services,IOUtils,PathUtils:path.win32,rootURI:'file:///fixture/',pluginID:'fixture@local.invalid',version:'0.5.0',pickPDF,pickDirectory,pdfIdentity:identity,discoverDownloadDirectories:discoverDirectories||(async()=>[downloadDirectory]),edgeAcquire,edgeHost});
+  const app=scope.FulltextApp.create({Zotero,Services,IOUtils,PathUtils:path.win32,rootURI:'file:///fixture/',pluginID:'fixture@local.invalid',version:'0.6.0',pickPDF,pickDirectory,pdfIdentity:identity,discoverDownloadDirectories:discoverDirectories||(async()=>[downloadDirectory]),edgeAcquire,edgeHost});
   return {app,Zotero,Services,IOUtils,files,prefs,items,menus,publisherCalls,submissions,remoteRequests,errors,httpCalls,imports,session,credentials,adapter,account,directories,fileMetadata,openedURLs,openedFiles,identityCalls,pdf,downloadDirectory,advanceTime(ms){clock+=ms;},putFile(file,bytes,metadata={}){files.set(file,bytes);fileMetadata.set(file,{lastModified:++fileRevision,...metadata});},addItem(value){items.set(value.id,value);return value;},setWriteHook(value){writeHook=value;},get accountCalls(){return accountCalls;},get peak(){return peak;},get importCount(){return importCount;},get oaCalls(){return oaCalls;}};
 }
 
@@ -73,6 +73,41 @@ test('batch queue runs at most two publisher acquisitions concurrently',async()=
   assert.equal(env.peak,2);assert.equal(env.submissions.length,0);await env.app.stop();
 });
 
+test('a second batch appends new items and old retries after the first batch without restarting duplicate active or queued items',async()=>{
+  const history=MODEL.createTask({libraryID:1,itemID:6,itemKey:'ITEM6',doi:'10.1234/paper6',state:'not_found',allowAssist:true,requestedPoints:19},{now:'2025-01-01T00:00:00Z'});
+  const releases=new Map(),env=environment({initialTasks:[history],acquire:async value=>{const gate=deferred();releases.set(value.id,gate);await gate.promise;return {attachmentID:100+value.id,source:'publisher'};}});
+  const parents=new Map([1,2,3,4,5,6].map(id=>[id,env.addItem(item(id))]));const order=()=>env.publisherCalls.map(call=>call.item.id);
+  await env.app.start();await env.app.captureItems([1,2,3,4].map(id=>parents.get(id)));await until(()=>releases.size===2);
+  const unchanged=env.app.getSnapshot().tasks.filter(task=>[1,2,3,4].includes(task.itemID));
+  const second=await env.app.captureItems([5,1,3,6,5].map(id=>parents.get(id)));
+  assert.deepEqual([second.queued,second.retained,second.duplicates],[2,2,1]);assert.deepEqual(order(),[1,2]);
+  assert.equal(JSON.stringify(env.app.getSnapshot().tasks.filter(task=>[1,2,3,4].includes(task.itemID))),JSON.stringify(unchanged));
+  assert.deepEqual(Array.from(env.app.getSnapshot().tasks,task=>task.itemID),[1,2,3,4,5,6]);
+  assert.equal(env.app.getSnapshot().tasks.at(-1).id,history.id);assert.equal(env.app.getSnapshot().tasks.at(-1).allowAssist,false);
+  releases.get(1).resolve();await until(()=>env.app.getSnapshot().tasks.find(task=>task.itemID===1).state==='imported');assert.deepEqual(order(),[1,2]);
+  releases.get(2).resolve();await until(()=>releases.size===4);assert.deepEqual(order(),[1,2,3,4]);
+  releases.get(3).resolve();releases.get(4).resolve();await until(()=>releases.size===6);assert.deepEqual(order(),[1,2,3,4,5,6]);
+  releases.get(5).resolve();releases.get(6).resolve();await until(()=>env.app.getSnapshot().tasks.every(task=>task.state==='imported'));
+  assert.equal(new Set(env.app.getSnapshot().tasks.map(task=>task.id)).size,6);assert.equal(new Set(order()).size,6);assert.equal(env.peak,2);assert.equal(env.accountCalls,0);assert.equal(env.submissions.length,0);
+  assert.deepEqual(JSON.parse(env.files.get(queuePath)).tasks.map(task=>task.itemID),[1,2,3,4,5,6]);await env.app.stop();
+});
+
+test('explicit retry, assistance and missing-PDF repair all join the tail behind waiting work',async()=>{
+  const history=[5,6,7].map(id=>MODEL.createTask({libraryID:1,itemID:id,itemKey:'ITEM'+id,doi:'10.1234/paper'+id,state:id===7?'imported':'not_found',attachmentID:id===7?107:null,requestedPoints:19},{now:'2025-01-01T00:00:00Z'}));
+  const releases=new Map(),env=environment({initialTasks:history,acquire:async value=>{const gate=deferred();releases.set(value.id,gate);await gate.promise;return {attachmentID:100+value.id,source:'publisher'};}});
+  const parents=new Map([1,2,3,4,5,6,7].map(id=>[id,env.addItem(item(id))]));const order=()=>env.publisherCalls.map(call=>call.item.id);
+  await env.app.start();await env.app.captureItems([1,2,3,4].map(id=>parents.get(id)));await until(()=>releases.size===2);
+  await env.app.retryTask(history[0].id);await env.app.requestAssist(history[1].id,{points:43});const repair=await env.app.captureItems([parents.get(7)]);
+  assert.equal(repair.queued,1);assert.deepEqual(order(),[1,2]);assert.deepEqual(Array.from(env.app.getSnapshot().tasks,task=>task.itemID),[1,2,3,4,5,6,7]);
+  for(const previous of history)assert.equal(env.app.getSnapshot().tasks.find(task=>task.itemID===previous.itemID).id,previous.id);
+  const assist=env.app.getSnapshot().tasks.find(task=>task.itemID===6);assert.equal(assist.allowAssist,true);assert.equal(assist.requestedPoints,43);assert.equal(env.app.getSnapshot().tasks.at(-1).attachmentID,null);
+  releases.get(1).resolve();releases.get(2).resolve();await until(()=>releases.size===4);assert.deepEqual(order(),[1,2,3,4]);
+  releases.get(3).resolve();releases.get(4).resolve();await until(()=>releases.size===6);assert.deepEqual(order(),[1,2,3,4,5,6]);
+  releases.get(5).resolve();releases.get(6).resolve();await until(()=>releases.size===7);assert.deepEqual(order(),[1,2,3,4,5,6,7]);
+  releases.get(7).resolve();await until(()=>env.app.getSnapshot().tasks.every(task=>task.state==='imported'));
+  assert.equal(env.peak,2);assert.equal(env.accountCalls,0);assert.equal(env.submissions.length,0);await env.app.stop();
+});
+
 test('public full text is acquired without checking or requiring an AbleSci account',async()=>{
   const env=environment();env.adapter.getAccount=async()=>{throw new Error('Account must not be consulted');};
   await env.app.start();await env.app.captureItems([env.addItem(item(1))]);
@@ -80,11 +115,11 @@ test('public full text is acquired without checking or requiring an AbleSci acco
   assert.equal(env.app.getSelectedTask().source,'publisher');assert.equal(env.accountCalls,0);assert.equal(env.submissions.length,0);await env.app.stop();
 });
 
-test('existing PDF is skipped by the real publisher without HTTP or duplicate import',async()=>{
+test('existing PDF is skipped before task creation without HTTP or an account check',async()=>{
   const env=environment({realPublisher:true});const parent=env.addItem(item(1));parent.getAttachments=()=>[99];
-  env.items.set(99,{id:99,attachmentContentType:'application/pdf',async getFilePathAsync(){return 'C:\\isolated\\existing.pdf';}});env.files.set('C:\\isolated\\existing.pdf','fixture');
-  await env.app.start();await env.app.captureItems([parent],{allowAssist:true});await until(()=>env.app.getSelectedTask().state==='imported');
-  assert.equal(env.app.getSelectedTask().attachmentID,99);assert.equal(env.app.getSelectedTask().source,'existing');assert.equal(env.httpCalls.length,0);assert.equal(env.importCount,0);assert.equal(env.accountCalls,0);await env.app.stop();
+  env.items.set(99,{id:99,attachmentContentType:'application/pdf',async getFilePathAsync(){return 'C:\\isolated\\existing.pdf';}});env.files.set('C:\\isolated\\existing.pdf',env.pdf);
+  await env.app.start();const summary=await env.app.captureItems([parent],{allowAssist:true});
+  assert.equal(summary.skippedExistingPDF,1);assert.equal(summary.queued,0);assert.equal(env.app.getSnapshot().tasks.length,0);assert.equal(env.httpCalls.length,0);assert.equal(env.importCount,0);assert.equal(env.accountCalls,0);await env.app.stop();
 });
 
 test('real publisher storage failure is surfaced as an error and never starts paid fallback',async()=>{
@@ -92,6 +127,105 @@ test('real publisher storage failure is surfaced as an error and never starts pa
   await until(()=>['error','not_found','submission_unknown','waiting'].includes(env.app.getSelectedTask().state));
   assert.equal(env.app.getSelectedTask().state,'error');assert.match(env.app.getSelectedTask().lastError,/写入或导入 Zotero 失败/);
   assert.equal(env.httpCalls.length,1);assert.equal(env.importCount,0);assert.equal(env.oaCalls,0);assert.equal(env.accountCalls,0);assert.equal(env.submissions.length,0);await env.app.stop();
+});
+
+test('mixed capture counts local PDFs, child selections, duplicates, unsupported entries and retained history',async()=>{
+  const history=MODEL.createTask({libraryID:1,itemID:3,itemKey:'ITEM3',doi:'10.1234/paper3',state:'paused',requestedPoints:27,requestURL:'https://www.ablesci.com/assist/detail?id=Existing'});
+  const env=environment({initialTasks:[history],acquire:async()=>({state:'not_found'})});
+  const stored=env.addItem(item(1)),missing=env.addItem(item(2)),old=env.addItem(item(3)),linked=env.addItem(item(4));
+  const attach=(parent,id,file,mode=0)=>{const value={id,parentID:parent.id,libraryID:1,attachmentContentType:'application/pdf',attachmentLinkMode:mode,isAttachment:()=>true,isRegularItem:()=>false,async getFilePathAsync(){return file;}};env.addItem(value);return value;};
+  const storedAttachment=attach(stored,101,'C:\\isolated\\stored.pdf');stored.getAttachments=()=>[101];env.files.set('C:\\isolated\\stored.pdf',env.pdf);
+  const missingAttachment=attach(missing,102,'C:\\isolated\\missing.pdf');missing.getAttachments=()=>[102];
+  attach(linked,104,'C:\\isolated\\linked.pdf',2);linked.getAttachments=()=>[104];env.files.set('C:\\isolated\\linked.pdf',env.pdf);
+  await env.app.start();assert.equal(env.app.getSnapshot().captureSummary,null);
+  const before=JSON.stringify(env.app.getSnapshot().tasks[0]);
+  const summary=await env.app.captureItems([stored,missingAttachment,old,storedAttachment,linked,{id:9,isAttachment:()=>true},{id:10,isNote:()=>true},null]);
+  assert.deepEqual([summary.selected,summary.eligible,summary.queued,summary.skippedExistingPDF,summary.retained,summary.ignored,summary.duplicates,summary.failed],[8,4,1,2,1,3,1,0]);
+  assert.match(summary.message,/加入 1 项，已有 PDF 跳过 2 项/);
+  assert.equal(JSON.stringify(env.app.getSnapshot().tasks.find(t=>t.id===history.id)),before);
+  assert.equal(env.app.getSnapshot().tasks.length,2);assert.equal(summary.queuedTaskIDs.length,1);
+  summary.queuedTaskIDs.push('not-real');summary.queued=999;
+  assert.equal(env.app.getSnapshot().captureSummary.queued,1);assert.equal(env.app.getSnapshot().captureSummary.queuedTaskIDs.length,1);
+  assert.equal(JSON.parse(env.files.get(queuePath)).captureSummary,undefined);
+  await until(()=>env.publisherCalls.length===1);assert.equal(env.publisherCalls[0].item.id,2);await env.app.stop();
+});
+
+test('capture leaves an existing PDF history and remote association byte-for-byte unchanged',async()=>{
+  for(const state of ['imported','paused']){
+    const history=MODEL.createTask({libraryID:1,itemID:1,itemKey:'ITEM1',doi:'10.1234/paper1',state,attachmentID:99,requestedPoints:28,requestURL:'https://www.ablesci.com/assist/detail?id=OldRemote',allowAssist:true});
+    const env=environment({initialTasks:[history]}),parent=env.addItem(item(1));parent.getAttachments=()=>[99];
+    env.addItem({id:99,attachmentContentType:'application/pdf',async getFilePathAsync(){return 'C:\\isolated\\existing.pdf';}});env.files.set('C:\\isolated\\existing.pdf',env.pdf);
+    await env.app.start();const before=JSON.stringify(env.app.getSnapshot().tasks[0]);await env.app.saveSettings({points:55});
+    const summary=await env.app.captureItems([parent],{allowAssist:true});
+    assert.equal(summary.skippedExistingPDF,1);assert.equal(JSON.stringify(env.app.getSnapshot().tasks[0]),before);assert.equal(env.publisherCalls.length,0);assert.equal(env.remoteRequests.length,0);await env.app.stop();
+  }
+});
+
+test('capture retains active work and retries corrected-DOI history without duplicating parent tasks',async()=>{
+  const gate=deferred(),env=environment({acquire:async()=>{await gate.promise;return {state:'not_found'};}}),parent=env.addItem(item(1));
+  await env.app.start();await env.app.captureItems([parent]);await until(()=>env.publisherCalls.length===1);
+  const before=JSON.stringify(env.app.getSnapshot().tasks[0]);const activeResult=await env.app.captureItems([parent],{allowAssist:true});
+  assert.equal(activeResult.retained,1);assert.equal(JSON.stringify(env.app.getSnapshot().tasks[0]),before);
+  gate.resolve();await until(()=>env.app.getSelectedTask().state==='not_found');const oldID=env.app.getSelectedTask().id;
+  const getField=parent.getField;parent.getField=name=>name==='DOI'?'10.1234/corrected':getField(name);
+  const result=await env.app.captureItems([parent]);assert.equal(result.queued,1);assert.equal(env.app.getSnapshot().tasks.length,1);assert.equal(env.app.getSelectedTask().id,oldID);await until(()=>env.app.getSelectedTask().state==='not_found'&&env.app.getSelectedTask().doi==='10.1234/corrected');await env.app.stop();
+});
+
+test('an imported task whose PDF disappeared reuses its ID and does not inherit paid fallback authorization',async()=>{
+  const history=MODEL.createTask({libraryID:1,itemID:1,itemKey:'ITEM1',doi:'10.1234/paper1',state:'imported',attachmentID:99,requestedPoints:28,allowAssist:true,source:'publisher'});
+  const gate=deferred(),env=environment({initialTasks:[history],acquire:async()=>{await gate.promise;return {state:'not_found'};}}),parent=env.addItem(item(1));
+  parent.getAttachments=()=>[99];env.addItem({id:99,attachmentContentType:'application/pdf',async getFilePathAsync(){return false;}});
+  await env.app.start();const result=await env.app.captureItems([parent]);
+  assert.equal(result.queued,1);assert.equal(env.app.getSnapshot().tasks.length,1);const current=env.app.getSelectedTask();assert.equal(current.id,history.id);assert.equal(current.attachmentID,null);assert.equal(current.completedAt,null);assert.equal(current.allowAssist,false);
+  gate.resolve();await until(()=>env.app.getSelectedTask().state==='not_found');assert.equal(env.submissions.length,0);assert.equal(env.accountCalls,0);await env.app.stop();
+});
+
+test('repair of a missing imported remote PDF preserves request and points and never republishes',async()=>{
+  const history=MODEL.createTask({libraryID:1,itemID:1,itemKey:'ITEM1',doi:'10.1234/paper1',state:'imported',attachmentID:99,requestedPoints:28,allowAssist:true,source:'ablesci',requestURL:'https://www.ablesci.com/assist/detail?id=OldRemote'});
+  const env=environment({initialTasks:[history]});env.addItem(item(1));await env.app.start();await env.app.saveSettings({points:55});
+  const result=await env.app.captureItems([env.items.get(1)],{allowAssist:true});await until(()=>env.remoteRequests.length===1);
+  const current=env.app.getSnapshot().tasks[0];assert.equal(result.queued,1);assert.equal(current.id,history.id);assert.equal(current.requestID,'OldRemote');assert.equal(current.requestedPoints,28);assert.equal(current.attachmentID,null);assert.equal(env.publisherCalls.length,0);assert.equal(env.submissions.length,0);await env.app.stop();
+});
+
+test('one failed attachment enumeration does not abort a batch and capture summaries get unique IDs',async()=>{
+  const env=environment({acquire:async()=>({state:'not_found'})}),bad=env.addItem(item(1)),good=env.addItem(item(2));bad.getAttachments=()=>{throw new Error('fixture failed enumeration');};
+  await env.app.start();const one=await env.app.captureItems([bad,good]);assert.equal(one.failed,1);assert.equal(one.queued,1);
+  const two=await env.app.captureItems([]);assert.notEqual(one.id,two.id);assert.equal(two.selected,0);assert.equal(two.queued,0);await env.app.stop();
+});
+
+test('overlapping captures deduplicate by current parent identity after asynchronous PDF checks',async()=>{
+  const gate=deferred(),env=environment({acquire:async()=>{await gate.promise;return {state:'not_found'};}}),parent=env.addItem(item(1));
+  await env.app.start();const [one,two]=await Promise.all([env.app.captureItems([parent]),env.app.captureItems([parent])]);
+  assert.equal(one.queued+two.queued,1);assert.equal(one.retained+two.retained,1);assert.equal(env.app.getSnapshot().tasks.length,1);gate.resolve();await env.app.stop();
+});
+
+test('ordinary batch capture retries unresolved history using the same IDs without retaining old spending permission',async()=>{
+  const states=['not_found','needs_login','pending_login','needs_review','paused','error'];
+  const history=states.map((state,index)=>MODEL.createTask({libraryID:1,itemID:index+1,itemKey:'ITEM'+(index+1),doi:'10.1234/paper'+(index+1),state,allowAssist:true,requestedPoints:28}));
+  const env=environment({initialTasks:history,acquire:async()=>({state:'not_found'})});const parents=states.map((_,index)=>env.addItem(item(index+1)));
+  await env.app.start();await env.app.saveSettings({points:55});const result=await env.app.captureItems(parents);
+  assert.equal(result.queued,states.length);assert.equal(env.app.getSnapshot().tasks.length,states.length);
+  for(const previous of history){const current=env.app.getSnapshot().tasks.find(task=>task.id===previous.id);assert(current);assert.equal(current.allowAssist,false);assert.equal(current.requestedPoints,28);}
+  await until(()=>env.app.getSnapshot().tasks.every(task=>task.state==='not_found'));assert.equal(env.submissions.length,0);assert.equal(env.accountCalls,0);await env.app.stop();
+});
+
+test('ordinary capture preserves an active manual download watch until explicit fallback is chosen',async()=>{
+  const history=MODEL.createTask({libraryID:1,itemID:1,itemKey:'ITEM1',doi:'10.1234/paper1',title:'Fixture',state:'paused'});
+  const env=environment({initialTasks:[history],acquire:async()=>({state:'not_found'})}),parent=env.addItem(item(1));
+  await env.app.start();env.app.selectTask(history.id);await env.app.openSystemBrowserTask(history.id);assert.equal(env.app.getSelectedTask().state,'manual_waiting');
+  const before=JSON.stringify(env.app.getSelectedTask());const result=await env.app.captureItems([parent]);assert.equal(result.retained,1);assert.equal(JSON.stringify(env.app.getSelectedTask()),before);assert.equal(env.publisherCalls.length,0);
+  await env.app.saveSettings({points:55});const fallback=await env.app.captureItems([parent],{allowAssist:true});assert.equal(fallback.queued,1);await until(()=>env.submissions.length===1);assert.equal(env.submissions[0].points,55);await env.app.stop();
+});
+
+test('stopping during local PDF inspection cancels both the batch and its queued successor without later writes',async()=>{
+  const gate=deferred(),env=environment(),parent=env.addItem(item(1));let inspections=0,opens=0;
+  parent.getAttachments=()=>[99];env.addItem({id:99,attachmentContentType:'application/pdf',async getFilePathAsync(){inspections++;return gate.promise;}});
+  await env.app.start();env.app.openPreferences=async()=>{opens++;};
+  const first=env.app.captureItems([parent,env.addItem(item(2))]);const second=env.app.captureItems([env.addItem(item(3))]);
+  await until(()=>inspections===1);await env.app.stop();const persisted=env.files.get(queuePath);let lateWrites=0;env.setWriteHook(async()=>{lateWrites++;});
+  gate.resolve('C:\\isolated\\missing.pdf');const [one,two]=await Promise.all([first,second]);
+  assert.equal(one.cancelled,true);assert.equal(one.unprocessed,2);assert.equal(one.queued,0);assert.equal(two.cancelled,true);assert.equal(two.unprocessed,1);
+  assert.equal(env.app.getSnapshot().tasks.length,0);assert.equal(env.app.getSnapshot().captureSummary,null);assert.equal(env.files.get(queuePath),persisted);assert.equal(lateWrites,0);assert.equal(opens,0);assert.equal(env.publisherCalls.length,0);
 });
 
 test('pause while publisher is active blocks a later fallback POST',async()=>{
@@ -174,6 +308,197 @@ function availableDownload(env,{expectedSize=null,allowedOrigins=['https://downl
   env.adapter.getRequest=async id=>{env.remoteRequests.push(id);return {requestID:id,doi:'10.1234/paper1',state:'available',files:[file]};};
   env.adapter.getDownload=async(result,selected)=>{assert.equal(result.requestID,'Request1');assert.equal(selected,file);return {url:'https://download.test/paper.pdf',method:'GET',resolved:true,costPoints:0,expectedSize,allowedOrigins};};
 }
+
+function completionEnvironment(options={}) {
+  const env=environment({...options,initialTasks:options.initialTasks||[remoteFixture()]}),parent=env.addItem(item(1));
+  const accepts=[],messageReads=[],posts=[],downloadCalls=[];
+  parent.getAttachments=()=>[...env.items.values()].filter(value=>value.parentID===parent.id&&!value.deleted).map(value=>value.id);
+  parent.getBestAttachment=async()=>[...env.items.values()].find(value=>value.parentID===parent.id&&!value.deleted&&value.attachmentContentType==='application/pdf')||null;
+  const installAttachment=({id=900,parentID=1,libraryID=1,bytes=env.pdf,file='C:\\isolated\\storage\\'+id+'\\fulltext.pdf'}={})=>{
+    const attachment={id,parentID,libraryID,deleted:false,attachmentContentType:'application/pdf',attachmentFilename:'fulltext.pdf',isAttachment:()=>true,isFileAttachment:()=>true,async getFilePathAsync(){return file;},async fileExists(){return env.files.has(file);},setField(){},async saveTx(){}};
+    env.addItem(attachment);if(bytes!==null)env.files.set(file,bytes.slice());return attachment;
+  };
+  const originalImport=env.Zotero.Attachments.importFromFile;
+  env.Zotero.Attachments.importFromFile=async options=>{const bytes=env.files.get(options.file).slice(),original=await originalImport(options);return installAttachment({id:original.id,parentID:options.parentItemID,bytes});};
+  availableDownload(env);const originalDownload=env.adapter.getDownload;
+  env.adapter.getDownload=async(...args)=>{downloadCalls.push(args);return{...await originalDownload(...args),requestID:'Request1',fileID:'File1',accountID:'FixtureAccount',filename:'paper.pdf',route:'normal'};};
+  env.adapter.acceptFile=async options=>{accepts.push(options);if(!options.reconcileOnly){await options.beforeSend();posts.push({requestID:options.requestID,fileID:options.fileID,accountID:options.accountID});}return{accepted:true};};
+  env.adapter.markRequestMessagesRead=async options=>{messageReads.push(options);return{completed:true};};
+  return Object.assign(env,{parent,accepts,messageReads,posts,downloadCalls,installAttachment});
+}
+const sha256=bytes=>createHash('sha256').update(bytes).digest('hex');
+function importedReceiptFixture(patch={}) {
+  const task=remoteFixture('imported'),verifiedAt=new Date().toISOString();
+  const bytes=new TextEncoder().encode('%PDF-1.7\n'+'0'.repeat(1200)+'\n%%EOF\n');
+  const assistReceipt={requestID:'Request1',fileID:'File1',accountID:'FixtureAccount',attachmentID:900,sha256:sha256(bytes),doi:task.doi,title:task.title,verifiedBy:'doi',verifiedAt,adoption:'pending',messages:'pending',needsReconcile:false,attempts:0,nextCheckAt:null,lastError:'',acceptedAt:null,readAt:null,...patch};
+  return MODEL.updateTask(task,{source:'ablesci',attachmentID:900,assistReceipt});
+}
+
+test('a verified assistance PDF persists its exact hash and attachment receipt before adoption and messages',async()=>{
+  const env=completionEnvironment(),events=[];
+  env.adapter.acceptFile=async options=>{
+    const persisted=JSON.parse(env.files.get(queuePath)).tasks[0],receipt=persisted.assistReceipt;
+    assert.equal(persisted.state,'imported');assert.equal(receipt.sha256,sha256(env.pdf));assert.equal(receipt.attachmentID,900);
+    assert.equal(receipt.accountID,'FixtureAccount');assert.equal(receipt.requestID,'Request1');assert.equal(receipt.fileID,'File1');assert.equal(receipt.verifiedBy,'doi');assert.equal(receipt.needsReconcile,false);
+    assert.equal(await env.items.get(900).fileExists(),true);events.push('receipt-persisted');
+    await options.beforeSend();assert.equal(JSON.parse(env.files.get(queuePath)).tasks[0].assistReceipt.needsReconcile,true);events.push('post');return{accepted:true};
+  };
+  env.adapter.markRequestMessagesRead=async()=>{const receipt=JSON.parse(env.files.get(queuePath)).tasks[0].assistReceipt;assert.equal(receipt.adoption,'accepted');assert.equal(receipt.needsReconcile,false);events.push('messages');return{completed:true};};
+  await env.app.start();await env.app.downloadTask(env.app.getSnapshot().tasks[0].id);
+  assert.deepEqual(events,['receipt-persisted','post','messages']);assert.equal(env.identityCalls.length,1);assert.equal(sha256(env.identityCalls[0].bytes),sha256(env.pdf));assert.equal(env.identityCalls[0].paper.doi,'10.1234/paper1');
+  const task=env.app.getSnapshot().tasks[0];assert.equal(task.assistReceipt.adoption,'accepted');assert.equal(task.assistReceipt.messages,'done');assert.equal(task.assistReceipt.sha256,sha256(env.pdf));assert.equal(env.importCount,1);assert.equal(env.submissions.length,0);await env.app.stop();
+});
+
+test('a mismatched assistance PDF is neither imported nor adopted',async()=>{
+  const env=completionEnvironment({pdfIdentity:{async inspect(){return{status:'mismatch',message:'DOI differs'};}}});await env.app.start();await env.app.downloadTask(env.app.getSnapshot().tasks[0].id);
+  const task=env.app.getSnapshot().tasks[0];assert.equal(task.state,'error');assert.match(task.lastError,/不匹配/);assert.equal(task.assistReceipt,null);assert.equal(env.importCount,0);assert.equal(env.accepts.length,0);assert.equal(env.messageReads.length,0);await env.app.stop();
+});
+
+test('an unknown assistance PDF is retained for preview and only explicit unchanged-file confirmation imports and adopts it',async()=>{
+  const env=completionEnvironment({pdfIdentity:{async inspect(){return{status:'unknown',summary:'Scanned PDF'};}}});await env.app.start();const id=env.app.getSnapshot().tasks[0].id;await env.app.downloadTask(id);
+  const pending=env.app.getSnapshot().tasks[0];assert.equal(pending.state,'manual_review');assert.equal(pending.assistReview.sha256,sha256(env.pdf));assert.equal(pending.assistReceipt,null);assert.equal(env.importCount,0);assert.equal(env.accepts.length,0);
+  await env.app.previewDownloadedPDF(id);const file=env.openedFiles[0];assert.equal(file,path.win32.join('C:\\isolated','fulltext-assistant','review-'+id+'.pdf'));assert(env.files.has(file));
+  await env.app.confirmDownloadedPDF(id);const done=env.app.getSnapshot().tasks[0];assert.equal(done.state,'imported');assert.equal(done.assistReview,null);assert.equal(done.assistReceipt.verifiedBy,'manual');assert.equal(done.assistReceipt.messages,'done');assert.equal(env.accepts.length,1);assert.equal(env.importCount,1);assert.equal(env.files.has(file),false);await env.app.stop();
+});
+
+test('an unknown assistance PDF changed after review cannot be confirmed or adopted',async()=>{
+  const env=completionEnvironment({pdfIdentity:{async inspect(){return{status:'unknown'};}}});await env.app.start();const id=env.app.getSnapshot().tasks[0].id;await env.app.downloadTask(id);await env.app.previewDownloadedPDF(id);
+  const file=env.openedFiles[0],replacement=env.pdf.slice();replacement[100]=49;env.files.set(file,replacement);
+  await assert.rejects(env.app.confirmDownloadedPDF(id),/改变/);assert.equal(env.importCount,0);assert.equal(env.accepts.length,0);assert.equal(env.messageReads.length,0);assert.equal(env.app.getSnapshot().tasks[0].assistReceipt,null);await env.app.stop();
+});
+
+test('failed assistance transfer, PDF storage or receipt persistence never adopts a file',async()=>{
+  for(const mode of ['transfer','storage','receipt']){
+    const env=completionEnvironment({writePDFError:mode==='storage'});await env.app.start();
+    if(mode==='transfer')env.Zotero.HTTP.request=async()=>{throw new Error('fixture network failure');};
+    if(mode==='receipt')env.setWriteHook(async(file,value)=>{if(file===queuePath&&JSON.parse(value).tasks.some(task=>task.assistReceipt))throw new Error('fixture receipt disk full');});
+    await env.app.downloadTask(env.app.getSnapshot().tasks[0].id);assert.equal(env.accepts.length,0,mode);assert.equal(env.messageReads.length,0,mode);if(mode!=='receipt')assert.equal(env.importCount,0,mode);
+    env.setWriteHook(null);await env.app.stop();
+  }
+});
+
+test('an existing local PDF is preserved without guessing which remote file supplied it',async()=>{
+  const env=completionEnvironment();env.installAttachment({id:950});await env.app.start();await env.app.downloadTask(env.app.getSnapshot().tasks[0].id);
+  const task=env.app.getSnapshot().tasks[0];assert.equal(task.state,'imported');assert.equal(task.source,'existing');assert.equal(task.attachmentID,950);assert.equal(task.assistReceipt,null);assert.equal(env.httpCalls.length,0);assert.equal(env.importCount,0);assert.equal(env.accepts.length,0);assert.equal(env.messageReads.length,0);await env.app.stop();
+});
+
+test('a corrupt existing PDF never blocks valid assistance, manual or browser import',async()=>{
+  for(const route of ['assistance','manual','browser']){
+    const task=route==='assistance'?remoteFixture():localFixture(),file='C:\\isolated\\selected.pdf';let browserCalls=0;
+    const env=completionEnvironment({initialTasks:[task],pickPDF:async()=>file,edgeAcquire:{async acquire(){browserCalls++;return{bytes:env.pdf};}}});
+    const corrupt=env.pdf.slice();corrupt[0]=60;const old=env.installAttachment({id:950,bytes:corrupt});env.files.set(file,env.pdf);
+    await env.app.start();
+    if(route==='assistance')await env.app.downloadTask(task.id);
+    else if(route==='manual')await env.app.importLocalPDF(task.id);
+    else{await env.app.openExternalTask(task.id);await until(()=>env.app.getSnapshot().tasks[0].state==='imported');}
+    const current=env.app.getSnapshot().tasks[0];assert.equal(current.state,'imported',route);assert.equal(current.attachmentID,900,route);assert.equal(env.importCount,1,route);
+    assert.equal(sha256(env.files.get(await old.getFilePathAsync())),sha256(corrupt),route);
+    assert.equal(sha256(env.files.get(await env.items.get(900).getFilePathAsync())),sha256(env.pdf),route);
+    assert.equal(env.accepts.length,route==='assistance'?1:0,route);assert.equal(browserCalls,route==='browser'?1:0,route);
+    if(route==='assistance'){assert.equal(current.source,'ablesci');assert.equal(current.assistReceipt.attachmentID,900);assert.equal(current.assistReceipt.messages,'done');}
+    await env.app.stop();
+  }
+});
+
+test('an adoption timeout persists uncertainty and concurrent retries only reconcile without downloading again',async()=>{
+  const env=completionEnvironment(),gate=deferred();let sends=0,reconciles=0;
+  env.adapter.acceptFile=async options=>{if(!options.reconcileOnly){await options.beforeSend();sends++;throw Object.assign(new Error('adoption timed out'),{reconcileRequired:true});}reconciles++;await gate.promise;return{accepted:true};};
+  await env.app.start();const id=env.app.getSnapshot().tasks[0].id;await env.app.downloadTask(id);
+  const pending=env.app.getSnapshot().tasks[0];assert.equal(pending.state,'imported');assert.equal(pending.assistReceipt.adoption,'pending');assert.equal(pending.assistReceipt.needsReconcile,true);assert.equal(pending.assistReceipt.attempts,1);assert.equal(env.messageReads.length,0);
+  const first=env.app.retryAssistCompletion(id),second=env.app.retryAssistCompletion(id);assert.equal(first,second);await until(()=>reconciles===1);assert.equal(sends,1);gate.resolve();await Promise.all([first,second]);
+  assert.equal(env.app.getSnapshot().tasks[0].assistReceipt.messages,'done');assert.equal(env.httpCalls.length,1);assert.equal(env.downloadCalls.length,1);assert.equal(env.importCount,1);assert.equal(env.messageReads.length,1);await env.app.stop();
+});
+
+test('message failure after accepted adoption retries only message handling while keeping the imported PDF',async()=>{
+  const env=completionEnvironment();let reads=0;env.adapter.markRequestMessagesRead=async()=>{reads++;if(reads===1)throw new Error('messages unavailable');return{completed:true};};
+  await env.app.start();const id=env.app.getSnapshot().tasks[0].id;await env.app.downloadTask(id);const pending=env.app.getSnapshot().tasks[0];
+  assert.equal(pending.state,'imported');assert.equal(pending.assistReceipt.adoption,'accepted');assert.equal(pending.assistReceipt.messages,'pending');assert.equal(pending.assistReceipt.needsReconcile,false);
+  await env.app.retryAssistCompletion(id);assert.equal(reads,2);assert.equal(env.accepts.length,1);assert.equal(env.posts.length,1);assert.equal(env.httpCalls.length,1);assert.equal(env.importCount,1);assert.equal(env.app.getSnapshot().tasks[0].assistReceipt.messages,'done');await env.app.stop();
+});
+
+test('a persisted uncertain receipt resumes after restart with only reconciliation and message handling',async()=>{
+  const initial=importedReceiptFixture({needsReconcile:true,attempts:2}),env=completionEnvironment({initialTasks:[initial]});env.installAttachment();await env.app.start();await env.app.stop();
+  const saved=JSON.parse(env.files.get(queuePath)).tasks,restored=completionEnvironment({initialTasks:saved});restored.installAttachment();await restored.app.start();
+  await restored.app.retryAssistCompletion(initial.id);assert.equal(restored.accepts.length,1);assert.equal(restored.accepts[0].reconcileOnly,true);assert.equal(restored.posts.length,0);assert.equal(restored.messageReads.length,1);assert.equal(restored.httpCalls.length,0);assert.equal(restored.importCount,0);assert.equal(restored.app.getSnapshot().tasks[0].assistReceipt.messages,'done');await restored.app.stop();
+});
+
+test('unknown assistance PDF review survives restart and can still be previewed and explicitly confirmed',async()=>{
+  const identity={async inspect(){return{status:'unknown'};}},env=completionEnvironment({pdfIdentity:identity});await env.app.start();const id=env.app.getSnapshot().tasks[0].id;await env.app.downloadTask(id);await env.app.stop();
+  const saved=JSON.parse(env.files.get(queuePath)).tasks;assert.equal(saved[0].state,'manual_review');assert(saved[0].assistReview);
+  const restored=completionEnvironment({initialTasks:saved,pdfIdentity:identity});for(const [file,bytes] of env.files)restored.files.set(file,bytes);await restored.app.start();await restored.app.previewDownloadedPDF(id);assert.equal(restored.openedFiles.length,1);
+  await restored.app.confirmDownloadedPDF(id);assert.equal(restored.app.getSnapshot().tasks[0].assistReceipt.messages,'done');assert.equal(restored.httpCalls.length,0);assert.equal(restored.importCount,1);assert.equal(restored.accepts.length,1);await restored.app.stop();
+});
+
+test('a different account or changed local attachment blocks adoption without redownloading the PDF',async()=>{
+  for(const mode of ['account','parent','library','bytes','missing','deleted']){
+    const task=importedReceiptFixture(),env=completionEnvironment({initialTasks:[task]}),attachment=env.installAttachment();
+    if(mode==='account')env.account.accountID='OtherAccount';
+    if(mode==='parent')attachment.parentID=2;if(mode==='library')attachment.libraryID=2;if(mode==='deleted')attachment.deleted=true;
+    const file=await attachment.getFilePathAsync();if(mode==='bytes'){const bytes=env.pdf.slice();bytes[100]=49;env.files.set(file,bytes);}if(mode==='missing')env.files.delete(file);
+    await env.app.start();const result=await env.app.retryAssistCompletion(task.id);assert.equal(result.completed,false,mode);assert.equal(env.accepts.length,0,mode);assert.equal(env.messageReads.length,0,mode);assert.equal(env.httpCalls.length,0,mode);assert.equal(env.importCount,0,mode);assert.equal(env.app.getSnapshot().tasks[0].state,'imported',mode);await env.app.stop();
+  }
+});
+
+test('account changes after the adoption send prevent later message writes under the new account',async()=>{
+  const task=importedReceiptFixture(),env=completionEnvironment({initialTasks:[task]}),gate=deferred();env.installAttachment();let sent=false;
+  env.adapter.acceptFile=async options=>{await options.beforeSend();sent=true;await gate.promise;return{accepted:true};};
+  await env.app.start();const completion=env.app.retryAssistCompletion(task.id);await until(()=>sent);await env.app.logout();gate.resolve();const result=await completion;
+  assert.equal(result.cancelled,true);assert.equal(env.messageReads.length,0);assert.equal(env.app.getSnapshot().tasks[0].assistReceipt.needsReconcile,true);assert.equal(env.app.getSnapshot().tasks[0].state,'imported');await env.app.stop();
+});
+
+test('attachment changes during the adoption preflight are rechecked before the first POST',async()=>{
+  const task=importedReceiptFixture(),env=completionEnvironment({initialTasks:[task]}),gate=deferred(),attachment=env.installAttachment();let preflight=false,posts=0;
+  env.adapter.acceptFile=async options=>{preflight=true;await gate.promise;await options.beforeSend();posts++;return{accepted:true};};
+  await env.app.start();const completion=env.app.retryAssistCompletion(task.id);await until(()=>preflight);
+  const bytes=env.pdf.slice();bytes[100]=49;env.files.set(await attachment.getFilePathAsync(),bytes);gate.resolve();const result=await completion;
+  assert.equal(result.completed,false);assert.equal(posts,0);assert.equal(env.messageReads.length,0);assert.equal(env.httpCalls.length,0);assert.equal(env.app.getSnapshot().tasks[0].assistReceipt.adoption,'pending');await env.app.stop();
+});
+
+test('explicit verification of legacy assistance history requires identical bytes and adopts without another import',async()=>{
+  const task=MODEL.updateTask(remoteFixture('imported'),{source:'ablesci',attachmentID:900}),env=completionEnvironment({initialTasks:[task]});env.installAttachment();await env.app.start();
+  const result=await env.app.verifyAssistCompletion(task.id);const current=env.app.getSnapshot().tasks[0];
+  assert.equal(result.completed,true);assert.equal(current.id,task.id);assert.equal(current.attachmentID,900);assert.equal(current.assistReceipt.sha256,sha256(env.pdf));assert.equal(current.assistReceipt.adoption,'accepted');assert.equal(current.assistReceipt.messages,'done');assert.equal(env.importCount,0);assert.equal(env.downloadCalls.length,1);assert.equal(env.httpCalls.length,1);assert.equal(env.accepts.length,1);await env.app.stop();
+});
+
+test('explicit verification of legacy history rejects different remote bytes without replacing or adopting its attachment',async()=>{
+  const task=MODEL.updateTask(remoteFixture('imported'),{source:'ablesci',attachmentID:900}),env=completionEnvironment({initialTasks:[task]}),local=env.pdf.slice();local[100]=49;
+  const attachment=env.installAttachment({bytes:local}),file=await attachment.getFilePathAsync();await env.app.start();const result=await env.app.verifyAssistCompletion(task.id);const current=env.app.getSnapshot().tasks[0];
+  assert.equal(result.completed,false);assert.equal(current.state,'imported');assert.equal(current.id,task.id);assert.equal(current.attachmentID,900);assert.equal(current.completedAt,task.completedAt);assert.equal(current.assistReceipt,null);assert.equal(sha256(env.files.get(file)),sha256(local));assert.equal(env.accepts.length,0);assert.equal(env.messageReads.length,0);assert.equal(env.importCount,0);await env.app.stop();
+});
+
+test('snapshot receipt and review evidence are defensive copies and old imported history never gains evidence',async()=>{
+  const task=importedReceiptFixture(),env=completionEnvironment({initialTasks:[task]});env.installAttachment();await env.app.start();const snapshot=env.app.getSnapshot();snapshot.tasks[0].assistReceipt.fileID='Changed';snapshot.tasks[0].assistReceipt.sha256='0'.repeat(64);assert.equal(env.app.getSnapshot().tasks[0].assistReceipt.fileID,'File1');assert.equal(env.app.getSnapshot().tasks[0].assistReceipt.sha256,sha256(env.pdf));await env.app.stop();
+  const review=completionEnvironment({pdfIdentity:{async inspect(){return{status:'unknown'};}}});await review.app.start();await review.app.downloadTask(review.app.getSnapshot().tasks[0].id);const visible=review.app.getSnapshot();visible.tasks[0].assistReview.accountID='Changed';assert.equal(review.app.getSnapshot().tasks[0].assistReview.accountID,'FixtureAccount');await review.app.stop();
+  const legacy=MODEL.updateTask(remoteFixture('imported'),{source:'ablesci',attachmentID:900}),history=completionEnvironment({initialTasks:[legacy]});history.installAttachment();await history.app.start();const before=JSON.stringify(history.app.getSnapshot().tasks[0]);
+  await history.app.retryAssistCompletion(legacy.id);await history.app.retryTask(legacy.id);await history.app.checkTask(legacy.id);await history.app.downloadTask(legacy.id);
+  assert.equal(JSON.stringify(history.app.getSnapshot().tasks[0]),before);assert.equal(history.accepts.length,0);assert.equal(history.messageReads.length,0);assert.equal(history.httpCalls.length,0);assert.equal(history.importCount,0);await history.app.stop();
+});
+
+test('late unread upload notifications reopen only matching account and file completion without downloads or adoption',async()=>{
+  const completedAt='2026-11-05T01:00:00.000Z';
+  const cases=[
+    {name:'matching unread upload',message:{read:false,kind:'assist_upload',fileID:'File1'},reopened:true},
+    {name:'already read upload',message:{read:true,kind:'assist_upload',fileID:'File1'}},
+    {name:'different file',message:{read:false,kind:'assist_upload',fileID:'File2'}},
+    {name:'unrelated message kind',message:{read:false,kind:'other',fileID:'File1'}},
+    {name:'request without file evidence',message:{read:false,kind:'assist_upload',requestID:'Request1',fileID:null}},
+    {name:'receipt from another account',message:{read:false,kind:'assist_upload',fileID:'File1'},accountID:'AnotherAccount'}
+  ];
+  for(const entry of cases){
+    const task=importedReceiptFixture({verifiedAt:completedAt,adoption:'accepted',acceptedAt:completedAt,messages:'done',readAt:completedAt,accountID:entry.accountID||'FixtureAccount'}),env=completionEnvironment({initialTasks:[task]});
+    env.installAttachment();await env.app.start();await env.app.refreshAccount();
+    env.adapter.listMessages=async()=>[{id:'LateMessage',title:'Fixture upload notice',...entry.message}];
+    const before=env.app.getSnapshot().tasks[0];await env.app.refreshMessages();
+    const current=env.app.getSnapshot().tasks[0],saved=JSON.parse(env.files.get(queuePath)).tasks[0];
+    assert.equal(current.assistReceipt.messages,entry.reopened?'pending':'done',entry.name);
+    assert.equal(current.assistReceipt.readAt,entry.reopened?null:completedAt,entry.name);
+    assert.equal(saved.assistReceipt.messages,current.assistReceipt.messages,entry.name);
+    assert.equal(current.assistReceipt.adoption,'accepted',entry.name);assert.equal(current.assistReceipt.acceptedAt,completedAt,entry.name);
+    assert.equal(current.id,before.id,entry.name);assert.equal(current.attachmentID,before.attachmentID,entry.name);assert.equal(current.completedAt,before.completedAt,entry.name);
+    assert.equal(env.accepts.length,0,entry.name);assert.equal(env.posts.length,0,entry.name);assert.equal(env.messageReads.length,0,entry.name);assert.equal(env.httpCalls.length,0,entry.name);assert.equal(env.downloadCalls.length,0,entry.name);assert.equal(env.importCount,0,entry.name);
+    await env.app.stop();
+  }
+});
 
 test('manual download works with automatic download disabled and imports under the linked parent',async()=>{
   const env=environment({initialTasks:[remoteFixture()]});const parent=env.addItem(item(1));availableDownload(env);
@@ -511,7 +836,8 @@ test('failed message refresh preserves the last successful refresh date',async()
 
 test('cancelling while checking an existing local PDF preserves the paused state',async()=>{
   const task=localFixture(),env=environment({initialTasks:[task]}),gate=deferred();let checking=false;
-  const parent=env.addItem(item(1));parent.getBestAttachment=async()=>({id:901,attachmentContentType:'application/pdf',async fileExists(){checking=true;await gate.promise;return true;}});
+  const parent=env.addItem(item(1)),file='C:\\isolated\\existing.pdf';parent.getAttachments=()=>[901];env.files.set(file,env.pdf);
+  env.addItem({id:901,parentID:1,libraryID:1,attachmentContentType:'application/pdf',async getFilePathAsync(){checking=true;await gate.promise;return file;}});
   await env.app.start();const importing=env.app.importLocalPDF(task.id);await until(()=>checking);const pausing=env.app.pauseTask(task.id);gate.resolve();
   await Promise.all([pausing,assert.rejects(importing,/取消/)]);assert.equal(env.app.getSnapshot().tasks[0].state,'paused');assert.equal(env.importCount,0);await env.app.stop();
 });
@@ -854,4 +1180,23 @@ test('manual waiting and review history restart paused without a restored file c
     assert.equal(env.app.getSnapshot().tasks[0].state,'paused');assert.equal(env.app.getSnapshot().tasks[0].pendingFilename,undefined);assert.throws(()=>env.app.confirmDownloadedPDF(task.id),/没有待确认/);
     env.putFile(path.win32.join(downloadDirectory,'late.pdf'),env.pdf);await env.app.checkDownloads();env.advanceTime(2100);await env.app.checkDownloads();assert.equal(env.importCount,0);assert.deepEqual(env.openedURLs,[]);assert.equal(env.submissions.length,0);await env.app.stop();
   }
+});
+
+test('context menu has one branded submenu, live points, and selection-aware actions',async()=>{
+  const env=environment();await env.app.start();
+  assert.equal(env.menus.size,1);
+  const registration=env.menus.get('fulltext-assistant');assert.equal(registration.target,'main/library/item');
+  assert.equal(registration.menus.length,1);const parent=registration.menus[0];
+  assert.equal(parent.menuType,'submenu');assert.equal(parent.icon,'file:///fixture/assets/icon-16.png');
+  assert.deepEqual(Array.from(parent.menus,entry=>entry.menuType),['menuitem','menuitem','separator','menuitem']);
+  const context={items:[],label:'',enabled:null,menuElem:{setAttribute(name,value){if(name==='label')context.label=value;}},setEnabled(value){context.enabled=!!value;}};
+  parent.onShowing(null,context);assert.equal(context.label,'全文助手');assert.equal(context.enabled,true);
+  parent.menus[0].onShowing(null,context);assert.equal(context.label,'批量获取全文');assert.equal(context.enabled,false);
+  parent.menus[3].onShowing(null,context);assert.equal(context.label,'任务与设置');assert.equal(context.enabled,true);
+  context.items=[item(1)];parent.menus[0].onShowing(null,context);assert.equal(context.enabled,true);
+  parent.menus[1].onShowing(null,context);assert.match(context.label,/10 积分/);
+  await env.app.saveSettings({points:27});parent.menus[1].onShowing(null,context);assert.match(context.label,/27 积分/);
+  context.items=[{isRegularItem:()=>false,isAttachment:()=>true,parentID:1}];parent.menus[0].onShowing(null,context);assert.equal(context.enabled,true);
+  context.items=[{isRegularItem:()=>false,isAttachment:()=>true,parentID:null}];parent.menus[0].onShowing(null,context);assert.equal(context.enabled,false);
+  await env.app.stop();assert.equal(env.menus.size,0);
 });

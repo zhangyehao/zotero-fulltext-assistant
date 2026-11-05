@@ -284,6 +284,7 @@ test("download descriptors refresh ownership and file permission, never trust a 
   assert.equal(descriptor.url, ORIGIN + "/fixture-file?file=File1");
   assert.equal(descriptor.resolved, true);
   assert.equal(descriptor.filename, "000448372.pdf");
+  assert.equal(descriptor.accountID, "Account1");
   await assert.rejects(make("DifferentAccount").getDownload("Request1", "File1"), { code: "ACCOUNT_MISMATCH" });
 });
 
@@ -656,4 +657,231 @@ test("high-speed tokens with an unexpected node, route or explicit extra cost ar
   for (const tokenData of [{ host: "https://filehub999vip.ablesci.com/download" }, { host: "https://filehub11vip.ablesci.com:8443/download" }, { channel: "normal", transport: "normal" }, { charged_points: 2 }]) {
     const harness = freeDownloadHarness({ tokenData });await assert.rejects(harness.client.getDownload("Request1", "File1", { route: "auto-free" }));
   }
+});
+
+// Synthetic copies of the observed 2026-11-05 page contracts. All mutations
+// below are in-memory request doubles; no request reaches the live service.
+const COMPLETION = { requestID: "Request1", fileID: "File1", accountID: "Account1", doi: DOI, beforeSend: async () => {} };
+const ACCEPT_SCRIPT = `<script>$('.btn-handle-file').bind('click',function(){var type=$(this).attr('data-type');if(type=='accept'){var text='该求助将完结，应助者将获得积分';}var data={'assist_file_id':assist_file_id,'note':note,'type':type};able.doAjaxCallback('/assist/file-handle',data,function(res){});});</script>`;
+const READ_SCRIPT = `<script>$('#update-message-read').on('click',function(){var check_arr=[];$('input[name=messageID]:checked').each(function(){check_arr.push($(this).val());});window.AbleCsrf.ajax($,{type:'POST',data:window.AbleCsrf.data({'id':check_arr}),url:'/my/set-message-read'});});</script>`;
+function completionDetail({ status = "waiting", account = "Account1", owner = "Account1", canAccept = true, protocol = true, id = "Request1", doi = DOI, fileID = "File1", otherAccepted = false, points = 20 } = {}) {
+  let html = detailHTML({ id, state: status === "accept" ? "finished" : "uploaded", owner, points, fileStatus: status, doi });
+  html = html.replace(accountHTML(owner), modernAccountHTML(account)).replaceAll("File1", fileID);
+  html = html.replace(`<input class="assist-file-id" value="${fileID}">`, `<input class="assist-file-id" value="${fileID}">${canAccept && status === "waiting" ? '<button class="btn-handle-file" data-type="accept">采纳文件</button>' : ""}`);
+  if (otherAccepted) html = html.replace('</ul></div></div>', '<li class="layui-timeline-item"><div class="file-info"><span class="assistfile-badge assistfile-badge-accept">已采纳</span><a class="name" href="/assist/download?id=OtherFile">other.pdf</a></div><input class="assist-file-id" value="OtherFile"></li></ul></div></div>');
+  return html.replace("<body>", '<body><meta name="csrf-param" content="_csrf"><meta name="csrf-token" content="completion-fixture-token">') + (protocol ? ACCEPT_SCRIPT : "");
+}
+function notificationPage(entries, { account = "Account1", page = 1, next = null, malformedPagination = false, protocol = true } = {}) {
+  return `${modernAccountHTML(account)}<meta name="csrf-param" content="_csrf"><meta name="csrf-token" content="message-fixture-token"><div class="user-message-page"><table class="layui-table"><tbody>${entries.map(entry => `<tr id="${entry.id}" class="message-item ${entry.read ? "message-readed" : "message-noread"}"><td><input name="messageID" value="${entry.id}"></td><td class="message-time">2030-01-01 12:00:00</td><td><a class="message-link">${entry.title || `您的求助 [Synthetic paper] 已有应助者上传了文件（id=${entry.fileID || "File1"}）`}${entry.read ? "" : '<span class="message-badge-noread">未读</span>'}</a><blockquote class="message-content"></blockquote></td></tr>`).join("")}</tbody></table></div>${next || page > 1 || malformedPagination ? `<div class="pages"><ul class="pagination">${malformedPagination ? '<li class="last"><span>尾页</span></li>' : next ? `<li class="next"><a href="${next}">下页</a></li>` : '<li class="next disabled"><span>下页</span></li>'}</ul></div>` : ""}${protocol ? READ_SCRIPT : ""}`;
+}
+function completionFixture({ detail = {}, entries = [{ id: "Message1", fileID: "File1", read: false }], post, onRequest } = {}) {
+  const state = { status: "waiting", account: "Account1", detail, entries: entries.map(value => ({ ...value })), calls: [], postCount: 0 };
+  const request = async spec => {
+    state.calls.push(spec);if (onRequest) await onRequest(spec, state);
+    const url = new URL(spec.url);
+    if (spec.method === "POST") {
+      state.postCount++;
+      if (post) return post(spec, state);
+      if (url.pathname === "/assist/file-handle") state.status = "accept";
+      else if (url.pathname === "/my/set-message-read") {
+        const id = new URLSearchParams(spec.body).get("id[]");state.entries.find(entry => entry.id === id).read = true;
+      } else assert.fail("Unexpected mutation: " + url.pathname);
+      return response(spec.url, JSON.stringify({ code: 0 }));
+    }
+    if (url.pathname === "/my/assist-my") return response(spec.url, modernAccountHTML(state.account));
+    if (url.pathname === "/assist/detail") return response(spec.url, completionDetail({ status: state.status, account: state.account, ...state.detail }));
+    if (url.pathname === "/my/message") return response(spec.url, notificationPage(state.entries, { account: state.account }));
+    assert.fail("Unexpected read: " + url.pathname);
+  };
+  return { state, client: adapter.create({ model, parseHTML: parser, request }), request };
+}
+
+test("upload notification association uses the exact file template and never promotes a file ID to a request ID", () => {
+  const parsed = adapter.parseMessages(parser(notificationPage([
+    { id: "Upload1", fileID: "File1" },
+    { id: "Other1", title: "您的求助已完成（id=File1）" },
+    { id: "Other2", title: "其他用户的求助 [Synthetic] 已有应助者上传了文件（id=File1）" },
+    { id: "Other3", title: "您的求助 [Synthetic] 已有应助者上传了文件（id=File1）请回复" },
+  ])), { accountID: "Account1" });
+  assert.equal(parsed[0].kind, "assist_upload");assert.equal(parsed[0].fileID, "File1");
+  assert.ok(parsed.every(value => value.requestID === null));
+  assert.ok(parsed.slice(1).every(value => value.fileID === null));
+});
+
+test("acceptance posts one exact file only after the durable hook and reconciles fresh account and file state", async () => {
+  const { client, state } = completionFixture();let journaled = false;
+  const result = await client.acceptFile({ ...COMPLETION, expectedPoints: 20, beforeSend: async () => { assert.equal(state.postCount, 0);journaled = true; } });
+  assert.equal(journaled, true);assert.equal(result.accepted, true);assert.equal(result.alreadyAccepted, false);
+  assert.equal(result.fileID, "File1");assert.equal(result.accountID, "Account1");assert.equal(state.postCount, 1);
+  const sent = state.calls.find(value => value.method === "POST");
+  assert.equal(new URL(sent.url).pathname, "/assist/file-handle");
+  assert.deepEqual([...new URLSearchParams(sent.body)], [["assist_file_id", "File1"], ["note", ""], ["type", "accept"], ["_csrf", "completion-fixture-token"]]);
+  assert.deepEqual(state.calls.slice(-2).map(value => new URL(value.url).pathname), ["/my/assist-my", "/assist/detail"]);
+});
+
+test("already accepted files and concurrent repeat completion are idempotent", async () => {
+  const { client, state } = completionFixture();
+  const results = await Promise.all([client.acceptFile(COMPLETION), client.acceptFile(COMPLETION)]);
+  assert.ok(results.every(value => value.accepted));assert.equal(state.postCount, 1);
+  assert.equal(results[1].alreadyAccepted, true);
+  assert.equal((await client.acceptFile(COMPLETION)).alreadyAccepted, true);assert.equal(state.postCount, 1);
+});
+
+test("acceptance rejects wrong account, owner, DOI, request, file, reward and conflicting accepted files before any POST", async () => {
+  for (const [detail, expected, options = {}] of [
+    [{ account: "OtherAccount" }, "ACCOUNT_MISMATCH"], [{ owner: "OtherAccount" }, "REQUEST_MISMATCH"],
+    [{ doi: "10.9999/other" }, "REQUEST_MISMATCH"], [{ id: "OtherRequest" }, "REQUEST_MISMATCH"],
+    [{ fileID: "OtherFile" }, "FILE_NOT_ACCEPTABLE"], [{ status: "reject" }, "FILE_NOT_ACCEPTABLE"],
+    [{ status: "withdraw" }, "FILE_NOT_ACCEPTABLE"], [{ otherAccepted: true }, "OTHER_FILE_ACCEPTED"],
+    [{ points: 30 }, "REQUEST_MISMATCH", { expectedPoints: 20 }],
+  ]) {
+    const { client, state } = completionFixture({ detail });
+    await assert.rejects(client.acceptFile({ ...COMPLETION, ...options }), { code: expected });assert.equal(state.postCount, 0);
+  }
+});
+
+test("a missing action button or changed acceptance protocol blocks every mutation", async () => {
+  for (const [detail, code] of [[{ canAccept: false }, "FILE_NOT_ACCEPTABLE"], [{ protocol: false }, "UNVERIFIED_CONTRACT"]]) {
+    const { client, state } = completionFixture({ detail });let hook = false;
+    await assert.rejects(client.acceptFile({ ...COMPLETION, beforeSend: async () => { hook = true; } }), { code });
+    assert.equal(hook, false);assert.equal(state.postCount, 0);
+  }
+});
+
+test("cancellation and account switching while persisting the hook prevent acceptance dispatch", async () => {
+  const first = completionFixture();let cancelled = false;
+  await assert.rejects(first.client.acceptFile({ ...COMPLETION, isCancelled: () => cancelled, beforeSend: async () => { cancelled = true; } }), { name: "AbortError", notSent: true });
+  assert.equal(first.state.postCount, 0);
+  const second = completionFixture();
+  await assert.rejects(second.client.acceptFile({ ...COMPLETION, beforeSend: async () => { second.state.account = "Account2"; } }), { code: "ACCOUNT_MISMATCH", notSent: true, definitivelyRejected: true });
+  assert.equal(second.state.postCount, 0);
+});
+
+test("lost acceptance responses are confirmed from the exact accepted file without a second POST", async () => {
+  const { client, state } = completionFixture({ post: async (spec, state) => { state.status = "accept";throw new Error("response lost"); } });
+  assert.equal((await client.acceptFile(COMPLETION)).accepted, true);
+  assert.equal((await client.acceptFile(COMPLETION)).alreadyAccepted, true);assert.equal(state.postCount, 1);
+});
+
+test("uncertain acceptance stays GET-only in memory and across a reconcile-only restart", async () => {
+  const fixture = completionFixture({ post: async () => { throw new Error("timeout"); } });
+  await assert.rejects(fixture.client.acceptFile(COMPLETION), { code: "ACCEPTANCE_UNKNOWN", reconcileRequired: true });
+  await assert.rejects(fixture.client.acceptFile(COMPLETION), { code: "ACCEPTANCE_UNKNOWN" });
+  const restarted = adapter.create({ model, parseHTML: parser, request: fixture.request });
+  await assert.rejects(restarted.acceptFile({ ...COMPLETION, reconcileOnly: true }), { code: "ACCEPTANCE_UNKNOWN" });
+  assert.equal(fixture.state.postCount, 1);
+  fixture.state.status = "accept";
+  assert.equal((await restarted.acceptFile({ ...COMPLETION, reconcileOnly: true })).accepted, true);assert.equal(fixture.state.postCount, 1);
+});
+
+test("code zero without fresh acceptance remains uncertain, and a definite rejection is separately identified", async () => {
+  const unknown = completionFixture({ post: async spec => response(spec.url, '{"code":0}') });
+  await assert.rejects(unknown.client.acceptFile(COMPLETION), { code: "ACCEPTANCE_UNKNOWN" });assert.equal(unknown.state.postCount, 1);
+  const rejected = completionFixture({ post: async spec => response(spec.url, '{"code":1,"msg":"rejected"}') });
+  await assert.rejects(rejected.client.acceptFile(COMPLETION), { code: "ACCEPTANCE_REJECTED", definitivelyRejected: true, reconcileRequired: false });
+});
+
+test("post-dispatch cancellation or account switch cannot confirm acceptance under the old account", async () => {
+  let cancelled = false;
+  const first = completionFixture({ post: async (spec, state) => { state.status = "accept";cancelled = true;return response(spec.url, '{"code":0}'); } });
+  await assert.rejects(first.client.acceptFile({ ...COMPLETION, isCancelled: () => cancelled }), { code: "ACCEPTANCE_UNKNOWN", reconcileRequired: true });
+  const second = completionFixture({ post: async (spec, state) => { state.status = "accept";state.account = "Account2";return response(spec.url, '{"code":0}'); } });
+  await assert.rejects(second.client.acceptFile(COMPLETION), { code: "ACCEPTANCE_UNKNOWN", reconcileRequired: true });
+  assert.equal(first.state.postCount, 1);assert.equal(second.state.postCount, 1);
+});
+
+test("only the accepted file's exact upload notifications are marked read with a singleton id array", async () => {
+  const { client, state } = completionFixture({ entries: [
+    { id: "Target", fileID: "File1" }, { id: "OtherFile", fileID: "File2" },
+    { id: "Reminder", title: "您的求助已完成（id=Request1）" }, { id: "ReadAlready", fileID: "File1", read: true },
+  ] });state.status = "accept";
+  const result = await client.markRequestMessagesRead(COMPLETION);
+  assert.equal(result.completed, true);assert.equal(result.done, true);assert.equal(result.marked, 1);assert.equal(result.matched, 2);
+  assert.deepEqual(result.messageIDs, ["Target"]);assert.equal(state.postCount, 1);
+  const sent = state.calls.find(value => value.method === "POST");
+  assert.equal(new URL(sent.url).pathname, "/my/set-message-read");
+  assert.deepEqual([...new URLSearchParams(sent.body)], [["id[]", "Target"], ["_csrf", "message-fixture-token"]]);
+  assert.ok(!state.calls.some(value => new URL(value.url).pathname === "/my/get-message"));
+  assert.equal(state.entries[1].read, undefined);assert.equal(state.entries[2].read, undefined);
+  assert.equal((await client.markRequestMessagesRead(COMPLETION)).marked, 0);assert.equal(state.postCount, 1);
+});
+
+test("unaccepted or wrong-owner files cannot mark messages, while an empty corresponding list finishes without mutation", async () => {
+  const waiting = completionFixture();
+  await assert.rejects(waiting.client.markRequestMessagesRead(COMPLETION), { code: "FILE_NOT_ACCEPTED" });assert.equal(waiting.state.postCount, 0);
+  const other = completionFixture({ detail: { owner: "OtherAccount" } });other.state.status = "accept";
+  await assert.rejects(other.client.markRequestMessagesRead(COMPLETION), { code: "REQUEST_MISMATCH" });assert.equal(other.state.postCount, 0);
+  const absent = completionFixture({ entries: [{ id: "Unrelated", fileID: "File2" }] });absent.state.status = "accept";
+  assert.equal((await absent.client.markRequestMessagesRead(COMPLETION)).done, true);assert.equal(absent.state.postCount, 0);
+});
+
+test("a message POST response alone does not mark completion, but timeout followed by fresh read state does", async () => {
+  const unchanged = completionFixture({ post: async spec => response(spec.url, '{"code":0}') });unchanged.state.status = "accept";
+  await assert.rejects(unchanged.client.markRequestMessagesRead(COMPLETION), { code: "MESSAGE_READ_UNKNOWN", reconcileRequired: true });assert.equal(unchanged.state.postCount, 1);
+  const lost = completionFixture({ post: async (spec, state) => { state.entries[0].read = true;throw new Error("lost response"); } });lost.state.status = "accept";
+  assert.equal((await lost.client.markRequestMessagesRead(COMPLETION)).done, true);assert.equal(lost.state.postCount, 1);
+});
+
+test("full contiguous notification pagination is checked before any selected-message mutation", async () => {
+  let read = false;const calls = [];
+  const client = adapter.create({ model, parseHTML: parser, request: async spec => {
+    calls.push(spec);const url = new URL(spec.url);
+    if (spec.method === "POST") { read = true;assert.equal(new URLSearchParams(spec.body).get("id[]"), "OnSecond");return response(spec.url, '{"code":0}'); }
+    if (url.pathname === "/my/assist-my") return response(spec.url, modernAccountHTML());
+    if (url.pathname === "/assist/detail") return response(spec.url, completionDetail({ status: "accept" }));
+    return response(spec.url, url.searchParams.get("page") === "2" ? notificationPage([{ id: "OnSecond", fileID: "File1", read }], { page: 2 }) : notificationPage([{ id: "Unrelated", fileID: "File2" }], { next: "/my/message?page=2" }));
+  } });
+  assert.equal((await client.markRequestMessagesRead(COMPLETION)).marked, 1);
+  const firstPost = calls.findIndex(value => value.method === "POST");
+  assert.ok(calls.slice(0, firstPost).some(value => value.url.endsWith("?page=2")));
+});
+
+test("malformed pagination, account mismatch and changed read protocol cannot mark an unrelated message", async () => {
+  for (const options of [{ malformedPagination: true }, { next: "/my/message?page=3" }, { next: "https://evil.test/my/message?page=2" }, { account: "OtherAccount" }, { protocol: false }]) {
+    const calls = [];
+    const client = adapter.create({ model, parseHTML: parser, request: async spec => {
+      calls.push(spec);assert.notEqual(spec.method, "POST");const url = new URL(spec.url);
+      if (url.pathname === "/my/assist-my") return response(spec.url, modernAccountHTML());
+      if (url.pathname === "/assist/detail") return response(spec.url, completionDetail({ status: "accept" }));
+      return response(spec.url, notificationPage([{ id: "Target", fileID: "File1" }], options));
+    } });
+    await assert.rejects(client.markRequestMessagesRead(COMPLETION));assert.ok(calls.every(value => value.method === "GET"));
+  }
+});
+
+test("first adoption requires a durable hook but accepted and reconciliation-only reads do not", async () => {
+  const { client, state } = completionFixture();
+  await assert.rejects(client.acceptFile({ ...COMPLETION, beforeSend: undefined }), { code: "PERSISTENCE_REQUIRED", notSent: true });
+  await assert.rejects(client.acceptFile({ ...COMPLETION, beforeSend: undefined, reconcileOnly: true }), { code: "ACCEPTANCE_UNKNOWN" });
+  assert.equal(state.postCount, 0);state.status = "accept";
+  assert.equal((await client.acceptFile({ ...COMPLETION, beforeSend: undefined })).alreadyAccepted, true);assert.equal(state.postCount, 0);
+});
+
+test("message account changes and cancellation after dispatch never report completion", async () => {
+  const changed = completionFixture({ post: async (spec, state) => { state.entries[0].read = true;state.account = "OtherAccount";return response(spec.url, '{"code":0}'); } });changed.state.status = "accept";
+  await assert.rejects(changed.client.markRequestMessagesRead(COMPLETION), { code: "MESSAGE_READ_UNKNOWN" });assert.equal(changed.state.postCount, 1);
+  let cancelled = false;
+  const paused = completionFixture({ post: async (spec, state) => { state.entries[0].read = true;cancelled = true;return response(spec.url, '{"code":0}'); } });paused.state.status = "accept";
+  await assert.rejects(paused.client.markRequestMessagesRead({ ...COMPLETION, isCancelled: () => cancelled }), { code: "MESSAGE_READ_UNKNOWN" });assert.equal(paused.state.postCount, 1);
+});
+
+test("cancelled completion starts no reads or writes, and interruption while scanning prevents message POST", async () => {
+  const stopped = completionFixture();
+  await assert.rejects(stopped.client.acceptFile({ ...COMPLETION, isCancelled: () => true }), { name: "AbortError" });
+  await assert.rejects(stopped.client.markRequestMessagesRead({ ...COMPLETION, isCancelled: () => true }), { name: "AbortError" });
+  assert.equal(stopped.state.calls.length, 0);
+  let cancelled = false;
+  const scanning = completionFixture({ onRequest: async spec => { if (new URL(spec.url).pathname === "/my/message") cancelled = true; } });scanning.state.status = "accept";
+  await assert.rejects(scanning.client.markRequestMessagesRead({ ...COMPLETION, isCancelled: () => cancelled }), { name: "AbortError" });assert.equal(scanning.state.postCount, 0);
+});
+
+test("the local-file guard runs again after final network preflight and blocks a changed attachment before POST", async () => {
+  let detailReads = 0, fileChanged = false, guarded = 0;
+  const { client, state } = completionFixture({ onRequest: async spec => {
+    if (new URL(spec.url).pathname === "/assist/detail" && ++detailReads === 2) fileChanged = true;
+  } });
+  await assert.rejects(client.acceptFile({ ...COMPLETION, beforeSend: async () => {
+    guarded++;if (fileChanged) throw new Error("Synthetic attachment changed during network refresh");
+  } }), { message: "Synthetic attachment changed during network refresh", notSent: true, definitivelyRejected: true });
+  assert.equal(guarded, 2);assert.equal(state.postCount, 0);
 });

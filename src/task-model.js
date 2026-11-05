@@ -110,6 +110,61 @@
     return date.toISOString();
   }
 
+  // A receipt is evidence for one verified download and its later website
+  // actions. Invalid evidence is discarded without losing the task history.
+  function normalizeAssistReceipt(input, task) {
+    if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+    try {
+      if (task.state !== "imported" || task.source !== "ablesci") return null;
+      for (const name of ["requestID", "fileID", "accountID"]) {
+        if (typeof input[name] !== "string" || !/^[A-Za-z0-9]{1,128}$/.test(input[name])) return null;
+      }
+      if (input.requestID !== task.requestID || !Number.isSafeInteger(input.attachmentID) ||
+          input.attachmentID <= 0 || input.attachmentID !== task.attachmentID) return null;
+      if (typeof input.sha256 !== "string" || !/^[a-f0-9]{64}$/i.test(input.sha256)) return null;
+      const doi = normalizeDOI(input.doi), title = text(input.title, 2000);
+      if (doi !== task.doi || !["doi", "title", "manual"].includes(input.verifiedBy) ||
+          (input.verifiedBy === "doi" && !doi) || (input.verifiedBy === "title" && !title)) return null;
+      if (!["pending", "accepted"].includes(input.adoption) || !["pending", "done"].includes(input.messages)) return null;
+      if (input.needsReconcile !== undefined && typeof input.needsReconcile !== "boolean") return null;
+      const verifiedAt = timestamp(input.verifiedAt, false);
+      const acceptedAt = timestamp(input.acceptedAt, true), readAt = timestamp(input.readAt, true);
+      const nextCheckAt = timestamp(input.nextCheckAt, true);
+      if (input.adoption === "accepted" ? !acceptedAt || acceptedAt < verifiedAt : acceptedAt !== null) return null;
+      if (input.messages === "done" ? input.adoption !== "accepted" || !readAt || readAt < acceptedAt : readAt !== null) return null;
+      if (nextCheckAt && nextCheckAt < verifiedAt) return null;
+      const attempts = input.attempts === undefined ? 0 : optionalInteger(input.attempts, "receipt attempts");
+      if (attempts === null) return null;
+      return {
+        requestID: input.requestID, fileID: input.fileID, accountID: input.accountID,
+        attachmentID: input.attachmentID, sha256: input.sha256.toLowerCase(), doi, title,
+        verifiedBy: input.verifiedBy, verifiedAt, adoption: input.adoption, messages: input.messages,
+        needsReconcile: input.adoption === "accepted" ? false : input.needsReconcile === true,
+        attempts, nextCheckAt, lastError: cleanError(input.lastError), acceptedAt, readAt,
+      };
+    }
+    catch (_) { return null; }
+  }
+
+  function normalizeAssistReview(input, task) {
+    if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+    try {
+      if (task.state !== "manual_review" || task.attachmentID !== null) return null;
+      for (const name of ["requestID", "fileID", "accountID"]) {
+        if (typeof input[name] !== "string" || !/^[A-Za-z0-9]{1,128}$/.test(input[name])) return null;
+      }
+      if (input.requestID !== task.requestID || typeof input.sha256 !== "string" || !/^[a-f0-9]{64}$/i.test(input.sha256)) return null;
+      const doi = normalizeDOI(input.doi);
+      if (doi !== task.doi) return null;
+      return {
+        requestID: input.requestID, fileID: input.fileID, accountID: input.accountID,
+        sha256: input.sha256.toLowerCase(), doi, title: text(input.title, 2000),
+        createdAt: timestamp(input.createdAt, false),
+      };
+    }
+    catch (_) { return null; }
+  }
+
   function currentTime(options) {
     const supplied = options && options.now;
     return timestamp(typeof supplied === "function" ? supplied() :
@@ -148,7 +203,7 @@
     const createdAt = timestamp(input.createdAt, false);
     const updatedAt = timestamp(input.updatedAt, false);
     if (updatedAt < createdAt) throw new TypeError("updatedAt precedes createdAt");
-    return {
+    const task = {
       schemaVersion: SCHEMA_VERSION,
       id,
       libraryID,
@@ -175,6 +230,9 @@
       nextCheckAt: timestamp(input.nextCheckAt, true),
       lastError: cleanError(input.lastError),
     };
+    task.assistReceipt = normalizeAssistReceipt(input.assistReceipt, task);
+    task.assistReview = normalizeAssistReview(input.assistReview, task);
+    return task;
   }
 
   function sanitizeTask(input) {
@@ -243,7 +301,20 @@
         !Object.prototype.hasOwnProperty.call(patch, "requestID")) {
       merged.requestID = patch.requestURL ? parseRequestURL(patch.requestURL).requestID : "";
     }
-    return normalizeTask(merged);
+    const updated = normalizeTask(merged);
+    const identityChanged = ["libraryID", "itemID", "itemKey", "doi", "title", "requestID"]
+      .some(field => updated[field] !== previous[field]);
+    const attachmentChanged = updated.attachmentID !== previous.attachmentID;
+    if ((previous.assistReceipt || previous.assistReview) && identityChanged || previous.assistReceipt && attachmentChanged) {
+      updated.assistReceipt = null; updated.assistReview = null;
+    }
+    else if (previous.assistReview && attachmentChanged) {
+      // Explicit confirmation replaces a retained review with newly verified
+      // attachment evidence in one write. Other attachment changes cannot.
+      if (patch.assistReview !== null || !Object.prototype.hasOwnProperty.call(patch, "assistReceipt")) updated.assistReceipt = null;
+      updated.assistReview = null;
+    }
+    return updated;
   }
 
   function sanitizeQueue(payload) {

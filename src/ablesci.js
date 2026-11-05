@@ -13,6 +13,10 @@
  * https://staticlocone.ablesci.com/assets/activity/20260915v1/activity.js
  * The last script treats /my/get-message as an unread-state mutation. Message
  * summaries therefore come only from the server-rendered GET /my/message list.
+ * Evidence read 2026-11-05: detail's .btn-handle-file posts assist_file_id,
+ * note and type to /assist/file-handle; accept completes the existing request
+ * and awards its bounty. The message page posts selected id[] values to
+ * /my/set-message-read. Protocol research and tests perform no live mutation.
  */
 (function (root) {
   "use strict";
@@ -149,7 +153,9 @@
         try { downloadURL = siteURL(anchor.getAttribute("href"), identity.requestURL); } catch (_) {}
       }
       const filename = shortText(anchor.textContent, 255);
-      files.push({ id: fileID, name: filename, fileID, filename, sizeText: shortText(info.querySelector(".size")?.textContent, 80), status, downloadURL, permissionRequired: forbidden });
+      const acceptButtons = entry.querySelectorAll('.btn-handle-file[data-type="accept"]');
+      const canAccept = acceptButtons.length === 1 && !acceptButtons[0].hasAttribute("disabled") && acceptButtons[0].getAttribute("aria-disabled") !== "true";
+      files.push({ id: fileID, name: filename, fileID, filename, sizeText: shortText(info.querySelector(".size")?.textContent, 80), status, downloadURL, permissionRequired: forbidden, canAccept });
     }
     const expired = /文件已从服务器自动删除|文件已删除|文件已过期|超过.*下载期限/.test(downloadText);
     let state = "waiting";
@@ -228,7 +234,11 @@
       for (const badge of titleNode.querySelectorAll(".message-badge-noread")) badge.remove();
       const read = row.classList.contains("message-readed"), unread = row.classList.contains("message-noread");
       if (read === unread) fail("STRUCTURE_CHANGED", "消息已读状态无法核实。");
-      messages.push({ id, title: shortText(titleNode.textContent, 240), text: "", createdAt: shortText(row.querySelector(".message-time")?.textContent, 80), url: ORIGIN + PATHS.messages + "#" + id, read, requestID: null });
+      const subjectText = shortText(titleNode.textContent, 2000);
+      // This ID is a FILE ID, not a request ID. Only this exact server-rendered
+      // notification template can be associated without opening/mutating it.
+      const upload = /^您的求助\s*\[[^\r\n]*\]\s*已有应助者上传了文件（id=([A-Za-z0-9]{1,128})）$/.exec(subjectText);
+      messages.push({ id, title: shortText(subjectText, 240), text: "", createdAt: shortText(row.querySelector(".message-time")?.textContent, 80), url: ORIGIN + PATHS.messages + "#" + id, read, requestID: null, fileID: upload?.[1] || null, kind: upload ? "assist_upload" : "other" });
     }
     return messages;
   }
@@ -279,6 +289,18 @@
   function defaultContracts(model) {
     return {
       ownRequests: parseOwnRequests,
+      acceptance(doc) {
+        const script = scriptText(doc);
+        if (!script.includes(".btn-handle-file") || !/['"]\/assist\/file-handle['"]/.test(script)
+          || !/['"]assist_file_id['"]\s*:\s*assist_file_id/.test(script) || !/['"]type['"]\s*:\s*type/.test(script)
+          || !/['"]note['"]\s*:\s*note/.test(script) || !/type\s*==\s*['"]accept['"]/.test(script)
+          || !/该求助将完结，应助者将获得积分/.test(script)) fail("UNVERIFIED_CONTRACT", "采纳文件的页面协议或悬赏结算说明发生变化，未提交采纳。");
+      },
+      messagesRead(doc) {
+        const script = scriptText(doc);
+        if (!script.includes("#update-message-read") || !script.includes("input[name=messageID]:checked")
+          || !/['"]\/my\/set-message-read['"]/.test(script) || !/['"]id['"]\s*:\s*check_arr/.test(script)) fail("UNVERIFIED_CONTRACT", "按指定消息标记已读的协议发生变化，未修改消息。");
+      },
       messages: {
         prepare: () => ({ url: ORIGIN + PATHS.messages, method: "GET", marksRead: false, responseType: "text" }),
         parse(response, parseHTML, { account }) {
@@ -389,7 +411,7 @@
   function create({ request, parseHTML, model = root.FulltextTaskModel, contracts = {}, intentStore = null, delay = ms => new Promise(resolve => setTimeout(resolve, ms)), now = () => Date.now(), lookupCacheMs = 20000 }) {
     if (typeof request !== "function" || typeof parseHTML !== "function" || !model) throw new TypeError("request, parseHTML and task model are required");
     contracts = { ...defaultContracts(model), ...contracts };
-    const inFlight = new Map();
+    const inFlight = new Map(), completionLocks = new Map(), uncertainAcceptances = new Set();
     const lookupCache = new Map(), lookupPending = new Map();
     const cacheTTL = Math.max(0, Math.min(60000, Number(lookupCacheMs) || 0));
     let cacheEpoch = 0, knownAccountID = null, accountPending = null, accountPage = null, firstListFingerprint = null;
@@ -547,7 +569,161 @@
         const identity = message.requestID ? requestIdentity(message.requestID) : null;
         let url = identity ? identity.requestURL : "";
         if (message.url) url = siteURL(message.url);
-        return { id: shortText(message.id, 128), title: shortText(message.title, 240), text: shortText(message.text, 1000), createdAt: shortText(message.createdAt, 80), url, read: message.read === true, requestID: identity?.requestID || null };
+        return { id: shortText(message.id, 128), title: shortText(message.title, 240), text: shortText(message.text, 1000), createdAt: shortText(message.createdAt, 80), url, read: message.read === true, requestID: identity?.requestID || null,
+          fileID: message.kind === "assist_upload" && /^[A-Za-z0-9]{1,128}$/.test(message.fileID || "") ? message.fileID : null, kind: message.kind === "assist_upload" ? "assist_upload" : "other" };
+      });
+    }
+
+    function completionOptions(value) {
+      if (!value || typeof value !== "object") throw new TypeError("Completion identity is required");
+      const identity = requestIdentity(value.requestID), fileID = value.fileID, accountID = value.accountID;
+      if (!/^[A-Za-z0-9]{1,128}$/.test(fileID || "") || !/^[A-Za-z0-9]{1,128}$/.test(accountID || "") || typeof value.doi !== "string") fail("INVALID_COMPLETION_IDENTITY", "采纳或已读操作缺少经过核实的请求、文件、账号及 DOI。");
+      const isCancelled = value.isCancelled === undefined ? (() => false) : value.isCancelled, beforeSend = value.beforeSend;
+      if (typeof isCancelled !== "function" || (beforeSend !== undefined && typeof beforeSend !== "function") || (value.reconcileOnly !== undefined && typeof value.reconcileOnly !== "boolean")) throw new TypeError("Invalid completion options");
+      const checkCancelled = () => {
+        if (!isCancelled()) return;
+        const error = new Error("完成操作已暂停，未继续发送。");error.name = "AbortError";error.notSent = true;throw error;
+      };
+      return { ...identity, fileID, accountID, doi: model.normalizeDOI(value.doi), expectedPoints: value.expectedPoints === undefined ? undefined : model.validatePoints(value.expectedPoints), isCancelled, checkCancelled, beforeSend, reconcileOnly: value.reconcileOnly === true };
+    }
+    async function completeExclusively(key, operation) {
+      const prior = completionLocks.get(key) || Promise.resolve();
+      const pending = prior.catch(() => {}).then(operation);completionLocks.set(key, pending);
+      try { return await pending; } finally { if (completionLocks.get(key) === pending) completionLocks.delete(key); }
+    }
+    async function ownedCompletionFile(options) {
+      options.checkCancelled();
+      const account = await requireAccount();options.checkCancelled();
+      if (account.accountID !== options.accountID) fail("ACCOUNT_MISMATCH", "当前登录账号与已下载文件的账号不一致，未处理采纳或消息。");
+      const result = await page(options.requestURL);options.checkCancelled();
+      if (new URL(result.response.url).pathname === PATHS.login) fail("LOGIN_REQUIRED", "核实采纳文件时登录已失效。");
+      if (accountScope(result.doc) !== options.accountID) fail("ACCOUNT_MISMATCH", "求助详情的登录账号与下载记录不一致。");
+      const detail = parseRequest(result.doc, result.response.url, model);
+      if (detail.requestID !== options.requestID || detail.ownerID !== options.accountID || detail.doi !== options.doi) fail("REQUEST_MISMATCH", "最新求助详情的文献或所属账号与下载记录不一致。");
+      if (options.expectedPoints !== undefined && detail.points !== options.expectedPoints) fail("REQUEST_MISMATCH", "求助悬赏积分与核实记录不一致，未提交采纳。");
+      if (new Set(detail.files.map(file => file.fileID)).size !== detail.files.length) fail("STRUCTURE_CHANGED", "求助详情包含重复文件标识，无法安全处理。");
+      const file = detail.files.find(entry => entry.fileID === options.fileID);
+      if (!file || ["reject", "withdraw"].includes(file.status)) fail("FILE_NOT_ACCEPTABLE", "该文件已移除、驳回或撤回，未提交采纳。");
+      if (detail.files.some(entry => entry.fileID !== options.fileID && entry.status === "accept")) fail("OTHER_FILE_ACCEPTED", "求助已经采纳了另一个文件，未重复处理。");
+      return { ...result, account, detail, file };
+    }
+    function mutationForm(doc, url, fields) {
+      const token = csrf(doc), body = new URLSearchParams();
+      for (const [name, value] of fields) body.append(name, String(value));
+      body.append(token.name, token.token);
+      return { url, method: "POST", body: body.toString(), headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8", "X-CSRF-Token": token.token, "X-Requested-With": "XMLHttpRequest", "Accept": "application/json" }, responseType: "text" };
+    }
+    function acceptanceConfirmed(options, detail, alreadyAccepted) {
+      return { accepted: true, alreadyAccepted, requestID: options.requestID, fileID: options.fileID, accountID: options.accountID, doi: detail.doi, points: detail.points };
+    }
+    async function acceptFile(value) {
+      const options = completionOptions(value), key = options.accountID + ":" + options.requestID;
+      return completeExclusively("accept:" + key, async () => {
+        let dispatched = false;
+        const previousUncertainty = options.reconcileOnly || uncertainAcceptances.has(key);
+        try {
+        let current = await ownedCompletionFile(options);
+        if (current.file.status === "accept") { uncertainAcceptances.delete(key);return acceptanceConfirmed(options, current.detail, true); }
+        if (options.reconcileOnly || uncertainAcceptances.has(key)) fail("ACCEPTANCE_UNKNOWN", "上次采纳结果仍待网站确认；本轮只核实状态，没有再次提交。", { reconcileRequired: true });
+        if (typeof options.beforeSend !== "function") fail("PERSISTENCE_REQUIRED", "采纳前必须先持久保存待核实标记，未发送采纳请求。");
+        const contract = requireContract("acceptance", value => typeof value === "function");
+        function requireAcceptable() {
+          if (current.detail.remoteState !== "uploaded" || current.file.status !== "waiting" || !current.file.canAccept || current.file.permissionRequired || !current.file.downloadURL) fail("FILE_NOT_ACCEPTABLE", "当前账号页面未提供这个待审核文件的采纳按钮，未提交采纳。");
+          contract(current.doc);csrf(current.doc);
+        }
+        requireAcceptable();options.checkCancelled();
+        // The app persists an uncertainty marker here BEFORE any remote write.
+        await options.beforeSend();options.checkCancelled();
+        current = await ownedCompletionFile(options);
+        if (current.file.status === "accept") return acceptanceConfirmed(options, current.detail, true);
+        requireAcceptable();options.checkCancelled();
+        // The final account/detail refresh can take time. Re-run the app's
+        // idempotent local-file check and durable marker immediately before
+        // dispatch, with no further network await between this hook and POST.
+        await options.beforeSend();options.checkCancelled();
+        const prepared = mutationForm(current.doc, "/assist/file-handle", [["assist_file_id", options.fileID], ["note", ""], ["type", "accept"]]);
+        uncertainAcceptances.add(key);dispatched = true;
+        let result = null;
+        try { result = parseJSON(await send(prepared, true)); } catch (_) {}
+        // A transport/JSON success alone never proves adoption. Reconcile the
+        // exact file under a fresh account check, including after a timeout.
+        try {
+          current = await ownedCompletionFile(options);
+          if (current.file.status === "accept") { uncertainAcceptances.delete(key);return acceptanceConfirmed(options, current.detail, false); }
+        } catch (_) { fail("ACCEPTANCE_UNKNOWN", "采纳请求已发出，但当前账号或文件状态无法再次核实；不会自动重复提交。", { reconcileRequired: true }); }
+        if (result?.code === 1 && !result.subcode && current.file.status === "waiting") {
+          uncertainAcceptances.delete(key);
+          const error = new AbleSciError("ACCEPTANCE_REJECTED", "网站明确拒绝本次采纳，文件仍待审核，请在网站核对。");error.definitivelyRejected = true;error.reconcileRequired = false;throw error;
+        }
+        fail("ACCEPTANCE_UNKNOWN", "采纳结果尚未在文件详情中确认；保留本地 PDF，不会自动重复提交。", { reconcileRequired: true });
+        } catch (error) {
+          // A failed fresh preflight after beforeSend must not leave a newly
+          // journaled marker stuck forever. Never clear an older uncertain write.
+          if (!dispatched && !previousUncertainty && !error.reconcileRequired && error.name !== "AbortError") { error.notSent = true;error.definitivelyRejected = true; }
+          throw error;
+        }
+      });
+    }
+    async function completionMessagePage(url, options) {
+      options.checkCancelled();
+      const target = new URL(siteURL(url));
+      if (target.pathname !== PATHS.messages || target.hash || [...target.searchParams.keys()].some(name => name !== "page") || (target.searchParams.has("page") && !/^[1-9]\d*$/.test(target.searchParams.get("page")))) fail("INCOMPLETE_MESSAGES", "消息分页地址无法核实，未标记消息。");
+      const result = await page(target.href);options.checkCancelled();
+      if (result.response.url !== target.href) fail("INCOMPLETE_MESSAGES", "消息分页发生未核实跳转，未标记消息。");
+      const messages = parseMessages(result.doc, { accountID: options.accountID }), pagination = result.doc.querySelector(".pages .pagination");
+      let nextURL = null;
+      if (pagination) {
+        const next = pagination.querySelector("li.next");
+        if (!next) fail("INCOMPLETE_MESSAGES", "消息分页缺少下一页状态，未标记消息。");
+        if (!next.classList.contains("disabled")) {
+          const anchor = next.querySelector("a[href]");
+          if (!anchor) fail("INCOMPLETE_MESSAGES", "消息下一页入口无法核实。");
+          const nextTarget = new URL(siteURL(anchor.getAttribute("href"), target.href));
+          if (nextTarget.pathname !== PATHS.messages || nextTarget.hash || [...nextTarget.searchParams.keys()].some(name => name !== "page") || nextTarget.searchParams.getAll("page").length !== 1 || Number(nextTarget.searchParams.get("page")) !== Number(target.searchParams.get("page") || 1) + 1) fail("INCOMPLETE_MESSAGES", "消息分页不连续，未标记消息。");
+          nextURL = nextTarget.href;
+        }
+      }
+      return { ...result, messages, nextURL, pageURL: target.href };
+    }
+    async function completionMessages(options) {
+      const messages = [], seen = new Set();let nextURL = ORIGIN + PATHS.messages;
+      for (let count = 0; nextURL && count < 50; count++) {
+        if (seen.has(nextURL)) fail("INCOMPLETE_MESSAGES", "消息分页循环，未标记消息。");seen.add(nextURL);
+        const result = await completionMessagePage(nextURL, options);
+        for (const message of result.messages) {
+          if (messages.some(prior => prior.id === message.id)) fail("INCOMPLETE_MESSAGES", "消息分页发生重复或变化，请稍后重试。");
+          messages.push({ ...message, pageURL: result.pageURL });
+        }
+        nextURL = result.nextURL;
+      }
+      if (nextURL) fail("INCOMPLETE_MESSAGES", "消息列表超出本轮核对范围，未标记消息。");
+      return messages;
+    }
+    async function markRequestMessagesRead(value) {
+      const options = completionOptions(value), key = options.accountID + ":" + options.requestID;
+      return completeExclusively("messages:" + key, async () => {
+        const owned = await ownedCompletionFile(options);
+        if (owned.file.status !== "accept") fail("FILE_NOT_ACCEPTED", "对应文件尚未确认采纳，未修改上传通知。");
+        const isRelated = message => message.kind === "assist_upload" && message.fileID === options.fileID;
+        const candidates = (await completionMessages(options)).filter(message => isRelated(message) && !message.read), markedIDs = [];
+        const contract = requireContract("messagesRead", value => typeof value === "function");
+        for (const candidate of candidates) {
+          const current = await completionMessagePage(candidate.pageURL, options), message = current.messages.find(entry => entry.id === candidate.id);
+          if (!message || !isRelated(message)) fail("MESSAGE_MISMATCH", "对应上传通知已移动或变化，未修改其他消息。");
+          if (message.read) continue;
+          contract(current.doc);options.checkCancelled();
+          // Encode the observed jQuery single-selection array explicitly. Never
+          // send type=all, open unrelated message bodies or infer request IDs.
+          try { await send(mutationForm(current.doc, "/my/set-message-read", [["id[]", message.id]]), true); } catch (_) {}
+          try {
+            const confirmed = (await completionMessages(options)).find(entry => entry.id === message.id);
+            if (!confirmed || !isRelated(confirmed) || !confirmed.read) throw new Error("unconfirmed");
+          } catch (_) { fail("MESSAGE_READ_UNKNOWN", "对应消息的已读状态尚未核实，未修改其他通知。", { retryable: true, reconcileRequired: true }); }
+          markedIDs.push(message.id);
+        }
+        const after = await completionMessages(options);
+        if (after.some(message => isRelated(message) && !message.read)) fail("MESSAGE_READ_PENDING", "该文件又有未读上传通知，下次继续核对。", { retryable: true });
+        return { completed: true, done: true, requestID: options.requestID, fileID: options.fileID, accountID: options.accountID, matched: after.filter(isRelated).length, marked: markedIDs.length, messageIDs: markedIDs };
       });
     }
 
@@ -680,10 +856,10 @@
       const url = new URL(resolved.url);
       const allowed = new Set([ORIGIN, ...(contracts.downloadOrigins || [])]);
       if (url.protocol !== "https:" || url.username || url.password || !allowed.has(url.origin)) fail("INVALID_DOWNLOAD_URL", "下载地址不属于已核实的下载服务器。");
-      return { requestID: detail.requestID, fileID: file.fileID, filename: resolved.filename || file.filename, url: url.href, method: "GET", resolved: true, costPoints: 0, expectedSize: resolved.expectedSize || null, allowedOrigins: resolved.allowedOrigins || [url.origin], route: selectedRoute, transport, serverID: resolved.serverID || "", normalServerIndex: resolved.normalServerIndex ?? normalServerIndex, normalServerCount: resolved.normalServerCount || 1, timeoutMs: downloadTimeout(resolved.expectedSize), retryable: true, canFallback: selectedRoute === "highspeed" && transport === "vip" && resolved.canFallback === true, entitlement: resolved.entitlement || "normal-requested", ...(transport === "cdn" && resolved.allowedRedirectDomain === "ablesci.com" ? { allowedRedirectDomain: "ablesci.com" } : {}) };
+      return { requestID: detail.requestID, fileID: file.fileID, accountID: account.accountID, filename: resolved.filename || file.filename, url: url.href, method: "GET", resolved: true, costPoints: 0, expectedSize: resolved.expectedSize || null, allowedOrigins: resolved.allowedOrigins || [url.origin], route: selectedRoute, transport, serverID: resolved.serverID || "", normalServerIndex: resolved.normalServerIndex ?? normalServerIndex, normalServerCount: resolved.normalServerCount || 1, timeoutMs: downloadTimeout(resolved.expectedSize), retryable: true, canFallback: selectedRoute === "highspeed" && transport === "vip" && resolved.canFallback === true, entitlement: resolved.entitlement || "normal-requested", ...(transport === "cdn" && resolved.allowedRedirectDomain === "ablesci.com" ? { allowedRedirectDomain: "ablesci.com" } : {}) };
     }
 
-    return Object.freeze({ getAccount, listMessages, findExistingRequest, submitRequest, getRequest, getDownload });
+    return Object.freeze({ getAccount, listMessages, findExistingRequest, submitRequest, getRequest, getDownload, acceptFile, markRequestMessagesRead });
   }
 
   const api = Object.freeze({ ORIGIN, PATHS, AbleSciError, parseAccount, parseRequest, parseOwnRequests, parseMessages, parseDownloadPage, parseDownloadSettings, create });
