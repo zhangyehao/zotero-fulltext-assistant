@@ -108,7 +108,7 @@ npm test
 python build.py --output dist
 ```
 
-测试包括 Node 行为检查、设置页 DOM 回归及发布文件检查；具体结果以对应提交的 CI 和版本验收记录为准。模拟测试不能代替真实网站端到端验证。构建产物与发行步骤见 [维护者发布指南](docs/PUBLISHING.md)。
+测试包括 Node 行为检查、设置页 DOM 回归及发布文件检查；具体结果以对应提交的 CI 和版本验收记录为准。模拟测试不能代替真实网站端到端验证。构建产物与发行步骤见 [维护者发布指南](docs/PUBLISHING.md)；后续开发和发版前请读 [更新注意事项与踩坑记录](docs/UPDATING.md)。
 
 [0.8.0 更新说明](docs/release-v0.8.0.md) · [历史文档索引](docs/README.md) · [0.7.2 及以前完整开发记录](docs/development-history-v0.7.2.md)
 

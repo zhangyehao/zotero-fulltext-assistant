@@ -7,6 +7,7 @@
 - [浏览器下载、目录配置与 PDF 核对](browser-downloads.md)
 - [0.8.0 更新说明](release-v0.8.0.md) · [本版验收记录](verification-v0.8.0.md)
 - [维护者发布与更新指南](PUBLISHING.md)
+- [后续更新注意事项与踩坑记录](UPDATING.md)
 - [隐私与本地数据](../PRIVACY.md)
 - [问题排查与反馈](../SUPPORT.md)
 
