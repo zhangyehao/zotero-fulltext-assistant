@@ -1,0 +1,50 @@
+name: Publish reviewed stable release
+
+# A tag only prepares a draft. Publication requires this explicit dispatch and
+# the XPI hash recorded after testing the candidate in Zotero.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Reviewed existing release tag (for example v0.8.0)
+        required: true
+        type: string
+      expected_xpi_sha256:
+        description: Exact SHA256 of the candidate tested in Zotero
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - name: Install test dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Run tests
+        run: npm test
+      - name: Rebuild the exact reviewed tag
+        run: python build.py --output dist
+      - name: Verify candidate bytes and explicitly publish stable latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          REVIEWED_XPI_SHA256: ${{ inputs.expected_xpi_sha256 }}
+        run: python scripts/release.py publish --tag "$RELEASE_TAG" --directory dist --expected-sha256 "$REVIEWED_XPI_SHA256"
+

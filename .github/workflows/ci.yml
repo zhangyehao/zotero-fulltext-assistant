@@ -26,13 +26,18 @@ jobs:
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Run model, adapter and interface tests
         run: npm test
-      - name: Build XPI and source archive
-        run: python build.py --output dist
+      - name: Build and verify all release assets
+        run: |
+          python build.py --output dist
+          python scripts/release.py verify-local --directory dist
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: zotero-fulltext-assistant-${{ github.sha }}
           path: |
             dist/*.xpi
             dist/*-source.zip
+            dist/updates.json
+            dist/SHA256SUMS
+            dist/release-manifest.json
           if-no-files-found: error
           retention-days: 14

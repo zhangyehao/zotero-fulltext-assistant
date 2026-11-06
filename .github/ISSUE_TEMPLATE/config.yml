@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 使用与排查 / Usage and troubleshooting
+    url: https://github.com/zhangyehao/zotero-fulltext-assistant/blob/main/SUPPORT.md
+    about: 常见问题、反馈内容和隐私提醒。
+  - name: 下载安装 / Download
+    url: https://github.com/zhangyehao/zotero-fulltext-assistant/releases/latest
+    about: 从正式 Release 下载 Zotero XPI。
