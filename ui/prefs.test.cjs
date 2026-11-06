@@ -14,6 +14,7 @@ new vm.Script(script);
 const { document, window } = parseHTML("<html><body><div id='preference-container'></div></body></html>");
 let renderListener;
 let subscriptions = 0;
+let preferencesOpenedCalls = 0;
 const calls = [];
 let bindingCandidates = [];
 let cancelLocalImport = false;
@@ -30,6 +31,9 @@ const app = {
   localize: root => i18n.apply(root, model.settings.language),
   copyText: async value => { calls.push(["copy", value]); },
   subscribe: fn => { renderListener = fn; subscriptions++; return () => { subscriptions--; }; },
+  preferencesOpened: async () => { preferencesOpenedCalls++; },
+  refreshCheckIn: async options => { calls.push(["refreshCheckIn", { ...options }]);renderListener();return { ...model.checkIn }; },
+  openCheckIn: async () => { calls.push(["openCheckIn"]); },
   saveCredentialsAndLogin: async account => {
     calls.push(["login", { ...account }]);
     model.session = { status: "pending_login", username: account.username, hasSavedPassword: true, message: "请在网页完成登录" };
@@ -56,6 +60,12 @@ const app = {
     renderListener(); return { added, directories: model.settings.downloadDirectories };
   },
   checkTask: async id => calls.push(["check", id]),
+  openSubmissionReview: async id => calls.push(["openSubmissionReview", id]),
+  inspectDOI: async id => {
+    calls.push(["inspectDOI", id]);const task = model.tasks.find(task => task.id === id);
+    task.doiCheck = { expectedDOI: task.doi, receivedDOI: task.doi, expectedTitle: task.title, receivedTitle: "<img src=x onerror=bad> 网站标题", reason: "match", checkedAt: "2026-11-06T09:00:00Z" };
+    renderListener();return { ...task.doiCheck };
+  },
   retryAssistCompletion: async id => calls.push(["assistCompletion", id]),
   verifyAssistCompletion: async id => { calls.push(["verifyAssistCompletion", id]); return { completed: false, message: "原文件核验结果已更新。" }; },
   openRequest: async id => calls.push(["open", id]),
@@ -204,24 +214,35 @@ async function publisherControls(taskId = "publisher-task", overrides = {}) {
   return { app, calls, get: id => document.getElementById(id), close: () => handlers.unload(), languageSubscriptions: () => languageListeners.size,
     setLanguage(value) { language = value;for (const listener of languageListeners) listener(); }, document, browser };
 }
-async function siteControls() {
+async function siteControls(mode = "request") {
   const markup = fs.readFileSync(path.join(__dirname, "browser.xhtml"), "utf8").replace(/html:/g, "").replace(/<script([^>]*?)\s*\/>/g, "<script$1></script>");
   const { document, window } = parseHTML("<html><body>" + markup + "</body></html>");
   const handlers = {}, listeners = new Set();let language = "zh-CN", detached = false;
   const app = { localize: root => i18n.apply(root, language), subscribe: listener => { listeners.add(listener);return () => listeners.delete(listener); },
     attachBrowser: async () => ({ currentURI: { spec: "https://www.ablesci.com/assist/detail?id=LocalOnly" } }), detachBrowser: () => { detached = true; }, inspectActivePage: async () => {} };
   const chromeWindow = { document, MutationObserver: window.MutationObserver,
-    arguments: [{ wrappedJSObject: { app, url: "https://www.ablesci.com/assist/detail?id=LocalOnly", mode: "request" } }],
+    arguments: [{ wrappedJSObject: { app, url: "https://www.ablesci.com/assist/detail?id=LocalOnly", mode } }],
     addEventListener(type, callback) { handlers[type] = callback; }, setInterval: () => 1, clearInterval() {} };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, "browser.js"), "utf8"), { window: chromeWindow, document, Date });
   await handlers.load();await flush();
   return { get: id => document.getElementById(id), setLanguage(value) { language = value;for (const listener of listeners) listener(); }, close: () => handlers.unload(), detached: () => detached, languageSubscriptions: () => listeners.size };
 }
 (async () => {
+  await flush();assert.equal(preferencesOpenedCalls, 1, "duplicate mounts perform the opening check only once");
   assert.equal(root.dataset.activePage, "tasks");
   assert.equal(get("fta-pref-tabs").getAttribute("role"), "tablist");
   assert.equal(get("fta-pref-tabs").getAttribute("aria-orientation"), "horizontal");
   const pages = ["tasks", "settings", "account", "messages"];
+  assert.deepEqual([...get("fta-pref-tabs").querySelectorAll("button")].map(node => node.textContent), ["任务", "设置", "科研通设置", "消息"]);
+  for (const id of ["fta-pref-language", "fta-pref-download-directories", "fta-pref-publisher-session"]) assert.ok(pagePanel("settings").contains(get(id)), id + " belongs in general settings");
+  for (const id of ["fta-pref-account-form", "fta-pref-points", "fta-pref-poll", "fta-pref-site-minimum", "fta-pref-auto-download", "fta-pref-save-settings"]) assert.ok(pagePanel("account").contains(get(id)), id + " belongs in AbleSci settings");
+  assert.equal(get("fta-pref-site-minimum").checked, false, "minimum-reward opt-in defaults to off for old settings");
+  assert.equal(get("fta-pref-checkin-reminder").checked, true, "scheduled status checks default to enabled");
+  assert.ok(pagePanel("account").contains(get("fta-pref-checkin-state")));
+  assert.match(get("fta-pref-checkin-note").textContent, /运行时每天 6:00 检查/);
+  assert.match(get("fta-pref-checkin-note").textContent, /签到请在官方网页自行完成/);
+  assert.equal(get("fta-pref-site-minimum").getAttribute("aria-describedby"), "fta-pref-site-minimum-note");
+  assert.match(get("fta-pref-site-minimum-note").textContent, /实际积分可能更高/);
   for (const page of pages) {
     assert.equal(pageTab(page).getAttribute("aria-controls"), pagePanel(page).id);
     assert.equal(pagePanel(page).getAttribute("aria-labelledby"), pageTab(page).id);
@@ -369,6 +390,67 @@ async function siteControls() {
   delete model.publisherSession;
   renderListener();
   assert.equal(get("fta-pref-publisher-session").hidden, true);
+  // Balance and check-in are read-only account status, independent of local
+  // spending. Old dates or unverified credit must not be presented as today.
+  const checkInDay = date => date.getFullYear() + "-" + String(date.getMonth() + 1).padStart(2, "0") + "-" + String(date.getDate()).padStart(2, "0");
+  const todayDate = new Date(), priorDate = new Date();priorDate.setDate(priorDate.getDate() - 1);
+  const todayDay = checkInDay(todayDate), yesterdayDay = checkInDay(priorDate);
+  const sessionBeforeCheckIn = { ...model.session };
+  model.session.status = "authenticated";
+  model.checkIn = { state: "loaded", day: todayDay, signed: false, balance: 120, reward: null, rewardVerified: false, checkedAt: todayDate.toISOString(), message: "" };renderListener();
+  assert.equal(get("fta-pref-checkin-balance").textContent, "120 积分");
+  assert.equal(get("fta-pref-checkin-state").textContent, "今日未签到");
+  assert.equal(get("fta-pref-checkin-reward").textContent, "—");
+  for (const state of ["loaded", "error"]) {
+    model.checkIn.state = state;model.checkIn.signed = null;renderListener();
+    assert.equal(get("fta-pref-checkin-state").textContent, "今日状态待核实", "a completed lookup without positive evidence is unverified, not unqueried");
+    assert.equal(get("fta-pref-checkin-reward").textContent, "—");
+  }
+  model.checkIn.state = "loaded";model.checkIn.signed = false;renderListener();
+  const spendTotalBeforeCheckIn = get("fta-pref-spending-total").textContent;
+  const beforeCheckInActions = calls.length;
+  get("fta-pref-checkin-open").click();await flush();
+  assert.equal(model.checkIn.signed, false, "opening the website never implies successful check-in");
+  get("fta-pref-checkin-refresh").click();await flush();
+  assert.deepEqual(calls.slice(beforeCheckInActions), [["openCheckIn"], ["refreshCheckIn", { force: true }]], "UI has no automatic check-in or reward-claim action");
+  model.checkIn.signed = true;model.checkIn.reward = 5;renderListener();
+  assert.equal(get("fta-pref-checkin-state").textContent, "今日已签到");
+  assert.equal(get("fta-pref-checkin-reward").textContent, "到账待核实");
+  assert.equal(get("fta-pref-checkin-open").textContent, "查看签到页面");
+  model.checkIn.rewardVerified = true;renderListener();
+  assert.equal(get("fta-pref-checkin-reward").textContent, "已到账 5 积分");
+  assert.equal(get("fta-pref-spending-total").textContent, spendTotalBeforeCheckIn, "check-in income and current balance never enter spending totals");
+  model.checkIn.day = yesterdayDay;renderListener();
+  assert.equal(get("fta-pref-checkin-state").textContent, "今日状态待刷新");
+  assert.equal(get("fta-pref-checkin-reward").textContent, "—");
+  assert.equal(get("fta-pref-checkin-open").textContent, "去网页签到");
+  assert.equal(get("fta-pref-checkin-balance").textContent, "120 积分", "a cached balance remains paired with its query timestamp");
+  assert.match(get("fta-pref-checkin-refreshed").textContent, /最近查询/);
+  model.checkIn.day = todayDay;model.checkIn.state = "idle";model.checkIn.signed = null;model.checkIn.checkedAt = priorDate.toISOString();renderListener();
+  assert.equal(get("fta-pref-checkin-balance-label").textContent, "上次查询余额", "today's snapshot day cannot relabel yesterday's cached balance as current");
+  model.checkIn.state = "checking";renderListener();
+  assert.equal(get("fta-pref-checkin-balance-label").textContent, "上次查询余额", "a new check does not refresh a cached balance until it completes");
+  model.checkIn.checkedAt = todayDate.toISOString();model.checkIn.signed = true;
+  model.checkIn.state = "checking";renderListener();
+  assert.equal(get("fta-pref-checkin-refresh").disabled, true);
+  assert.equal(get("fta-pref-checkin-state").textContent, "正在查询…");
+  model.checkIn.state = "error";model.checkIn.message = "签到状态暂时无法核实，请打开科研通网页查看。";renderListener();
+  assert.equal(get("fta-pref-checkin-message").dataset.error, "true");
+  assert.equal(get("fta-pref-checkin-balance-label").textContent, "上次查询余额");
+  model.checkIn.day = todayDay;model.checkIn.state = "loaded";model.checkIn.message = "";
+  model.settings.language = "en";renderListener();
+  assert.equal(get("fta-pref-checkin-state").textContent, "Checked in today");
+  assert.equal(get("fta-pref-checkin-reward").textContent, "5 points credited");
+  model.settings.language = "zh-TW";renderListener();assert.equal(get("fta-pref-checkin-state").textContent, "今日已簽到");
+  model.settings.language = "zh-CN";
+  model.session.status = "signed_out";renderListener();
+  assert.equal(get("fta-pref-checkin-balance").textContent, "—");
+  assert.equal(get("fta-pref-checkin-reward").textContent, "—");
+  assert.equal(get("fta-pref-checkin-state").textContent, "登录后查询", "sign-out hides former account values even before the next check");
+  assert.equal(get("fta-pref-checkin-refresh").disabled, true, "signed-out refresh cannot imply that a query occurred");
+  const beforeSignedOutRefresh = calls.length;get("fta-pref-checkin-refresh").click();await flush();assert.equal(calls.length, beforeSignedOutRefresh);
+  model.session = sessionBeforeCheckIn;delete model.checkIn;renderListener();
+  assert.equal(preferencesOpenedCalls, 1, "polling and tab navigation do not repeat the mount check");
   submit("fta-pref-account-form"); await flush();
   assert.equal(calls.filter(c => c[0] === "login").length, 0);
   input("fta-pref-username", "tester@example.invalid");
@@ -401,8 +483,8 @@ async function siteControls() {
   get("fta-pref-auto-download").checked = false;
   get("fta-pref-auto-download").dispatchEvent(new window.Event("input"));
   pageTab("settings").click();
-  assert.equal(pageTab("settings").dataset.dirty, "true");
-  assert.match(pageTab("settings").getAttribute("aria-label"), /未保存/);
+  assert.equal(pageTab("account").dataset.dirty, "true");
+  assert.match(pageTab("account").getAttribute("aria-label"), /未保存/);
   const draftPointsNode = get("fta-pref-points");
   const beforeDraftNavigation = calls.length;
   for (const page of ["messages", "account", "tasks", "settings"]) pageTab(page).click();
@@ -418,10 +500,30 @@ async function siteControls() {
   assert.equal(get("fta-pref-points").value, "25", "a new batch can open tasks without discarding an unsaved settings draft");
   model.captureSummary = null;
   submit("fta-pref-settings-form"); await flush();
-  assert.equal(pageTab("settings").dataset.dirty, "false");
+  assert.equal(pageTab("account").dataset.dirty, "false");
   assert.equal(model.settings.points, 25);
   assert.equal(model.settings.pollSeconds, 120);
   assert.equal(model.settings.autoDownload, false);
+  assert.equal(model.settings.checkInReminder, true);
+  get("fta-pref-checkin-reminder").checked = false;get("fta-pref-checkin-reminder").dispatchEvent(new window.Event("input"));
+  pageTab("tasks").click();pageTab("account").click();renderListener();
+  assert.equal(get("fta-pref-checkin-reminder").checked, false, "reminder draft survives navigation and polling");
+  assert.equal(model.settings.checkInReminder, true, "draft reminder changes have no immediate scheduling effect");
+  submit("fta-pref-settings-form");await flush();
+  assert.equal(model.settings.checkInReminder, false);
+  assert.equal(model.settings.acceptSiteMinimum, false);
+  get("fta-pref-site-minimum").checked = true;
+  get("fta-pref-site-minimum").dispatchEvent(new window.Event("input"));
+  pageTab("messages").click(); pageTab("settings").click(); renderListener();
+  assert.equal(get("fta-pref-site-minimum").checked, true, "minimum-reward draft survives updates and navigation");
+  assert.equal(model.settings.acceptSiteMinimum, false, "typing a cost policy does not silently activate it");
+  assert.equal(pageTab("account").dataset.dirty, "true", "unsaved AbleSci changes are marked on the AbleSci tab");
+  submit("fta-pref-settings-form"); await flush();
+  assert.equal(model.settings.acceptSiteMinimum, true, "saving explicitly enables automatic minimum reward");
+  get("fta-pref-site-minimum").checked = false;
+  get("fta-pref-site-minimum").dispatchEvent(new window.Event("input"));
+  submit("fta-pref-settings-form"); await flush();
+  assert.equal(model.settings.acceptSiteMinimum, false);
   const savedCount = calls.filter(c => c[0] === "save").length;
   for (const invalid of ["0", "1.5", "10001", ""]) { input("fta-pref-points", invalid); submit("fta-pref-settings-form"); await flush(); }
   assert.equal(calls.filter(c => c[0] === "save").length, savedCount);
@@ -756,11 +858,11 @@ async function siteControls() {
     { id: "route-unknown", title: "未知线路", itemID: 614, attachmentID: 614, state: "imported", source: "ablesci", downloadRoute: "__proto__", completedAt: "2026-11-04T05:00:00Z" }
   ];
   renderListener();
-  assert.match(taskRow("route-normal").querySelector(".fta-row-meta").textContent, /来源：科研通 · 普通线路/);
-  assert.match(taskRow("route-highspeed").querySelector(".fta-row-meta").textContent, /来源：科研通 · 免积分高速/);
+  assert.match(taskRow("route-normal").querySelector(".fta-row-meta").textContent, /来源：科研通 · 积分待核实 · 普通线路/);
+  assert.match(taskRow("route-highspeed").querySelector(".fta-row-meta").textContent, /来源：科研通 · 积分待核实 · 免积分高速/);
   for (const id of ["route-old", "route-local", "route-unknown"]) assert.doesNotMatch(taskRow(id).querySelector(".fta-row-meta").textContent, /普通线路|免积分高速|__proto__|\[object Object\]/, "only recorded AbleSci routes are shown");
   filterButton("unfinished").click();
-  model.tasks = [{ id: "route-running", title: "正在获取应助文件", itemID: 620, state: "downloading", requestID: "RouteReady", requestedPoints: 10, downloadRoute: "highspeed" }];
+  model.tasks = [{ id: "route-running", title: "正在获取应助文件", itemID: 620, state: "downloading", requestID: "RouteReady", requestedPoints: 10, pointsVerified: true, downloadRoute: "highspeed" }];
   renderListener();
   assert.match(taskRow("route-running").querySelector(".fta-row-meta").textContent, /来源：科研通 · 免积分高速/);
   assert.match(taskRow("route-running").querySelector(".fta-row-meta").textContent, /悬赏 10 积分/);
@@ -915,7 +1017,7 @@ async function siteControls() {
   assert.equal(get("fta-pref-messages-state").hidden, false);
   assert.equal(get("fta-pref-messages-state").dataset.error, "true");
   assert.match(get("fta-pref-messages-state").textContent, /暂时无法读取消息/);
-  const assistTaskBase = { state: "imported", source: "ablesci", itemID: 800, attachmentID: 801, requestID: "ReceiptFixture", requestURL: "https://www.ablesci.com/assist/detail?id=ReceiptFixture", doi: "10.1234/receipt", requestedPoints: 10 };
+  const assistTaskBase = { state: "imported", source: "ablesci", itemID: 800, attachmentID: 801, requestID: "ReceiptFixture", requestURL: "https://www.ablesci.com/assist/detail?id=ReceiptFixture", doi: "10.1234/receipt", requestedPoints: 10, pointsVerified: true };
   model.tasks = [
     { ...assistTaskBase, id: "receipt-pending", title: "全文已入库，待采纳", lastError: "旧下载错误不应再显示", assistReceipt: { adoption: "pending", messages: "pending", needsReconcile: false, lastError: "采纳暂时失败 <img src=x onerror=bad>", nextCheckAt: "2026-11-05T14:00:00Z" } },
     { ...assistTaskBase, id: "receipt-read", title: "等待对应消息已读", assistReceipt: { adoption: "accepted", messages: "pending", needsReconcile: false, lastError: "" } },
@@ -949,9 +1051,14 @@ async function siteControls() {
   assert.equal(badgeText("receipt-pending"), "已获取 · 待采纳");
   assert.equal(badgeText("receipt-done"), "已采纳 · 对应消息已读");
   assert.equal(badgeText("receipt-legacy"), "已获取", "legacy history never claims adoption without a receipt");
+  assert.match(taskRow("receipt-done").querySelector(".fta-row-meta").textContent, /来源：科研通 · 已支出 10 积分/);
+  assert.match(taskRow("receipt-pending").querySelector(".fta-row-meta").textContent, /来源：科研通 · 悬赏 10 积分（待采纳）/);
+  model.tasks.find(task => task.id === "receipt-done").pointsVerified = false; renderListener();
+  assert.match(taskRow("receipt-done").querySelector(".fta-row-meta").textContent, /来源：科研通 · 积分待核实/);
+  assert.doesNotMatch(taskRow("receipt-done").querySelector(".fta-row-meta").textContent, /已支出 10|悬赏 10/);
   assert.equal(labels("receipt-done").includes("重试采纳与已读"), false);
   assert.equal(labels("receipt-legacy").includes("重试采纳与已读"), false);
-  const legacyVerify = receiptButton("receipt-legacy", "核验并补采纳");
+  const legacyVerify = receiptButton("receipt-legacy", "核验科研通文件");
   assert.ok(legacyVerify, "legacy acquired assistance history offers explicit provenance verification");
   assert.equal(legacyVerify.disabled, false);
   const beforeLegacyVerify = calls.length;
@@ -967,11 +1074,151 @@ async function siteControls() {
   assert.equal(labels("assist-review").includes("我已核对，是这篇论文"), false);
   assert.match(taskRow("assist-review").textContent, /结算该求助的原悬赏（10 积分）/);
   assert.match(taskRow("assist-review").textContent, /只将对应上传消息标记已读/);
+  assert.ok(labels("assist-review").includes("检查已下载文件"), "linked requests retain a local-download check entry");
+  assert.ok(labels("assist-review").includes("选择已下载的PDF"), "linked requests retain a manual import entry");
   const beforeReviewConfirm = calls.filter(call => call[0] === "confirmPDF").length;
   rowButton("预览待核对 PDF").click(); await flush();
   assert.equal(calls.filter(call => call[0] === "confirmPDF").length, beforeReviewConfirm, "previewing an assistance file does not adopt it");
   rowButton("确认对应论文并入库、采纳").click(); await flush();
   assert.deepEqual(calls.at(-1), ["confirmPDF", "assist-review"]);
+  model.tasks = [{ ...assistTaskBase, id: "linked-local", source: "local_file", assistReceipt: null, accessHint: { scope: "article", kind: "browser_success", institutionalConfirmed: false }, title: "手动导入的应助文件" }];
+  filterButton("all").click(); renderListener();
+  assert.ok(labels("linked-local").includes("核验科研通文件"), "an existing request can be verified after manual import");
+  assert.equal(labels("linked-local").includes("这是通过机构获取"), false, "a local file with an assistance request must not imply institutional retrieval");
+  assert.doesNotMatch(taskRow("linked-local").textContent, /此论文曾通过浏览器获取/);
+  assert.match(taskRow("linked-local").textContent, /网站文件与已保存 PDF 完全一致/);
+  assert.match(taskRow("linked-local").querySelector(".fta-row-meta").textContent, /来源：本地 PDF/);
+  assert.doesNotMatch(taskRow("linked-local").querySelector(".fta-row-meta").textContent, /已支出|待采纳/);
+  receiptButton("linked-local", "核验科研通文件").click(); await flush();
+  assert.deepEqual(calls.at(-1), ["verifyAssistCompletion", "linked-local"]);
+  filterButton("unfinished").click();
+  model.tasks = [{ id: "metadata-check", state: "error", itemID: 904, title: "Zotero 条目标题", doi: "10.1234/check", lastError: "旧的 DOI 查询错误" }];
+  filterButton("unfinished").click();renderListener();
+  assert.ok(labels("metadata-check").includes("核对网站文献信息"));
+  const beforeMetadataCheck = calls.length;
+  rowButton("核对网站文献信息").click();await flush();
+  assert.deepEqual(calls.slice(beforeMetadataCheck), [["inspectDOI", "metadata-check"]], "metadata lookup does not save points, retry a task, or request assistance");
+  assert.equal(model.tasks[0].state, "error", "metadata lookup does not imply publication or acquisition");
+  let metadataDetails = taskRow("metadata-check").querySelector(".fta-doi-check");
+  assert.equal(metadataDetails.hasAttribute("open"), true, "explicit metadata lookup reveals the comparison");
+  assert.match(metadataDetails.textContent, /条目 DOI：10\.1234\/check/);
+  assert.match(metadataDetails.textContent, /网站 DOI：10\.1234\/check/);
+  assert.match(metadataDetails.textContent, /条目标题：Zotero 条目标题/);
+  assert.match(metadataDetails.textContent, /网站标题：<img src=x onerror=bad> 网站标题/);
+  assert.equal(metadataDetails.querySelector("img"), null, "website titles are displayed as text");
+  assert.match(metadataDetails.textContent, /DOI 一致，请核对标题后重试/);
+  assert.match(get("fta-pref-status").textContent, /未发布求助/);
+  renderListener();assert.equal(taskRow("metadata-check").querySelector(".fta-doi-check").hasAttribute("open"), true, "polling preserves an expanded metadata comparison");
+  taskRow("metadata-check").querySelector(".fta-doi-check").removeAttribute("open");renderListener();
+  assert.equal(taskRow("metadata-check").querySelector(".fta-doi-check").hasAttribute("open"), false, "a manually collapsed metadata comparison stays collapsed");
+  for (const [reason, expectedText] of [["doi_mismatch", "网站返回的 DOI 与条目不同"], ["doi_missing", "网站查询未提供 DOI"], ["doi_invalid", "网站返回的 DOI 无法验证"]]) {
+    model.tasks[0].doiCheck.reason = reason;model.tasks[0].doiCheck.receivedDOI = reason === "doi_mismatch" ? "10.1234/other" : "";
+    model.tasks[0].doiCheck.receivedTitle = "";renderListener();
+    metadataDetails = taskRow("metadata-check").querySelector(".fta-doi-check");
+    assert.match(metadataDetails.textContent, new RegExp(expectedText));
+    assert.match(metadataDetails.textContent, /网站标题：未提供/);
+    if (reason !== "doi_mismatch") assert.match(metadataDetails.textContent, /网站 DOI：未提供/);
+  }
+  model.settings.language = "en";renderListener();
+  assert.ok(labels("metadata-check").includes("Check website article metadata"));
+  assert.match(taskRow("metadata-check").querySelector(".fta-doi-check").textContent, /Website article metadata · Website DOI invalid/);
+  assert.match(taskRow("metadata-check").querySelector(".fta-doi-check").textContent, /Website title:Not provided/);
+  assert.match(taskRow("metadata-check").querySelector(".fta-doi-check").textContent, /Zotero 条目标题/, "original article data is never translated");
+  model.settings.language = "zh-TW";renderListener();assert.ok(labels("metadata-check").includes("核對網站文獻資訊"));
+  model.settings.language = "zh-CN";
+  for (const state of ["error", "not_found", "needs_review"]) { model.tasks[0].state = state;renderListener();assert.ok(labels("metadata-check").includes("核对网站文献信息")); }
+  model.tasks[0].requestID = "AlreadyPublished";renderListener();assert.equal(labels("metadata-check").includes("核对网站文献信息"), false);
+  model.tasks[0].requestID = "";model.tasks[0].doi = "";renderListener();assert.equal(labels("metadata-check").includes("核对网站文献信息"), false);
+
+  // The returned request URL is retained only as a review candidate. UI
+  // controls must never convert it to a linked request or repeat paid posting.
+  model.tasks = [{ id: "submitted-review", state: "submission_unknown", itemID: 903, doi: "10.1234/expected", title: "已发布 DOI 待核验", requestID: "", requestURL: "", submissionReview: { requestID: "ReviewOnly", requestURL: "https://www.ablesci.com/assist/detail?id=ReviewOnly", expectedDOI: "10.1234/expected", receivedDOI: "10.1234/received", reason: "DOI 不一致 <img src=x onerror=bad>" } }];
+  renderListener();
+  assert.equal(badgeText("submitted-review"), "已发布求助待核对");
+  const reviewBlock = taskRow("submitted-review").querySelector(".fta-submission-review");
+  assert.match(reviewBlock.textContent, /条目 DOI：10\.1234\/expected/);
+  assert.match(reviewBlock.textContent, /网站 DOI：10\.1234\/received/);
+  assert.match(reviewBlock.textContent, /不会重新发布/);
+  assert.equal(reviewBlock.querySelector("img"), null, "review reasons are text, never website markup");
+  assert.equal(model.tasks[0].requestURL, "", "displaying review metadata never links a request");
+  assert.deepEqual(labels("submitted-review"), ["立即检查", "打开已发布求助核对", "打开网页"]);
+  assert.equal(taskCheckbox("submitted-review"), null);
+  assert.equal(labels("submitted-review").includes("核对网站文献信息"), false, "published candidates use request verification, not an unrelated metadata lookup");
+  const beforeSubmittedReview = calls.length;
+  rowButton("打开已发布求助核对").click(); await flush();
+  rowButton("立即检查").click(); await flush();
+  assert.deepEqual(calls.slice(beforeSubmittedReview), [["openSubmissionReview", "submitted-review"], ["check", "submitted-review"]], "review actions neither save a budget nor submit assistance");
+  model.tasks[0].submissionReview.receivedDOI = ""; renderListener();
+  assert.match(taskRow("submitted-review").querySelector(".fta-submission-review").textContent, /网站 DOI：未提供/);
+  model.tasks[0].state = "paused";model.tasks[0].acquisitionMode = "manual";renderListener();
+  assert.deepEqual(labels("submitted-review"), ["立即检查", "打开已发布求助核对", "打开网页"], "pausing never unlocks a fresh paid request or hides candidate verification");
+  model.settings.language = "en";renderListener();
+  assert.equal(badgeText("submitted-review"), "Published request needs review");
+  assert.match(taskRow("submitted-review").querySelector(".fta-submission-review").textContent, /Website DOI:Not provided/);
+  assert.ok(labels("submitted-review").includes("Open published request for review"));
+  model.settings.language = "zh-TW";renderListener();
+  assert.equal(badgeText("submitted-review"), "已發布求助待核對");
+  assert.ok(labels("submitted-review").includes("打開已發布求助核對"));
+  model.settings.language = "zh-CN";
+  model.tasks = [{ ...assistTaskBase, id: "linked-browser", source: "browser_download", assistReceipt: null, accessHint: { scope: "article", kind: "browser_success", institutionalConfirmed: false }, title: "浏览器下载的应助文件" }];
+  filterButton("all").click();renderListener();
+  assert.doesNotMatch(taskRow("linked-browser").textContent, /此论文曾通过浏览器获取|此论文已确认机构访问/);
+  assert.equal(labels("linked-browser").includes("这是通过机构获取"), false);
+  model.tasks[0].state = "manual_waiting";model.tasks[0].attachmentID = null;model.tasks[0].acquisitionMode = "manual";
+  filterButton("unfinished").click();renderListener();
+  assert.ok(labels("linked-browser").includes("暂停监控"));
+  rowButton("暂停监控").click();await flush();
+  assert.deepEqual(calls.at(-1), ["pause", "linked-browser"]);
+  assert.match(get("fta-pref-status").textContent, /已有求助保留/);
+  assert.match(get("fta-pref-status").textContent, /检查已下载文件/);
+  // Local spending totals count accepted requests exactly once, with unknown
+  // rewards excluded from point totals and the average's denominator.
+  const spendingTask = (id, requestID, points, date, options = {}) => ({ id, requestID, requestURL: "https://www.ablesci.com/assist/detail?id=" + requestID, source: "ablesci", state: "imported", itemID: 950, attachmentID: 951, doi: "10.1234/" + id, title: id, requestedPoints: points, pointsVerified: true, updatedAt: date, assistReceipt: { requestID, accountID: "AccountA", adoption: "accepted", messages: "done", acceptedAt: date }, ...options });
+  model.tasks = [
+    spendingTask("spend-old", "Spend1", 10, "2026-11-04T01:00:00Z"),
+    spendingTask("spend-new", "Spend1", 30, "2026-11-06T01:00:00Z", { title: "<img src=x onerror=bad> 应助论文", assistReceipt: { requestID: "Spend1", accountID: "AccountB", adoption: "accepted", messages: "done", acceptedAt: "2026-11-06T01:00:00Z" } }),
+    spendingTask("spend-other", "Spend2", 20, "2026-11-05T01:00:00Z"),
+    spendingTask("spend-unknown", "Spend3", 999, "2026-11-07T01:00:00Z", { pointsVerified: false }),
+    spendingTask("spend-pending", "Spend4", 500, "2026-11-08T01:00:00Z", { assistReceipt: { requestID: "Spend4", adoption: "pending" } }),
+    spendingTask("spend-local", "Spend5", 500, "2026-11-08T01:00:00Z", { source: "local_file" }),
+    spendingTask("spend-mismatched", "Spend6", 500, "2026-11-08T01:00:00Z", { assistReceipt: { requestID: "WrongRequest", adoption: "accepted" } })
+  ];
+  pageTab("account").click();renderListener();
+  assert.ok(pagePanel("account").contains(get("fta-pref-spending")));
+  assert.equal(get("fta-pref-spending-total").textContent, "50 积分");
+  assert.equal(get("fta-pref-spending-count").textContent, "3 篇");
+  assert.equal(get("fta-pref-spending-average").textContent, "25.0 积分");
+  assert.match(get("fta-pref-spending-coverage").textContent, /金额已核实 2 篇；金额待核实 1 篇/);
+  assert.deepEqual([...get("fta-pref-spending-list").children].map(row => row.dataset.requestId), ["Spend3", "Spend1", "Spend2"], "latest accepted record wins and recent spending is newest first");
+  assert.equal(get("fta-pref-spending-list").querySelector("img"), null, "spending titles are safe text");
+  assert.match(get("fta-pref-spending-list").firstElementChild.textContent, /积分待核实（未计入积分统计）/);
+  const spendingDetailsNode = get("fta-pref-spending-details");spendingDetailsNode.setAttribute("open", "");
+  model.tasks.find(task => task.id === "spend-unknown").pointsVerified = true;
+  model.tasks.find(task => task.id === "spend-unknown").requestedPoints = 40;renderListener();
+  assert.equal(get("fta-pref-spending-total").textContent, "90 积分");
+  assert.equal(get("fta-pref-spending-average").textContent, "30.0 积分");
+  assert.equal(get("fta-pref-spending-details"), spendingDetailsNode);
+  assert.equal(spendingDetailsNode.hasAttribute("open"), true, "polling never replaces or closes spending details");
+  spendingDetailsNode.removeAttribute("open");renderListener();assert.equal(spendingDetailsNode.hasAttribute("open"), false);
+  model.settings.language = "en";renderListener();
+  assert.equal(get("fta-pref-spending-heading").textContent, "Points usage");
+  assert.equal(get("fta-pref-spending-count").textContent, "3 articles");
+  assert.equal(get("fta-pref-spending-average").textContent, "30.0 points");
+  assert.match(get("fta-pref-spending-list").textContent, /应助论文/, "spending titles are not translated");
+  model.settings.language = "zh-TW";renderListener();assert.equal(get("fta-pref-spending-heading").textContent, "積分使用");
+  model.settings.language = "zh-CN";
+  model.tasks = Array.from({ length: 12 }, (_, index) => spendingTask("spend-many-" + index, "Many" + index, 10, "2026-11-" + String(index + 1).padStart(2, "0") + "T01:00:00Z"));renderListener();
+  assert.equal(get("fta-pref-spending-list").children.length, 10, "recent spending is bounded without truncating totals");
+  assert.equal(get("fta-pref-spending-count").textContent, "12 篇");
+  assert.equal(get("fta-pref-spending-total").textContent, "120 积分");
+  model.tasks = [spendingTask("unknown-only", "UnknownOnly", 10, "2026-11-06T01:00:00Z", { pointsVerified: false })];renderListener();
+  assert.equal(get("fta-pref-spending-total").textContent, "0 积分");
+  assert.equal(get("fta-pref-spending-count").textContent, "1 篇");
+  assert.equal(get("fta-pref-spending-average").textContent, "—", "unknown rewards cannot create a zero-price average");
+  model.tasks = [];renderListener();
+  assert.equal(get("fta-pref-spending-empty").hidden, false);
+  assert.equal(get("fta-pref-spending-count").textContent, "0 篇");
+  assert.equal(get("fta-pref-spending-average").textContent, "—");
   model.tasks = [
     { id: "bind-1", title: "明确选择的文献", doi: "10.1234/bind", itemID: 10, state: "not_found" },
     { id: "bind-2", title: "批量最后一篇", doi: "10.1234/other", itemID: 11, state: "not_found" },
@@ -1095,15 +1342,28 @@ async function siteControls() {
   assert.equal(model.tasks[0].state, "manual_waiting");
   assert.equal(taskRow("diagnostic").querySelector(".fta-download-details").hasAttribute("open"), true, "preview refresh does not hide the candidate or imply confirmation");
 
+  // A saved minimum policy is explicit at the action, while an unsaved checkbox
+  // does not change what a request button promises to use.
+  model.settings.acceptSiteMinimum = true; renderListener();
+  changeChecked(taskCheckbox("diagnostic"), true);
+  assert.match(rowButton("科研通求助（" + model.settings.points + " 积分起）").textContent, /积分起/);
+  assert.match(get("fta-pref-bulk-assist").textContent, /每篇 .* 积分起/);
+  assert.match(get("fta-pref-selection-summary").textContent, /基础悬赏合计 .*可能按网站最低积分上调/);
+  assert.match(taskRow("diagnostic").textContent, /最终悬赏可能高于按钮中的基础积分/);
+  model.settings.acceptSiteMinimum = false; renderListener();
+  assert.doesNotMatch(get("fta-pref-bulk-assist").textContent, /积分起/);
+
   // Language is saved on its own, while drafts, task filter, selection and raw
   // article/site text survive immediately switching among all three locales.
   model.session = { status: "signed_out", username: "saved@example.invalid", message: "", hasSavedPassword: false };
   model.messages = [{ id: "raw-message", title: "下载设置", summary: "科研通账号" }];
   model.messagesStatus = { state: "loaded" };
   input("fta-pref-points", "37");input("fta-pref-poll", "125");
+  get("fta-pref-site-minimum").checked = true;get("fta-pref-site-minimum").dispatchEvent(new window.Event("input"));
   input("fta-pref-username", "draft@example.invalid");input("fta-pref-password", "do-not-save-this-draft");
   get("fta-pref-request-url").value = "https://www.ablesci.com/assist/detail?id=DraftOnly";
   chooseTarget("diagnostic");changeChecked(taskCheckbox("diagnostic"), true);
+  get("fta-pref-checkin-reminder").checked = true;get("fta-pref-checkin-reminder").dispatchEvent(new window.Event("input"));
   const savedPointsBeforeLanguage = model.settings.points;
   const chooseLanguage = async language => {
     const select = get("fta-pref-language");
@@ -1114,12 +1374,17 @@ async function siteControls() {
   const beforeLanguage = calls.length;await chooseLanguage("en");
   assert.deepEqual(calls.slice(beforeLanguage), [["save", { language: "en" }]]);
   assert.equal(model.settings.points, savedPointsBeforeLanguage);
+  assert.equal(get("fta-pref-checkin-reminder").checked, true);
+  assert.equal(model.settings.checkInReminder, false, "language changes preserve but do not save the reminder draft");
+  assert.equal(model.settings.acceptSiteMinimum, false, "language changes never activate an unsaved minimum-reward opt-in");
+  assert.equal(get("fta-pref-site-minimum").checked, true, "language changes retain the minimum-reward draft");
+  assert.equal(pageTab("account").textContent, "AbleSci settings");
   assert.equal(get("fta-pref-points").value, "37");assert.equal(get("fta-pref-poll").value, "125");
   assert.equal(get("fta-pref-username").value, "draft@example.invalid");assert.equal(get("fta-pref-password").value, "do-not-save-this-draft");
   assert.equal(get("fta-pref-request-url").value, "https://www.ablesci.com/assist/detail?id=DraftOnly");
   assert.equal(get("fta-pref-request-target").value, "diagnostic");assert.equal(taskCheckbox("diagnostic").checked, true);
   assert.equal(filterButton("unfinished").getAttribute("aria-pressed"), "true");
-  assert.equal(pageTab("settings").textContent, "Download settings");
+  assert.equal(pageTab("settings").textContent, "Settings");
   assert.equal(filterButton("active").textContent, "In progress 1");
   assert.match(get("fta-pref-task-scope").textContent, /All unfinished tasks across batches/);
   assert.match(get("fta-pref-bulk-assist").textContent, /37 points each/);
@@ -1137,12 +1402,12 @@ async function siteControls() {
   })(root);
   assert.deepEqual(untranslatedUI, [], "all plugin UI text is translated; source metadata is explicitly excluded");
   await chooseLanguage("zh-TW");
-  assert.equal(pageTab("settings").textContent, "下載設定");
+  assert.equal(pageTab("settings").textContent, "設定");
   assert.equal(get("fta-pref-account-state").textContent, "未登入");
   assert.equal(get("fta-pref-password").value, "do-not-save-this-draft");
   assert.equal(taskRow("diagnostic").querySelector(".fta-row-title button span").textContent, "下载设置");
   await chooseLanguage("zh-CN");
-  assert.equal(pageTab("settings").textContent, "下载设置");
+  assert.equal(pageTab("settings").textContent, "设置");
   assert.match(get("fta-pref-bulk-assist").textContent, /每篇 37 积分/);
   await chooseLanguage("en");
   model.tasks[0].title = "S <i>olenopsis</i> and <b>other</b>";renderListener();
@@ -1180,6 +1445,11 @@ async function siteControls() {
   }
   assert.equal(i18n.translate("已检查 9 个 PDF；身份待核对 2 个，不匹配 6 个。", "en"), "Checked 9 PDFs: 2 need identity review, 6 do not match.");
   assert.equal(i18n.translate("按 25 积分重试", "en"), "Retry with 25 points");
+  assert.equal(i18n.translate("按 25 积分起重试", "en"), "Retry from 25 points");
+  assert.equal(i18n.translate("网页优先，科研通兜底（25 积分起）", "en"), "Web first, AbleSci fallback (from 25 points)");
+  assert.equal(i18n.translate("网页优先，科研通兜底（25 积分起）", "zh-TW"), "網頁優先，科研通兜底（25 積分起）");
+  assert.equal(i18n.translate("来源：科研通 · 已支出 30 积分", "en"), "Source: AbleSci · Spent 30 points");
+  assert.equal(i18n.translate("来源：科研通 · 积分待核实", "zh-TW"), "來源：科研通 · 積分待核實");
   assert.equal(i18n.translate("来源：出版社网页", "en"), "Source: Publisher page");
   assert.equal(i18n.translate("Unknown <img onerror=x> 论文", "en"), "Unknown <img onerror=x> 论文");
   pageTab("messages").click();
@@ -1187,6 +1457,19 @@ async function siteControls() {
   assert.equal(subscriptions, 0);
   pageTab("settings").click();
   assert.equal(root.dataset.activePage, "messages", "destroy removes page navigation handlers");
+  // Rejected asynchronous opening checks are caught inside a separate pane.
+  {
+    const failedPane = parseHTML("<html><body>" + markup + "</body></html>");let failedOpens = 0;
+    const failedApp = { getSnapshot: () => ({ settings: {}, session: { status: "signed_out" }, tasks: [], messages: [] }), localize: node => i18n.apply(node, "zh-CN"), subscribe: () => () => {}, preferencesOpened: async () => { failedOpens++;throw new Error("签到状态检查未完成，可点击刷新重试。"); } };
+    failedPane.window.Zotero = { FulltextAssistant: failedApp };
+    const failedContext = { window: failedPane.window, document: failedPane.document, Zotero: failedPane.window.Zotero, Date };
+    vm.runInNewContext(script, failedContext);await flush();
+    failedContext.FulltextPreferences.mount(failedPane.document.getElementById("fta-preferences"));await flush();
+    assert.equal(failedOpens, 1);
+    assert.equal(failedPane.document.getElementById("fta-pref-checkin-message").dataset.error, "true");
+    assert.match(failedPane.document.getElementById("fta-pref-checkin-message").textContent, /可点击刷新重试/);
+    failedContext.FulltextPreferences.destroy();
+  }
   const publisher = await publisherControls();
   assert.equal(publisher.get("publisher-external"), null);
   assert.equal(publisher.get("publisher-system").textContent, "浏览器下载并自动入库");
@@ -1249,5 +1532,13 @@ async function siteControls() {
   localizedSite.setLanguage("zh-TW");await flush();
   assert.equal(localizedSite.get("ft-read").textContent, "刷新任務狀態");
   localizedSite.close();assert.equal(localizedSite.languageSubscriptions(), 0);assert.equal(localizedSite.detached(), true);
+  const checkInSite = await siteControls("checkin");
+  assert.equal(checkInSite.get("ft-read").textContent, "刷新签到状态");
+  checkInSite.setLanguage("en");await flush();
+  assert.equal(checkInSite.get("ft-read").textContent, "Refresh check-in status");
+  checkInSite.get("ft-read").click();await flush();
+  assert.match(checkInSite.get("ft-status").textContent, /View the balance and reward in AbleSci settings/);
+  checkInSite.setLanguage("zh-TW");await flush();assert.equal(checkInSite.get("ft-read").textContent, "刷新簽到狀態");
+  checkInSite.close();assert.equal(checkInSite.languageSubscriptions(), 0);
   console.log("Preferences tests passed: batch scopes and exclusive filters, completed history, three-language UI and browser chrome, preserved drafts and metadata, title/DOI copy, download diagnosis and explicit review, institutional confirmation/undo, existing task workflows and cleanup.");
 })().catch(error => { console.error(error); process.exitCode = 1; });

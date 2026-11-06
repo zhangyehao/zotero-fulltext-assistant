@@ -217,6 +217,10 @@
       requestID: request.requestID,
       // Snapshot per task: global settings changes cannot rewrite an existing request.
       requestedPoints: input.requestedPoints === undefined ? DEFAULT_POINTS : validatePoints(input.requestedPoints),
+      // Legacy requestedPoints may have been a local default for an existing
+      // request. Only a verified website amount can be presented as its cost.
+      pointsVerified: !!request.requestID && input.pointsVerified === true,
+      acceptSiteMinimum: input.acceptSiteMinimum === true,
       allowAssist: input.allowAssist === true,
       attachmentID: optionalInteger(input.attachmentID, "attachmentID"),
       source: text(input.source, 100),
@@ -233,6 +237,18 @@
     };
     task.assistReceipt = normalizeAssistReceipt(input.assistReceipt, task);
     task.assistReview = normalizeAssistReview(input.assistReview, task);
+    task.submissionReview = null;
+    if (!task.requestID && ["submission_unknown", "paused", "error"].includes(task.state) && input.submissionReview) {
+      try {
+        const review=input.submissionReview,reference=parseRequestURL(review.requestURL);
+        if(reference.requestID===review.requestID)task.submissionReview={...reference,expectedDOI:normalizeDOI(review.expectedDOI),receivedDOI:normalizeDOI(review.receivedDOI||""),reason:text(review.reason,100)};
+      } catch (_) { /* Invalid review links never become a bound request. */ }
+    }
+    task.doiCheck = null;
+    if(input.doiCheck)try{
+      const value=input.doiCheck;
+      if(["match","doi_mismatch","doi_missing","doi_invalid"].includes(value.reason))task.doiCheck={expectedDOI:normalizeDOI(value.expectedDOI),receivedDOI:normalizeDOI(value.receivedDOI||""),expectedTitle:text(value.expectedTitle,2000),receivedTitle:text(value.receivedTitle,2000),reason:value.reason,checkedAt:timestamp(value.checkedAt,false)};
+    }catch(_){/* Diagnostic metadata cannot discard a task. */}
     const evidence = input.accessEvidence;
     task.accessEvidence = evidence && ["page", "response", "cached_response"].includes(evidence.source) &&
       ["institutional_entry", "institutional_hint", "login_hint", "request_restricted", "human_verification", "automatic_not_found"].includes(evidence.kind) &&
@@ -311,6 +327,8 @@
     const identityChanged = ["libraryID", "itemID", "itemKey", "doi", "title", "requestID"]
       .some(field => updated[field] !== previous[field]);
     const attachmentChanged = updated.attachmentID !== previous.attachmentID;
+    if(["libraryID","itemID","itemKey","doi","title"].some(field=>updated[field]!==previous[field]))updated.doiCheck=null;
+    if ((updated.requestID !== previous.requestID || updated.requestedPoints !== previous.requestedPoints) && patch.pointsVerified !== true) updated.pointsVerified = false;
     if (["libraryID", "itemID", "itemKey", "doi"].some(field => updated[field] !== previous[field])) { updated.accessEvidence = null; updated.publisherURL = ""; }
     if ((previous.assistReceipt || previous.assistReview) && identityChanged || previous.assistReceipt && attachmentChanged) {
       updated.assistReceipt = null; updated.assistReview = null;

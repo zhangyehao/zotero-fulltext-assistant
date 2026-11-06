@@ -107,3 +107,60 @@ test('backend data can load after the UI engine without a runtime translation se
   assert.equal(scope.FulltextI18n.translate(message, 'en'), 'Download folder checks could not start. Try again.');
   assert.equal(scope.FulltextI18nBackendData.length, rows.length);
 });
+
+
+test('prepublication DOI lookup and published-request review preserve stage and DOI values in every locale', () => {
+  const { FulltextI18n: i18n } = create();
+  const expected = '10.1016/j.example.2026.001', received = '10.1111/mec.12915';
+  for (const websiteDOI of [received, '未提供有效 DOI']) {
+    const before = '科研通查询返回的 DOI 与条目不一致，未发布求助。条目 DOI：' + expected + '；网站 DOI：' + websiteDOI + '。请核对 Zotero 条目的 DOI，再重新尝试；不要仅凭标题相似确认。';
+    const after = '科研通求助已创建，但 DOI 尚未核对一致。条目 DOI：' + expected + '；网站 DOI：' + websiteDOI + '。请打开已发布求助核对并重新检查；不要重复发布。';
+    for (const [message, stage] of [[before, 'No request was submitted'], [after, 'request was created']]) {
+      assert.equal(i18n.translate(message, 'zh-CN'), message);
+      const english = i18n.translate(message, 'en'), traditional = i18n.translate(message, 'zh-TW');
+      assert(!han.test(english), english);assert(english.includes(stage));
+      assert(english.includes(expected));assert(traditional.includes(expected));
+      if (websiteDOI === received) { assert(english.includes(received));assert(traditional.includes(received)); }
+      else assert(english.includes('No valid DOI provided'));
+      assert.notEqual(traditional, message);
+    }
+  }
+  for (const source of [
+    '科研通求助已创建，但所属账号与当前账号不一致。请切换到原科研通账号后重新检查；不要重复发布。',
+    '科研通求助已创建，但网站悬赏积分与提交记录不一致。请打开已发布求助核对实际悬赏后重新检查；不要重复发布。',
+    '科研通求助已创建，但详情尚未核实。请打开已发布求助核对并重新检查；不要重复发布。',
+    '已发布求助与条目 DOI 仍不一致。请核对出版社原文及 Zotero 条目，修正后再点立即检查；不会重新发布。',
+    '已发布求助的账号或编号不一致，请打开求助页面核对；不会重新发布。',
+    '请先登录发布该求助时的科研通账号。',
+    '没有待核对的已发布求助。',
+    '文献信息检查已取消。',
+    '核对已取消。',
+    '核对期间条目信息已改变，请重新核对网站文献信息。',
+  ]) {
+    assert(!han.test(i18n.translate(source, 'en')), source);
+    assert.notEqual(i18n.translate(source, 'zh-TW'), source);
+  }
+});
+
+
+test('check-in and ledger verification failures translate without implying completion or credit', () => {
+  const { FulltextI18n: i18n } = create();
+  for (const source of [
+    '账号已改变，请重新检查登录状态。',
+    '查询跨过日期边界，请重新刷新签到状态。',
+    '签到状态暂时无法核实，请打开科研通网页查看。',
+    '当前日期无法核实，未更新签到状态。',
+    '未找到唯一的本人积分明细表，签到状态暂时无法核实。',
+    '检查期间日期已变化，请重新刷新签到状态。',
+    '积分明细分页不唯一，未更新签到状态。',
+    '积分明细分页发生未核实跳转，未更新签到状态。',
+    '积分明细的列结构发生变化，未更新签到状态。',
+    '积分明细的日期或排序无法核实，未更新签到状态。',
+    '签到状态检查已取消。',
+    '签到状态页面与当前登录账号不一致，未更新状态。',
+  ]) {
+    assert(!han.test(i18n.translate(source, 'en')), source);
+    assert.notEqual(i18n.translate(source, 'zh-TW'), source);
+    assert.equal(i18n.translate(source, 'zh-CN'), source);
+  }
+});

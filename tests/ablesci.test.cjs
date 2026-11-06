@@ -46,10 +46,26 @@ test("public detail parser uses the request badge, DOI field and actual file rec
   assert.equal(result.state, "available");
   assert.equal(result.ownerID, "Account1");
   assert.equal(result.points, 20);
+  assert.equal(result.requestedPoints, 20);
+  assert.equal(result.pointsVerified, true);
   assert.equal(result.files[0].id, "File1");
   assert.equal(result.files[0].name, "000448372.pdf");
   assert.equal(result.files[0].downloadURL, null);
   assert.equal(result.permissionRequired, true);
+});
+
+test("request rewards are verified only from one unambiguous bounded site value", () => {
+  const cases = [
+    detailHTML({ points: 0 }), detailHTML({ points: 10001 }), detailHTML({ points: "unknown" }),
+    detailHTML({ points: "9007199254740993" }),
+    detailHTML().replace("悬赏 <span>20</span> 积分", "悬赏 20 积分、悬赏 30 积分"),
+    detailHTML().replace("</tbody>", '<tr><td>求助人</td><td><a href="/user/home?id=Account1">Test</a>，悬赏 40 积分</td></tr></tbody>'),
+  ];
+  for (const html of cases) {
+    const result = adapter.parseRequest(parser(html), ORIGIN + "/assist/detail?id=Request1", model);
+    assert.equal(result.requestedPoints, null);assert.equal(result.points, null);assert.equal(result.pointsVerified, false);
+    assert.equal(result.files.length, 1, "unknown reward does not discard a downloadable file");
+  }
 });
 
 test("withdrawn files and expired requests are not advertised as downloadable", () => {
@@ -321,16 +337,16 @@ function ownListHTML({ ids = [], next = null, accountID = "Account1" } = {}) {
 function createFormHTML() {
   return `${modernAccountHTML()}<meta name="csrf-param" content="_csrf"><meta name="csrf-token" content="fixture-ephemeral-token"><input id="action-url" value="/assist/create"><form id="assist-create-form" method="post" action="https://www.ablesci.com/assist/create"><input name="onekey"><input name="Assist[doi]"><input name="Assist[title]"><input name="Assist[url]"><input name="Assist[point]" value="10"><input type="radio" name="Assist[type]" value="1" data-point="10" checked><input type="radio" name="Assist[type]" value="4" data-point="30"><textarea name="Assist[note]"></textarea><input name="Assist[remark]"><input type="radio" name="Assist[suppl]" value="0" checked><input name="Assist[close_at]" id="Assist-close_at"></form><span id="point-has">100</span><span id="point-low">10</span><script>const endpoints=['onekey-query','paper-lookup-status','/assist/query-lowest-point','/assist/check-before-assist-create'];$('#Assist-close_at').val('2030-01-06 12:00:00');</script>`;
 }
-function defaultHarness({ metadata = {}, checkCode = 0, queued = false, ownIDs = [] } = {}) {
-  const calls = [], store = memoryStore();
+function defaultHarness({ metadata = {}, checkCode = 0, queued = false, ownIDs = [], minimum = 10, balance = 100, expectedPoints = 20, detailPoints = expectedPoints, createCode = 0, failPublication = false, store = memoryStore() } = {}) {
+  const calls = [];
   let lookupPolls = 0;
   const data = { doi: DOI, title: "Fixture DOI paper", url: "https://publisher.example/article", journal: "Example Journal", authors: "Example author", publish_at: "2030", type: 1, min_point: 10, publisher: { point: 10 }, ...metadata };
   const request = async spec => {
     calls.push(spec);
     const path = new URL(spec.url).pathname;
     if (spec.method === "GET" && path === "/my/assist-my") return response(spec.url, ownListHTML({ ids: ownIDs }));
-    if (spec.method === "GET" && path === "/assist/create") return response(spec.url, createFormHTML());
-    if (spec.method === "GET" && path === "/assist/detail") return response(spec.url, detailHTML({ id: new URL(spec.url).searchParams.get("id"), points: 20 }));
+    if (spec.method === "GET" && path === "/assist/create") return response(spec.url, createFormHTML().replace('<span id="point-has">100</span>', `<span id="point-has">${balance}</span>`));
+    if (spec.method === "GET" && path === "/assist/detail") return response(spec.url, detailHTML({ id: new URL(spec.url).searchParams.get("id"), points: detailPoints }));
     assert.equal(spec.method, "POST");
     const body = new URLSearchParams(spec.body);
     assert.equal(body.get("_csrf"), "fixture-ephemeral-token");
@@ -338,16 +354,17 @@ function defaultHarness({ metadata = {}, checkCode = 0, queued = false, ownIDs =
     let result;
     if (path === "/assist/onekey-query") result = queued ? { code: 0, status: "queued", job_uuid: "fixture-job" } : { code: 0, data };
     else if (path === "/assist/paper-lookup-status") { lookupPolls++; result = lookupPolls === 1 ? { code: 0, status: "running" } : { code: 0, status: "succeeded", data }; }
-    else if (path === "/assist/query-lowest-point") result = { code: 0, point: 10 };
+    else if (path === "/assist/query-lowest-point") result = { code: 0, point: minimum };
     else if (path === "/assist/check-before-assist-create") result = { code: checkCode };
     else if (path === "/assist/create") {
       assert.equal(store.values.get("Account1:" + DOI)?.state, "sending");
       assert.equal(body.get("Assist[doi]"), DOI);
-      assert.equal(body.get("Assist[point]"), "20");
+      assert.equal(body.get("Assist[point]"), String(expectedPoints));
       assert.equal(body.get("Assist[type]"), String(data.type));
       assert.equal(body.get("Assist[suppl]"), "0");
       assert.equal(body.get("Assist[close_at]"), "2030-01-06 12:00:00");
-      result = { code: 0, data: { url: "/assist/detail?id=Created1" } };
+      if (failPublication) throw new Error("synthetic response loss");
+      result = { code: createCode, data: { url: "/assist/detail?id=Created1" } };
     } else throw new Error("unexpected default-contract route: " + path);
     if (path !== "/assist/create") {
       const prior = store.values.get("Account1:" + DOI);
@@ -364,6 +381,100 @@ test("current signed-in navigation uses the unique activity scope and actual dis
   assert.equal(account.username, "Fixture reader");
   const mixed = modernAccountHTML() + '<script>window.AbleActivity.start({scope:"Other"});</script>';
   assert.throws(() => adapter.parseAccount(parser(mixed), ORIGIN + "/my/assist-my"), { code: "ACCOUNT_UNVERIFIED" });
+});
+
+function checkInHome({ account = "Account1", balance = 90, consecutiveDays = 3, extra = "" } = {}) {
+  return `${modernAccountHTML(account)}<div class="fly-signin"><div><a class="signin-points" href="/my/point">当前拥有<cite id="user-point-now">${balance}</cite>积分</a><span class="signin-days">已连续签到<cite id="sign-count">${consecutiveDays}</cite>天</span></div></div>${extra}`;
+}
+function checkInLedger({ account = "Account1", rows = [["2030-01-02 01:26:29", "+10", "签到"], ["2030-01-01 17:46:54", "+20", "签到"]], next = null, disabled = false, extra = "" } = {}) {
+  return `${modernAccountHTML(account)}<div class="layui-tab-item layui-show"><table class="layui-table"><thead><tr><th>时间</th><th>积分</th><th>说明</th></tr></thead><tbody>${rows.map(cells => `<tr>${cells.map(cell => `<td>${cell}</td>`).join("")}</tr>`).join("")}</tbody></table></div>${next || disabled ? `<div class="pages"><ul class="pagination"><li class="next${disabled ? " disabled" : ""}">${disabled ? "下页" : `<a href="${next}">下页</a>`}</li></ul></div>` : ""}${extra}`;
+}
+function checkInHarness({ home = {}, ledger = {}, pages = {}, now = () => new Date(2030, 0, 2, 12).getTime(), requestHook } = {}) {
+  const calls = [];
+  const request = async spec => {
+    calls.push(spec);assert.equal(spec.method, "GET", "check-in status capability must never mutate");
+    const url = new URL(spec.url);
+    if (requestHook) { const changed = await requestHook(spec);if (changed) return changed; }
+    if (url.pathname === "/my/assist-my") return response(spec.url, modernAccountHTML());
+    if (url.pathname === "/") return response(spec.url, checkInHome(home));
+    if (url.pathname === "/my/point") return response(spec.url, checkInLedger(pages[url.searchParams.get("page") || "1"] || ledger));
+    assert.fail("Unexpected check-in route: " + url.pathname);
+  };
+  return { calls, client: adapter.create({ model, parseHTML: parser, request, now }) };
+}
+
+test("check-in status reads the authenticated daily ledger and actual reward without any sign-in mutation", async () => {
+  const { client, calls } = checkInHarness();
+  const result = await client.getCheckInStatus();
+  assert.equal(result.day, "2030-01-02");assert.equal(result.accountID, "Account1");
+  assert.equal(result.signed, true);assert.equal(result.balance, 90);assert.equal(result.reward, 10);
+  assert.equal(result.rewardVerified, true);assert.equal(result.consecutiveDays, 3);assert.equal(result.ledgerComplete, true);
+  assert.equal(result.evidence, "own-point-ledger-checkin-entry");
+  assert.deepEqual(calls.map(call => new URL(call.url).pathname), ["/my/assist-my", "/", "/my/point"]);
+  assert.equal(typeof client.checkIn, "undefined", "there is deliberately no automatic sign-in capability");
+});
+
+test("balance, consecutive-day badges and reward rules cannot establish today's sign-in", async () => {
+  const { client } = checkInHarness({ home: { balance: 0, consecutiveDays: 99, extra: '<p>签到可获得999积分。已签到</p><cite id="user-point-now">9999</cite>' }, ledger: { rows: [["2030-01-01 12:00:00", "+20", "签到"], ["2030-01-01 11:00:00", "+999", "Other"]] } });
+  const result = await client.getCheckInStatus();
+  assert.equal(result.signed, null);assert.equal(result.reward, null);assert.equal(result.rewardVerified, false);
+  assert.equal(result.balance, 0);assert.equal(result.consecutiveDays, 99);
+});
+
+test("check-in reward comes from the exact positive ledger reason, not balance differences or similar text", async () => {
+  const actual = checkInHarness({ home: { balance: 570 }, ledger: { rows: [["2030-01-02 12:00:00", "-30", "求助"], ["2030-01-02 11:00:00", "+20", "签到"], ["2030-01-01 12:00:00", "+10", "签到"]] } });
+  assert.equal((await actual.client.getCheckInStatus()).reward, 20);
+  for (const row of [["+10", "签到奖励说明"], ["-10", "签到"], ["+0", "签到"], ["+9007199254740993", "签到"], ["+10", "其他用户签到"]]) {
+    const fixture = checkInHarness({ ledger: { rows: [["2030-01-02 01:00:00", ...row]] } });
+    const result = await fixture.client.getCheckInStatus();assert.equal(result.signed, null);assert.equal(result.rewardVerified, false);
+  }
+});
+
+test("duplicate or ambiguous daily sign-in entries never inflate earned points", async () => {
+  const fixture = checkInHarness({ ledger: { rows: [["2030-01-02 12:00:00", "+10", "签到"], ["2030-01-02 11:00:00", "+20", "签到"]] } });
+  const result = await fixture.client.getCheckInStatus();
+  assert.equal(result.signed, true);assert.equal(result.reward, null);assert.equal(result.rewardVerified, false);
+});
+
+test("check-in ledger follows only bounded contiguous observed own-account pages", async () => {
+  const fixture = checkInHarness({ pages: {
+    "1": { rows: [["2030-01-02 12:00:00", "-10", "求助"]], next: "/my/point?page=2&per-page=10" },
+    "2": { rows: [["2030-01-02 01:26:29", "+10", "签到"], ["2030-01-01 12:00:00", "+10", "签到"]], next: "/my/point?page=3&per-page=10" },
+  } });
+  const result = await fixture.client.getCheckInStatus();assert.equal(result.reward, 10);assert.equal(result.ledgerComplete, true);
+  assert.equal(fixture.calls.filter(call => new URL(call.url).pathname === "/my/point").length, 2);
+  const bounded = checkInHarness({ pages: Object.fromEntries(Array.from({length: 6}, (_, index) => [String(index + 1), { rows: [[`2030-01-02 ${String(20-index).padStart(2,"0")}:00:00`, "+10", index ? "其他" : "签到"]], next: "/my/point?page=" + (index + 2) }])) });
+  const partial = await bounded.client.getCheckInStatus();assert.equal(partial.signed, true);assert.equal(partial.rewardVerified, false);assert.equal(partial.ledgerComplete, false);
+  assert.equal(bounded.calls.filter(call => new URL(call.url).pathname === "/my/point").length, 5);
+});
+
+test("unexpected pagination never follows a different endpoint or guesses sign-in absence", async () => {
+  for (const next of ["/my/point?page=3", "/my/message?page=2", "/my/point?page=2&action=sign", "/my/point?page=2&page=2"]) {
+    const fixture = checkInHarness({ ledger: { rows: [["2030-01-02 12:00:00", "+10", "其他"]], next } });
+    const result = await fixture.client.getCheckInStatus();assert.equal(result.signed, null);assert.equal(result.ledgerComplete, false);
+    assert.equal(fixture.calls.length, 3);
+  }
+});
+
+test("check-in status rejects changed accounts, malformed dates, unordered rows and duplicate ledgers", async () => {
+  for (const options of [
+    {home: {account: "OtherAccount"}}, {ledger: {account: "OtherAccount"}},
+    {ledger: {rows: [["2030-02-30 12:00:00", "+10", "签到"]]}},
+    {ledger: {rows: [["2030-01-02 01:00:00", "+10", "签到"], ["2030-01-02 12:00:00", "+10", "其他"]]}},
+    {ledger: {extra: checkInLedger()}},
+  ]) {
+    const fixture = checkInHarness(options);await assert.rejects(fixture.client.getCheckInStatus());
+    assert.ok(fixture.calls.every(call => call.method === "GET"));
+  }
+  const expired = checkInHarness({ requestHook: spec => new URL(spec.url).pathname === "/" ? response("/site/login", '<div class="able-head-user-guest"></div>') : null });
+  await assert.rejects(expired.client.getCheckInStatus(), {code: "LOGIN_REQUIRED"});
+});
+
+test("cancelled or cross-midnight check-in reads cannot publish stale daily status", async () => {
+  const cancelled = checkInHarness();await assert.rejects(cancelled.client.getCheckInStatus({isCancelled: () => true}), {name:"AbortError"});assert.equal(cancelled.calls.length, 0);
+  let day = new Date(2030, 0, 2, 23, 59, 59).getTime();
+  const midnight = checkInHarness({now: () => day, requestHook: spec => {if(new URL(spec.url).pathname === "/my/point") day += 2000;return null;} });
+  await assert.rejects(midnight.client.getCheckInStatus(), {code:"CHECKIN_DAY_CHANGED", retryable:true});
 });
 
 test("default own-list parser scopes rows, validates account and follows contiguous pagination", () => {
@@ -400,6 +511,215 @@ test("default contract stops mismatched metadata, live higher minimum and site c
   }
 });
 
+test("opt-in uses the highest verified site minimum in precheck, body, receipt and durable intent", async () => {
+  for (const options of [
+    { minimum: 35 }, { metadata: { min_point: 35 } }, { metadata: { publisher: { point: 35 } } },
+    { metadata: { type: 4 }, minimum: 35 },
+  ]) {
+    const harness = defaultHarness({ ...options, expectedPoints: 35 });
+    const result = await harness.client.submitRequest({ doi: DOI, points: 10, acceptSiteMinimum: true });
+    assert.equal(result.requestedPoints, 35);assert.equal(result.pointsVerified, true);
+    const checked = harness.calls.find(call => new URL(call.url).pathname === "/assist/check-before-assist-create");
+    assert.equal(new URLSearchParams(checked.body).get("point"), "35");
+    const intent = harness.store.values.get("Account1:" + DOI);
+    assert.equal(intent.points, 35);assert.equal(intent.configuredPoints, 10);
+    assert.equal(intent.minimumPoints, 35);assert.equal(intent.acceptSiteMinimum, true);
+    assert.equal(intent.state, "confirmed");
+    assert.equal(harness.calls.filter(call => call.method === "POST" && new URL(call.url).pathname === "/assist/create").length, 1);
+  }
+});
+
+test("site minimum opt-in never reduces a configured reward or silently turns on for string values", async () => {
+  const harness = defaultHarness();
+  const result = await harness.client.submitRequest({ doi: DOI, points: 20, acceptSiteMinimum: true });
+  assert.equal(result.requestedPoints, 20);
+  const invalid = defaultHarness();
+  for (const acceptSiteMinimum of ["true", "false", 1, null]) {
+    await assert.rejects(invalid.client.submitRequest({ doi: DOI, points: 20, acceptSiteMinimum }), { name: "TypeError" });
+  }
+  assert.equal(invalid.calls.length, 0);
+});
+
+test("site minimum is opt-in and cannot exceed balance, bounds or bypass site review", async () => {
+  for (const [options, flag, code] of [
+    [{ minimum: 30 }, undefined, "POINTS_TOO_LOW"], [{ minimum: 30 }, false, "POINTS_TOO_LOW"],
+    [{ minimum: 101 }, true, "INSUFFICIENT_POINTS"],
+    [{ minimum: 10001, balance: 20000 }, true, "UNVERIFIED_CONTRACT"],
+    [{ minimum: "bad" }, true, "STRUCTURE_CHANGED"],
+    [{ minimum: "9007199254740993" }, true, "STRUCTURE_CHANGED"],
+    [{ minimum: 30, checkCode: 2 }, true, "REQUEST_REVIEW_REQUIRED"],
+    [{ minimum: 30, checkCode: 1 }, true, "REQUEST_REJECTED"],
+  ]) {
+    const harness = defaultHarness(options);
+    await assert.rejects(harness.client.submitRequest({ doi: DOI, points: 10, acceptSiteMinimum: flag }), { code });
+    assert.equal(harness.calls.filter(call => call.method === "POST" && new URL(call.url).pathname === "/assist/create").length, 0);
+    assert.equal(harness.store.values.size, 0);
+  }
+});
+
+test("submission independently rejects inconsistent prepared auto-minimum bodies and invalid minimum contracts", async () => {
+  for (const [minimum, bodyPoints, code] of [
+    [30, 20, "SUBMISSION_MISMATCH"], [30, 31, "SUBMISSION_MISMATCH"],
+    [10001, 10001, "UNVERIFIED_CONTRACT"], [30.1, 30.1, "UNVERIFIED_CONTRACT"],
+  ]) {
+    const harness = submissionHarness({ minimum, bodyPoints });
+    await assert.rejects(harness.client.submitRequest({ doi: DOI, points: 20, acceptSiteMinimum: true }), { code });
+    assert.equal(harness.calls.filter(call => call.method === "POST").length, 0);
+    assert.equal(harness.store.values.size, 0);
+  }
+});
+
+test("replayed and existing requests retain their verified reward regardless of current settings", async () => {
+  const harness = defaultHarness({ minimum: 30, expectedPoints: 30 });
+  await harness.client.submitRequest({ doi: DOI, points: 10, acceptSiteMinimum: true });
+  const replay = await harness.client.submitRequest({ doi: DOI, points: 90, acceptSiteMinimum: false });
+  assert.equal(replay.requestedPoints, 30);assert.equal(replay.reused, true);
+  assert.equal(harness.calls.filter(call => call.method === "POST" && new URL(call.url).pathname === "/assist/create").length, 1);
+  const existing = defaultHarness({ ownIDs: ["Existing1"], detailPoints: 35 });
+  const found = await existing.client.submitRequest({ doi: DOI, points: 10, acceptSiteMinimum: false });
+  assert.equal(found.requestedPoints, 35);assert.equal(found.pointsVerified, true);assert.equal(found.reused, true);
+  assert.equal(existing.calls.filter(call => call.method === "POST").length, 0);
+});
+
+test("a changed post-publication reward is not retried and later reconciliation reports the actual site reward", async () => {
+  const harness = defaultHarness({ minimum: 30, expectedPoints: 30, detailPoints: 40 });
+  await assert.rejects(harness.client.submitRequest({ doi: DOI, points: 10, acceptSiteMinimum: true }), { code: "SUBMISSION_MISMATCH" });
+  assert.equal(harness.store.values.get("Account1:" + DOI).points, 30);
+  const reused = await harness.client.submitRequest({ doi: DOI, points: 10, acceptSiteMinimum: true });
+  assert.equal(reused.requestedPoints, 40);assert.equal(reused.reused, true);
+  assert.equal(harness.calls.filter(call => call.method === "POST" && new URL(call.url).pathname === "/assist/create").length, 1);
+});
+
+test("a lost raised-reward publication remains journaled across restart and is never resent", async () => {
+  const first = defaultHarness({ minimum: 30, expectedPoints: 30, failPublication: true });
+  await assert.rejects(first.client.submitRequest({ doi: DOI, points: 10, acceptSiteMinimum: true }), { code: "SUBMISSION_UNKNOWN" });
+  assert.equal(first.store.values.get("Account1:" + DOI).points, 30);
+  const restarted = defaultHarness({ minimum: 40, expectedPoints: 40, store: first.store });
+  await assert.rejects(restarted.client.submitRequest({ doi: DOI, points: 10, acceptSiteMinimum: true }), { code: "SUBMISSION_UNKNOWN" });
+  assert.equal(restarted.calls.filter(call => call.method === "POST").length, 0);
+  const recovered = defaultHarness({ ownIDs: ["Created1"], detailPoints: 30, store: first.store });
+  assert.equal((await recovered.client.submitRequest({ doi: DOI, points: 10, acceptSiteMinimum: true })).requestedPoints, 30);
+  assert.equal(recovered.calls.filter(call => call.method === "POST").length, 0);
+});
+
+test("prepublication DOI diagnostics distinguish mismatched, missing and malformed metadata without publishing", async () => {
+  for (const value of ["10.9999/other", "", null, "not a DOI", "10.9999/" + "x".repeat(2050)]) {
+    const harness = defaultHarness({ metadata: { doi: value, title: "Same title does not establish DOI identity" } });
+    await assert.rejects(harness.client.submitRequest({ doi: DOI, points: 20 }), error => {
+      assert.equal(error.code, "DOI_MISMATCH");assert.equal(error.submissionStage, "before_submit");
+      assert.equal(error.expectedDOI, DOI);assert.equal(error.receivedDOI, value === "10.9999/other" ? value : "");
+      assert.match(error.message, /未发布求助/);assert.match(error.message, /请核对 Zotero 条目的 DOI/);
+      assert.equal(error.reconcileRequired, false);assert.equal(error.submissionReview, undefined);return true;
+    });
+    assert.equal(harness.calls.filter(call => call.method === "POST" && new URL(call.url).pathname === "/assist/create").length, 0);
+    assert.equal(harness.store.values.size, 0);
+  }
+  const normalized = defaultHarness({ metadata: { doi: "https://doi.org/10.1159/000448372" } });
+  assert.equal((await normalized.client.submitRequest({ doi: DOI, points: 20 })).doi, DOI);
+});
+
+test("diagnostic DOI inspection returns only bounded identity evidence and never publishes or prechecks", async () => {
+  for (const [value, reason] of [[DOI, "match"], ["10.9999/other", "doi_mismatch"], ["", "doi_missing"], ["doi-invalid", "doi_invalid"], ["https://doi.org/10.1159/000448372", "match"]]) {
+    const harness = defaultHarness({ metadata: { doi: value, url: "https://publisher.example/paper?token=sensitive#fragment" } });
+    const result = await harness.client.inspectDOI(DOI);
+    assert.deepEqual(Object.keys(result).sort(), ["expectedDOI", "receivedDOI", "reason", "sourceURL", "title"].sort());
+    assert.equal(result.expectedDOI, DOI);assert.equal(result.reason, reason);
+    assert.equal(result.receivedDOI, reason === "match" ? DOI : reason === "doi_mismatch" ? value : "");
+    assert.equal(result.title, "Fixture DOI paper");assert.equal(result.sourceURL, "https://publisher.example/paper");
+    assert.deepEqual(harness.calls.filter(call => call.method === "POST").map(call => new URL(call.url).pathname), ["/assist/onekey-query"]);
+    assert.equal(harness.store.values.size, 0);
+    assert.equal(JSON.stringify(result).includes("token"), false);
+  }
+});
+
+test("diagnostic DOI inspection polls lookup only and respects cancellation/account changes", async () => {
+  const queued = defaultHarness({ queued: true });
+  assert.equal((await queued.client.inspectDOI(DOI)).reason, "match");
+  assert.deepEqual(queued.calls.filter(call => call.method === "POST").map(call => new URL(call.url).pathname), ["/assist/onekey-query", "/assist/paper-lookup-status", "/assist/paper-lookup-status"]);
+  assert.equal(queued.store.values.size, 0);
+  const cancelled = defaultHarness();
+  await assert.rejects(cancelled.client.inspectDOI(DOI, { isCancelled: () => true }), { name: "AbortError" });
+  assert.equal(cancelled.calls.length, 0);
+  const changed = defaultHarness();
+  const client = adapter.create({ model, parseHTML: parser, request: async spec => {
+    const result = await changed.request(spec);
+    if (new URL(spec.url).pathname === "/assist/create") result.text = result.text.replace('scope: "Account1"', 'scope: "OtherAccount"');
+    return result;
+  } });
+  await assert.rejects(client.inspectDOI(DOI), { code: "ACCOUNT_MISMATCH" });
+  assert.equal(changed.calls.filter(call => call.method === "POST").length, 0);
+});
+
+test("known published DOI mismatches retain a review-only reference across restart and never republish", async () => {
+  for (const value of ["10.9999/other", "", "not a DOI"]) {
+    const harness = defaultHarness();let repaired = false;
+    const request = async spec => {
+      const result = await harness.request(spec);
+      if (new URL(spec.url).pathname === "/assist/detail" && !repaired) result.text = detailHTML({ id: "Created1", doi: value });
+      return result;
+    };
+    const create = () => adapter.create({ model, parseHTML: parser, request, intentStore: harness.store });
+    const validate = error => {
+      assert.equal(error.submissionStage, "after_submit");assert.equal(error.reconcileRequired, true);
+      assert.deepEqual(error.submissionReview, { requestID: "Created1", requestURL: ORIGIN + "/assist/detail?id=Created1", expectedDOI: DOI, receivedDOI: value === "10.9999/other" ? value : "", reason: "DOI_MISMATCH" });
+      assert.match(error.message, /求助已创建/);assert.match(error.message, /不要重复发布/);
+      assert.match(error.message, /条目 DOI：10.1159\/000448372/);return true;
+    };
+    await assert.rejects(create().submitRequest({ doi: DOI, points: 20 }), validate);
+    assert.equal(harness.store.values.get("Account1:" + DOI).state, "confirmed");
+    assert.equal(harness.store.values.get("Account1:" + DOI).requestID, "Created1");
+    await assert.rejects(create().submitRequest({ doi: DOI, points: 20 }), validate);
+    repaired = true;
+    const recovered = await create().submitRequest({ doi: DOI, points: 20 });
+    assert.equal(recovered.reused, true);assert.equal(recovered.doi, DOI);
+    assert.equal(harness.calls.filter(call => call.method === "POST" && new URL(call.url).pathname === "/assist/create").length, 1);
+  }
+});
+
+test("published account and reward mismatches have distinct review reasons without weakening identity checks", async () => {
+  for (const [detail, reason, message] of [
+    [{ owner: "OtherAccount" }, "ACCOUNT_MISMATCH", /所属账号/],
+    [{ points: 35 }, "POINTS_MISMATCH", /悬赏积分/],
+  ]) {
+    const harness = defaultHarness();
+    const request = async spec => {
+      const result = await harness.request(spec);
+      if (new URL(spec.url).pathname === "/assist/detail") result.text = detailHTML({ id: "Created1", ...detail });
+      return result;
+    };
+    const client = adapter.create({ model, parseHTML: parser, request, intentStore: harness.store });
+    await assert.rejects(client.submitRequest({ doi: DOI, points: 20 }), error => {
+      assert.equal(error.code, "SUBMISSION_MISMATCH");assert.equal(error.reconcileRequired, true);
+      assert.equal(error.submissionReview.reason, reason);assert.equal(error.submissionReview.receivedDOI, DOI);
+      assert.match(error.message, message);assert.match(error.message, /不要重复发布/);return true;
+    });
+    assert.equal(harness.store.values.get("Account1:" + DOI).state, "confirmed");
+    assert.equal(harness.calls.filter(call => call.method === "POST" && new URL(call.url).pathname === "/assist/create").length, 1);
+  }
+});
+
+test("unreadable detail after publication keeps the exact safe review URL and a protected intent", async () => {
+  for (const html of ["<html><body>temporarily unavailable</body></html>", detailHTML({ id: "DifferentID" })]) {
+    const harness = defaultHarness();
+    const request = async spec => {
+      const result = await harness.request(spec);
+      if (new URL(spec.url).pathname === "/assist/detail") result.text = html;
+      return result;
+    };
+    const create = () => adapter.create({ model, parseHTML: parser, request, intentStore: harness.store });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await assert.rejects(create().submitRequest({ doi: DOI, points: 20 }), error => {
+        assert.equal(error.reconcileRequired, true);assert.equal(error.submissionStage, "after_submit");
+        assert.equal(error.submissionReview.requestID, "Created1");
+        assert.equal(error.submissionReview.requestURL, ORIGIN + "/assist/detail?id=Created1");
+        assert.equal(error.submissionReview.expectedDOI, DOI);assert.equal(error.submissionReview.receivedDOI, "");return true;
+      });
+    }
+    assert.equal(harness.store.values.get("Account1:" + DOI).state, "confirmed");
+    assert.equal(harness.calls.filter(call => call.method === "POST" && new URL(call.url).pathname === "/assist/create").length, 1);
+  }
+});
+
 test("default contract cancels during metadata polling without claiming a publication intent", async () => {
   let cancelled = false;
   const harness = defaultHarness({ queued: true });
@@ -409,17 +729,17 @@ test("default contract cancels during metadata polling without claiming a public
   assert.equal(harness.calls.filter(call => new URL(call.url).pathname === "/assist/paper-lookup-status").length, 0);
 });
 
-function downloadPageHTML({ fileID = "File1", channel = "highspeed", host = "filehub2.ablesci.com", servers = [{ id: "2", name: "线路1" }], defaultServerId = "2", expectedSize = 1000, highspeedAvailable = true } = {}) {
+function downloadPageHTML({ fileID = "File1", filenameHTML = "000448372.pdf", filenameTitle = null, extraNameHTML = "", channel = "highspeed", host = "filehub2.ablesci.com", servers = [{ id: "2", name: "线路1" }], defaultServerId = "2", expectedSize = 1000, highspeedAvailable = true } = {}) {
   const config = { tokenUrl: "/file/request-download-token", hashid: fileID, userId: "12345", defaultServerId, defaultChannel: channel, expectedSize, allowedNodeHosts: [host, ...servers.slice(1).map(server => `filehub${server.id}.ablesci.com`), "filehub11vip.ablesci.com"], normalServers: servers };
-  return `${modernAccountHTML()}<meta name="csrf-param" content="_csrf"><meta name="csrf-token" content="fixture-download-token"><div class="download-progress-page" data-download-blob-check="chunked-v1"><div class="download-progress-file-name">000448372.pdf</div><p>普通下载线路始终保持免积分（免费）。</p>${servers.map(server => `<button class="download-progress-normal-button" data-server-id="${server.id}">${server.name}</button>`).join("")}${highspeedAvailable ? '<button id="download-highspeed-direct">高速通道</button>' : ""}</div><script>const config = ${JSON.stringify(config)};</script>`;
+  return `${modernAccountHTML()}<meta name="csrf-param" content="_csrf"><meta name="csrf-token" content="fixture-download-token"><div class="download-progress-page" data-download-blob-check="chunked-v1"><div class="download-progress-file-name"${filenameTitle === null ? "" : ` title="${filenameTitle}"`}>${filenameHTML}</div>${extraNameHTML}<p>普通下载线路始终保持免积分（免费）。</p>${servers.map(server => `<button class="download-progress-normal-button" data-server-id="${server.id}">${server.name}</button>`).join("")}${highspeedAvailable ? '<button id="download-highspeed-direct">高速通道</button>' : ""}</div><script>const config = ${JSON.stringify(config)};</script>`;
 }
-function downloadHarness({ data = {}, pageOptions = {} } = {}) {
+function downloadHarness({ data = {}, pageOptions = {}, detailFilename = "000448372.pdf" } = {}) {
   const calls = [];
   const request = async spec => {
     calls.push(spec);
     const path = new URL(spec.url).pathname;
     if (path === "/my/assist-my") return response(spec.url, ownListHTML());
-    if (path === "/assist/detail") return response(spec.url, detailHTML().replace("/fixture-file?file=File1", "/assist/download?id=File1"));
+    if (path === "/assist/detail") return response(spec.url, detailHTML().replace("/fixture-file?file=File1", "/assist/download?id=File1").replace("000448372.pdf", detailFilename));
     if (path === "/assist/download") return response(spec.url, downloadPageHTML(pageOptions));
     if (path === "/file/request-download-token") {
       assert.equal(spec.method, "POST");
@@ -447,6 +767,39 @@ test("default download rejects wrong files, paid transport and non-allowlisted n
   for (const [options, code] of [[{ pageOptions: { fileID: "OtherFile" } }, "STRUCTURE_CHANGED"], [{ data: { channel: "highspeed", transport: "vip" } }, "INVALID_DOWNLOAD_RESPONSE"], [{ data: { host: "https://evil.example/download" } }, "INVALID_DOWNLOAD_URL"], [{ pageOptions: { host: "evil.example" } }, "STRUCTURE_CHANGED"]]) {
     const harness = downloadHarness(options);
     await assert.rejects(harness.client.getDownload("Request1", "File1"), { code });
+  }
+});
+
+test("download page accepts an observed abbreviated label only with the matching complete title", async () => {
+  // Same server-rendered structure as the authenticated capture, with an
+  // unrelated synthetic paper name so personal request metadata stays local.
+  const filename = "Effects of repeated environmental cues on exploratory behavior of receptor mutants in Example organism during controlled trials.pdf";
+  const label = "Effects of repeated environmental cues on exploratory behavior of receptor mutants in Example organ…";
+  const harness = downloadHarness({ detailFilename: filename, pageOptions: { filenameHTML: `\n                    ${label}                `, filenameTitle: filename }, data: { output_filename: filename } });
+  const result = await harness.client.getDownload("Request1", "File1");
+  assert.equal(result.filename, filename);
+  assert.equal(harness.calls.filter(call => call.method === "POST").length, 1);
+  const complete = downloadHarness({ pageOptions: { filenameTitle: "000448372.pdf" } });
+  assert.equal((await complete.client.getDownload("Request1", "File1")).filename, "000448372.pdf");
+});
+
+test("download filename titles cannot override conflicting labels, identities or ambiguous nodes", async () => {
+  const cases = [
+    { filenameHTML: "unrelated.pdf", filenameTitle: "000448372.pdf" },
+    { filenameHTML: "unrelated…", filenameTitle: "000448372.pdf" },
+    { filenameHTML: "000448…", filenameTitle: "000448373.pdf" },
+    { filenameHTML: "000448…" },
+    { filenameHTML: "…", filenameTitle: "000448372.pdf" },
+    { filenameHTML: "000448372.pdf…", filenameTitle: "000448372.pdf" },
+    { filenameHTML: "", filenameTitle: "000448372.pdf" },
+    { filenameTitle: "000448372.pdf", extraNameHTML: '<div class="download-progress-file-name" title="000448372.pdf">000448…</div>' },
+    { extraNameHTML: '<div class="download-progress-page" data-download-blob-check="chunked-v1"><div class="download-progress-file-name">000448372.pdf</div></div>' },
+    { filenameHTML: "a".repeat(255) + "wrong.pdf", filenameTitle: "a".repeat(255) + "correct.pdf" },
+  ];
+  for (const pageOptions of cases) {
+    const harness = downloadHarness({ pageOptions });
+    await assert.rejects(harness.client.getDownload("Request1", "File1"), { code: "DOWNLOAD_MISMATCH" });
+    assert.equal(harness.calls.filter(call => call.method === "POST").length, 0, "conflicting filename evidence must fail before requesting a token");
   }
 });
 

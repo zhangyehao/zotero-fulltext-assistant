@@ -171,6 +171,85 @@ test("task points are snapshots and survive configuration changes, deduplication
   assert.equal(model.sanitizeTask({ ...original, requestedPoints: "" }), null);
 });
 
+test("legacy reward amounts remain unverified and minimum-price acceptance defaults off", () => {
+  const legacy = { ...task({ requestURL, requestedPoints: 30, state: "waiting" }) };
+  delete legacy.pointsVerified; delete legacy.acceptSiteMinimum;
+  const restored = model.deserializeQueue(model.serializeQueue([legacy])).tasks[0];
+  assert.equal(restored.requestedPoints, 30);
+  assert.equal(restored.pointsVerified, false);
+  assert.equal(restored.acceptSiteMinimum, false);
+  assert.equal(task().pointsVerified, false);
+  assert.equal(task().acceptSiteMinimum, false);
+});
+
+test("reward verification and minimum-price authorization require literal true and verification requires a request", () => {
+  for (const value of [undefined, null, false, 0, 1, "true", "false", [], {}]) {
+    const current = task({ requestURL, requestedPoints: 30, pointsVerified: value, acceptSiteMinimum: value });
+    assert.equal(current.pointsVerified, false, String(value));
+    assert.equal(current.acceptSiteMinimum, false, String(value));
+  }
+  const verified = task({ requestURL, requestedPoints: 30, pointsVerified: true, acceptSiteMinimum: true });
+  assert.equal(verified.pointsVerified, true); assert.equal(verified.acceptSiteMinimum, true);
+  const unsubmitted = task({ pointsVerified: true, acceptSiteMinimum: true });
+  assert.equal(unsubmitted.pointsVerified, false); assert.equal(unsubmitted.acceptSiteMinimum, true);
+  assert.equal(model.sanitizeTask({ ...verified, requestedPoints: 10001 }), null);
+});
+
+test("actual reward and captured minimum policy round-trip without changing task and batch history", () => {
+  const current = task({ requestURL, state: "imported", source: "ablesci", attachmentID: 81, requestedPoints: 37, pointsVerified: true, acceptSiteMinimum: true });
+  const queue = { schemaVersion: 1, tasks: [current], currentBatch: { id: "reward-batch", createdAt: T0, taskIDs: [current.id] } };
+  const restored = model.deserializeQueue(model.serializeQueue(queue));
+  assert.deepEqual(restored.tasks[0], current);
+  assert.equal(restored.tasks[0].completedAt, T0);
+  assert.deepEqual(restored.currentBatch.taskIDs, [current.id]);
+  const duplicate = model.addTask(restored.tasks, { ...input, requestURL, requestedPoints: 99, acceptSiteMinimum: false }, { now: T1, id: "later" });
+  assert.equal(duplicate.added, false); assert.equal(duplicate.task.requestedPoints, 37);
+  assert.equal(duplicate.task.pointsVerified, true); assert.equal(duplicate.task.acceptSiteMinimum, true);
+});
+
+test("changing a request or its amount invalidates inherited price verification unless explicitly reverified", () => {
+  const original = task({ requestURL, requestedPoints: 37, pointsVerified: true, acceptSiteMinimum: true });
+  const anotherURL = "https://www.ablesci.com/assist/detail?id=Other";
+  for (const patch of [{ requestURL: anotherURL }, { requestedPoints: 45 }, { requestURL: anotherURL, requestedPoints: 45 }]) {
+    const changed = model.updateTask(original, patch, { now: T1 });
+    assert.equal(changed.pointsVerified, false);
+    assert.equal(changed.acceptSiteMinimum, true);
+    assert.equal(changed.id, original.id); assert.equal(changed.createdAt, original.createdAt);
+  }
+  const reverified = model.updateTask(original, { requestURL: anotherURL, requestedPoints: 45, pointsVerified: true }, { now: T1 });
+  assert.equal(reverified.pointsVerified, true); assert.equal(reverified.requestedPoints, 45);
+  const detached = model.updateTask(original, { requestURL: "", pointsVerified: true }, { now: T1 });
+  assert.equal(detached.pointsVerified, false); assert.equal(detached.requestID, "");
+  const unchanged = model.updateTask(original, { state: "available", requestedPoints: 37 }, { now: T1 });
+  assert.equal(unchanged.pointsVerified, true); assert.equal(original.pointsVerified, true);
+});
+
+test("a published-but-unverified request stays a separate sanitized review reference across restart", () => {
+  const submissionReview = { requestID: "Review12", requestURL: "https://www.ablesci.com/assist/detail?id=Review12", expectedDOI: input.doi, receivedDOI: "10.1234/other", reason: "DOI_MISMATCH", cookie: "private-secret", downloadURL: "https://example.test/?token=private-secret" };
+  const current = task({ state: "submission_unknown", submissionReview });
+  assert.equal(current.requestID, ""); assert.equal(current.requestURL, ""); assert.equal(current.pointsVerified, false);
+  assert.equal(current.submissionReview.expectedDOI, "10.1038/nn.4346"); assert.equal(current.submissionReview.receivedDOI, "10.1234/other");
+  assert.equal(Object.hasOwn(current.submissionReview, "cookie"), false); assert.equal(Object.hasOwn(current.submissionReview, "downloadURL"), false);
+  const serialized = model.serializeQueue([current]); assert.equal(serialized.includes("private-secret"), false);
+  assert.deepEqual(model.deserializeQueue(serialized).tasks[0], current);
+  const paused = model.updateTask(current, { state: "paused" }, { now: T1 }); assert.deepEqual(paused.submissionReview, current.submissionReview);
+  const bound = model.updateTask(current, { requestURL: submissionReview.requestURL, state: "waiting" }, { now: T1 });
+  assert.equal(bound.requestID, "Review12"); assert.equal(bound.submissionReview, null);
+});
+
+test("invalid review URLs or DOI evidence are discarded without binding a request or dropping the task", () => {
+  const valid = { requestID: "Review12", requestURL: "https://www.ablesci.com/assist/detail?id=Review12", expectedDOI: input.doi, receivedDOI: "", reason: "DETAIL_UNAVAILABLE" };
+  for (const submissionReview of [null, [], {}, { ...valid, requestID: "Other" }, { ...valid, requestURL: "https://www.ablesci.com.evil.test/assist/detail?id=Review12" }, { ...valid, requestURL: valid.requestURL + "&token=secret" }, { ...valid, expectedDOI: "broken" }, { ...valid, receivedDOI: "See 10.1234/other" }]) {
+    const current = task({ state: "submission_unknown", submissionReview });
+    assert.equal(current.submissionReview, null); assert.equal(current.requestID, ""); assert.equal(current.id, "task-1");
+  }
+  for (const state of ["waiting", "available", "queued", "imported", "manual_review"])
+    assert.equal(task({ state, submissionReview: valid }).submissionReview, null);
+  for (const state of ["submission_unknown", "paused", "error"])
+    assert.equal(task({ state, submissionReview: valid }).submissionReview.requestID, "Review12");
+  assert.equal(task({ state: "submission_unknown", requestURL, submissionReview: valid }).submissionReview, null);
+});
+
 test("DOI normalization accepts whole DOI values and canonical DOI URLs", () => {
   assert.equal(model.normalizeDOI("  DOI: 10.1038/NN.4346 \n"), "10.1038/nn.4346");
   assert.equal(model.normalizeDOI("https://doi.org/10.1000%2FABC(1)"), "10.1000/abc(1)");

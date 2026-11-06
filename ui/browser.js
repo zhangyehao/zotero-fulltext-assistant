@@ -20,7 +20,7 @@ window.addEventListener("load",async()=>{
   const tick=async()=>{
     if(closed)return;
     const current=browser.currentURI?.spec||url;document.getElementById("ft-address").textContent=current;
-    button.textContent=window.FulltextSiteMode==="login"?"完成登录":"刷新任务状态";
+    button.textContent=window.FulltextSiteMode==="login"?"完成登录":window.FulltextSiteMode==="checkin"?"刷新签到状态":"刷新任务状态";
     if(window.FulltextSiteMode!=="login")return;
     if(current.startsWith("https://www.ablesci.com/site/login")&&!filled){
       try{const result=await app.fillSavedLogin();if(result?.filled){filled=true;status.textContent="已填入保存的账号密码。请在网页完成验证码并点击登录。";}}catch(_){}
@@ -28,5 +28,5 @@ window.addEventListener("load",async()=>{
     if(current.startsWith("https://www.ablesci.com/")&&!current.includes("/site/login")&&Date.now()-lastCheck>5000)await checkAccount();
   };
   timer=window.setInterval(()=>tick().catch(()=>{}),1200);await tick();
-  button.addEventListener("click",async()=>{button.disabled=true;try{if(window.FulltextSiteMode==="login")await checkAccount(true);else{await app.inspectActivePage();status.textContent="任务状态已更新，可在 Zotero 设置 → 全文助手中查看。";}}catch(e){status.textContent=e.message;}finally{if(!closed)button.disabled=false;}});
+  button.addEventListener("click",async()=>{button.disabled=true;try{if(window.FulltextSiteMode==="login")await checkAccount(true);else{await app.inspectActivePage();status.textContent=window.FulltextSiteMode==="checkin"?"签到状态已检查，可在科研通设置中查看余额和奖励。":"任务状态已更新，可在 Zotero 设置 → 全文助手中查看。";}}catch(e){status.textContent=e.message;}finally{if(!closed)button.disabled=false;}});
 },{once:true});

@@ -5,8 +5,8 @@
   </html:div>
   <html:div id="fta-pref-tabs" class="fta-tabs" role="tablist" aria-label="全文助手页面" aria-orientation="horizontal">
     <html:button id="fta-pref-tab-tasks" type="button" role="tab" data-page="tasks" aria-controls="fta-pref-panel-tasks" aria-selected="true" tabindex="0">任务</html:button>
-    <html:button id="fta-pref-tab-settings" type="button" role="tab" data-page="settings" aria-controls="fta-pref-panel-settings" aria-selected="false" tabindex="-1">下载设置</html:button>
-    <html:button id="fta-pref-tab-account" type="button" role="tab" data-page="account" aria-controls="fta-pref-panel-account" aria-selected="false" tabindex="-1">科研通账号</html:button>
+    <html:button id="fta-pref-tab-settings" type="button" role="tab" data-page="settings" aria-controls="fta-pref-panel-settings" aria-selected="false" tabindex="-1">设置</html:button>
+    <html:button id="fta-pref-tab-account" type="button" role="tab" data-page="account" aria-controls="fta-pref-panel-account" aria-selected="false" tabindex="-1">科研通设置</html:button>
     <html:button id="fta-pref-tab-messages" type="button" role="tab" data-page="messages" aria-controls="fta-pref-panel-messages" aria-selected="false" tabindex="-1">消息</html:button>
   </html:div>
   <html:section id="fta-pref-panel-tasks" class="fta-section fta-panel" role="tabpanel" tabindex="0" aria-labelledby="fta-pref-tab-tasks">
@@ -35,8 +35,7 @@
     <html:details class="fta-existing"><html:summary>关联已有求助</html:summary><html:form id="fta-pref-add-form"><html:label for="fta-pref-request-url">自己的科研通求助详情页链接</html:label><html:input id="fta-pref-request-url" type="url" placeholder="https://www.ablesci.com/assist/detail?id=…" required="required"/><html:label for="fta-pref-request-target" class="fta-target-label">关联文献</html:label><html:select id="fta-pref-request-target"><html:option value="">只跟踪，不关联文献</html:option></html:select><html:p class="fta-note">只跟踪不会保存附件到文库；需要入库时，请明确选择对应文献。可选文献来自上方尚未关联求助的任务。</html:p><html:div class="fta-actions"><html:button id="fta-pref-add-request" type="submit">添加</html:button></html:div></html:form></html:details>
   </html:section>
   <html:section id="fta-pref-panel-settings" class="fta-section fta-panel" role="tabpanel" tabindex="0" hidden="hidden" aria-labelledby="fta-pref-tab-settings">
-    <html:div class="fta-section-heading"><html:h2 id="fta-fetch-heading">下载设置</html:h2><html:span class="fta-secondary">按你的下载习惯设置</html:span></html:div>
-    <html:form id="fta-pref-settings-form">
+    <html:div class="fta-section-heading"><html:h2 id="fta-fetch-heading">设置</html:h2><html:span class="fta-secondary">按你的下载习惯设置</html:span></html:div>
       <html:div class="fta-settings-group">
         <html:label for="fta-pref-language">界面语言</html:label>
         <html:select id="fta-pref-language" aria-describedby="fta-pref-language-note"><html:option value="zh-CN" data-i18n-skip="true">简体中文</html:option><html:option value="zh-TW" data-i18n-skip="true">繁體中文</html:option><html:option value="en" data-i18n-skip="true">English</html:option></html:select>
@@ -52,23 +51,12 @@
           <html:p class="fta-note">未能自动匹配时，可点击“选择已下载的PDF”。所选文件身份仍不确定时，需要先预览核对并明确确认；不匹配的文件会停止导入。未获取全文的任务始终可改用科研通求助，已有求助可直接查看。</html:p>
         </html:details>
       </html:div>
-      <html:div class="fta-settings-group">
-        <html:h3>科研通求助与下载</html:h3>
-        <html:div class="fta-fields">
-          <html:label for="fta-pref-points">每篇求助悬赏积分<html:input id="fta-pref-points" type="number" min="1" max="10000" step="1" value="10" required="required"/></html:label>
-          <html:label for="fta-pref-poll">科研通应助检查间隔（秒）<html:input id="fta-pref-poll" type="number" min="60" max="3600" step="1" value="60" required="required"/></html:label>
-        </html:div>
-        <html:label class="fta-check" for="fta-pref-auto-download"><html:input id="fta-pref-auto-download" type="checkbox" checked="checked"/><html:span>收到应助文件后，自动下载并添加到原文献</html:span></html:label>
-        <html:p class="fta-note">已核验的应助文件入库后，自动采纳并结算原悬赏；随后只将该文件对应的上传消息标记已读，不会将所有消息标为已读。无法确认论文身份时，先预览并由你明确确认。</html:p>
-        <html:p class="fta-note">默认悬赏 10 积分。输入后求助按钮会立即显示当前金额；点击时先保存并按按钮所示金额发起。网站最低要求超过设置值时暂停，不自动加价；修改设置不会改变已发布的求助。</html:p>
-        <html:p class="fta-note">科研通下载优先使用账号当前的免积分高速权益，否则使用普通免费线路；不自动购买高速下载。</html:p>
-      </html:div>
-      <html:div class="fta-actions fta-save-actions"><html:button id="fta-pref-save-settings" type="submit" class="fta-primary">保存设置</html:button><html:span id="fta-pref-save-state" class="fta-secondary" role="status" aria-live="polite"></html:span></html:div>
-    </html:form>
-    <html:p id="fta-pref-publisher-session" class="fta-note" hidden="hidden"></html:p>
+    <html:div class="fta-settings-group"><html:h3>机构登录</html:h3><html:p id="fta-pref-publisher-session" class="fta-note" hidden="hidden"></html:p><html:p class="fta-note">机构网页登录状态保存在本机。有效会话可重复使用；网站要求重新验证时，请在登录窗口完成验证。</html:p></html:div>
   </html:section>
   <html:section id="fta-pref-panel-account" class="fta-section fta-panel" role="tabpanel" tabindex="0" hidden="hidden" aria-labelledby="fta-pref-tab-account">
-    <html:div class="fta-section-heading"><html:h2 id="fta-account-heading">科研通账号</html:h2><html:span id="fta-pref-account-state" class="fta-status-badge">未登录</html:span></html:div>
+    <html:div class="fta-section-heading"><html:h2 id="fta-account-heading">科研通设置</html:h2><html:span id="fta-pref-account-state" class="fta-status-badge">未登录</html:span></html:div>
+    <html:div class="fta-settings-group">
+    <html:h3>科研通账号</html:h3>
     <html:p id="fta-pref-account-identity" class="fta-account-identity" hidden="hidden"></html:p>
     <html:form id="fta-pref-account-form" autocomplete="off">
       <html:div class="fta-fields">
@@ -79,6 +67,48 @@
     </html:form>
     <html:p id="fta-pref-account-message" class="fta-secondary">登录后可发起求助、查看应助进度并下载文件。</html:p>
     <html:p class="fta-note">密码保存在本机 Zotero 登录管理器中。保存后会打开科研通网页并填入账号密码，请在网页完成登录和验证。</html:p>
+    <html:div class="fta-checkin" aria-labelledby="fta-pref-checkin-heading">
+      <html:h3 id="fta-pref-checkin-heading">余额与签到</html:h3>
+      <html:dl class="fta-checkin-summary">
+        <html:div><html:dt id="fta-pref-checkin-balance-label">可用积分</html:dt><html:dd id="fta-pref-checkin-balance">—</html:dd></html:div>
+        <html:div><html:dt>今日签到</html:dt><html:dd id="fta-pref-checkin-state">尚未查询</html:dd></html:div>
+        <html:div><html:dt>今日奖励</html:dt><html:dd id="fta-pref-checkin-reward">—</html:dd></html:div>
+      </html:dl>
+      <html:div class="fta-actions fta-checkin-tools"><html:button id="fta-pref-checkin-refresh" type="button">刷新余额与签到</html:button><html:button id="fta-pref-checkin-open" type="button">去网页签到</html:button><html:span id="fta-pref-checkin-refreshed" class="fta-secondary">尚未查询</html:span></html:div>
+      <html:p id="fta-pref-checkin-message" class="fta-note" hidden="hidden"></html:p>
+    </html:div>
+    </html:div>
+    <html:form id="fta-pref-settings-form">
+      <html:div class="fta-settings-group">
+        <html:label class="fta-check" for="fta-pref-checkin-reminder"><html:input id="fta-pref-checkin-reminder" type="checkbox" checked="checked" aria-describedby="fta-pref-checkin-note"/><html:span>每天 6:00 检查签到状态</html:span></html:label>
+        <html:p id="fta-pref-checkin-note" class="fta-note">Zotero 运行时每天 6:00 检查，打开助手时补查。按网站要求，签到请在官方网页自行完成；助手只查询状态、余额与奖励到账。</html:p>
+      </html:div>
+      <html:div class="fta-settings-group">
+        <html:h3>科研通求助与下载</html:h3>
+        <html:div class="fta-fields">
+          <html:label for="fta-pref-points">每篇求助悬赏积分<html:input id="fta-pref-points" type="number" min="1" max="10000" step="1" value="10" required="required"/></html:label>
+          <html:label for="fta-pref-poll">科研通应助检查间隔（秒）<html:input id="fta-pref-poll" type="number" min="60" max="3600" step="1" value="60" required="required"/></html:label>
+        </html:div>
+        <html:label class="fta-check" for="fta-pref-site-minimum"><html:input id="fta-pref-site-minimum" type="checkbox" aria-describedby="fta-pref-site-minimum-note"/><html:span>自动接受网站最低悬赏积分</html:span></html:label>
+        <html:p id="fta-pref-site-minimum-note" class="fta-note">开启后，网站最低悬赏高于设置值时，按网站最低要求发布，实际积分可能更高；关闭时暂停并提示。已发布的求助保持原悬赏。</html:p>
+        <html:label class="fta-check" for="fta-pref-auto-download"><html:input id="fta-pref-auto-download" type="checkbox" checked="checked"/><html:span>收到应助文件后，自动下载并添加到原文献</html:span></html:label>
+        <html:p class="fta-note">已核验的应助文件入库后，自动采纳并结算原悬赏；随后只将该文件对应的上传消息标记已读，不会将所有消息标为已读。无法确认论文身份时，先预览并由你明确确认。</html:p>
+        <html:p class="fta-note">默认悬赏 10 积分。输入后求助按钮会立即显示当前金额，点击时保存积分。自动接受最低积分的开关须保存后生效；任务中保留实际发布积分。</html:p>
+        <html:p class="fta-note">科研通下载优先使用账号当前的免积分高速权益，否则使用普通免费线路；不自动购买高速下载。</html:p>
+      </html:div>
+      <html:div class="fta-actions fta-save-actions"><html:button id="fta-pref-save-settings" type="submit" class="fta-primary">保存设置</html:button><html:span id="fta-pref-save-state" class="fta-secondary" role="status" aria-live="polite"></html:span></html:div>
+    </html:form>
+    <html:section id="fta-pref-spending" class="fta-spending" aria-labelledby="fta-pref-spending-heading">
+      <html:h3 id="fta-pref-spending-heading">积分使用</html:h3>
+      <html:dl class="fta-spending-cards">
+        <html:div><html:dt>累计已支出</html:dt><html:dd id="fta-pref-spending-total">0 积分</html:dd></html:div>
+        <html:div><html:dt>已采纳篇数</html:dt><html:dd id="fta-pref-spending-count">0 篇</html:dd></html:div>
+        <html:div><html:dt>平均每篇</html:dt><html:dd id="fta-pref-spending-average">—</html:dd></html:div>
+      </html:dl>
+      <html:p id="fta-pref-spending-coverage" class="fta-note"></html:p>
+      <html:p class="fta-note">支出与均价仅统计已采纳且金额已核实的求助，按求助编号去重。这里汇总本机历史，并非网站完整账单。</html:p>
+      <html:details id="fta-pref-spending-details" class="fta-help fta-spending-details"><html:summary>最近支出（最多 10 条）</html:summary><html:div id="fta-pref-spending-list" class="fta-spending-list"></html:div><html:p id="fta-pref-spending-empty" class="fta-note">暂无已采纳记录。</html:p></html:details>
+    </html:section>
   </html:section>
   <html:section id="fta-pref-panel-messages" class="fta-section fta-panel" role="tabpanel" tabindex="0" hidden="hidden" aria-labelledby="fta-pref-tab-messages">
     <html:div class="fta-section-heading fta-message-heading"><html:h2 id="fta-messages-heading">消息</html:h2><html:div class="fta-message-tools"><html:span id="fta-pref-messages-refreshed" class="fta-secondary">尚未刷新</html:span><html:button id="fta-pref-refresh-messages" type="button">刷新消息</html:button></html:div></html:div>

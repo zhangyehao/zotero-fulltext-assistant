@@ -12,6 +12,8 @@
 #fta-preferences button.fta-primary:hover:enabled{background:light-dark(#12566c,#b0dceb)}
 #fta-preferences input[type=text],#fta-preferences input[type=password],#fta-preferences input[type=number],#fta-preferences input[type=url],#fta-preferences select{min-height:34px;min-width:0;width:100%;padding:6px 9px;border:1px solid light-dark(#bcc6d2,#637184);border-radius:5px;color:inherit;background:light-dark(#fff,#232c38)}
 #fta-preferences input:disabled{opacity:.65}
+#fta-preferences #fta-pref-points,#fta-preferences #fta-pref-poll{text-align:center;font-variant-numeric:tabular-nums}
+#fta-preferences #fta-pref-settings-form{padding-top:22px}
 #fta-preferences button:focus-visible,#fta-preferences input:focus-visible,#fta-preferences select:focus-visible,#fta-preferences summary:focus-visible{outline:2px solid light-dark(#3d7eb2,#a3d2f1);outline-offset:3px}
 #fta-preferences .fta-panel:focus-visible{outline:2px solid light-dark(#3d7eb2,#a3d2f1);outline-offset:5px;border-radius:4px}
 #fta-preferences .fta-intro{display:flex;align-items:center;gap:12px;margin:2px 0 18px}
@@ -73,6 +75,26 @@
 #fta-preferences .fta-binding-panel{margin-top:12px;padding:14px;border:1px solid light-dark(#d7e1e8,#526577);border-radius:6px;background:light-dark(#f5f8fa,#2b3744)}
 #fta-preferences .fta-binding-panel label{display:block;font-size:.92em;margin-bottom:8px}
 #fta-preferences .fta-binding-panel .fta-actions{margin-bottom:0}
+#fta-preferences .fta-submission-review{margin-top:12px;padding:12px 14px;border:1px solid light-dark(#e7d6b5,#776548);border-radius:6px;background:light-dark(#fff8eb,#41392d)}
+#fta-preferences .fta-review-doi{display:flex;flex-wrap:wrap;gap:4px 8px;font-size:.92em;overflow-wrap:anywhere}
+#fta-preferences .fta-review-doi+.fta-review-doi{margin-top:5px}
+#fta-preferences .fta-doi-check{margin-top:10px;font-size:.95em}
+#fta-preferences .fta-doi-check>summary{cursor:pointer;color:var(--fta-accent)}
+#fta-preferences .fta-doi-check[open]>summary{margin-bottom:8px}
+#fta-preferences .fta-spending{margin-top:24px;padding-top:22px;border-top:1px solid var(--fta-border)}
+#fta-preferences .fta-spending-cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:0}
+#fta-preferences .fta-spending-cards>div{padding:12px;border:1px solid var(--fta-border);border-radius:7px;background:light-dark(#f4f7f9,#293340);min-width:0}
+#fta-preferences .fta-spending-cards dt{font-size:.9em;color:var(--fta-muted)}
+#fta-preferences .fta-spending-cards dd{margin:5px 0 0;font-size:1.18em;font-weight:600;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+#fta-preferences .fta-spending-record{padding:10px 0;border-bottom:1px solid var(--fta-border)}
+#fta-preferences .fta-spending-record:last-child{border-bottom:0}
+#fta-preferences .fta-spending-title{font-size:.95em;line-height:1.5;overflow-wrap:anywhere}
+#fta-preferences .fta-checkin{margin-top:18px;padding-top:16px;border-top:1px solid var(--fta-border)}
+#fta-preferences .fta-checkin-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:0}
+#fta-preferences .fta-checkin-summary dt{font-size:.9em;color:var(--fta-muted)}
+#fta-preferences .fta-checkin-summary dd{margin:4px 0 0;font-weight:600;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+#fta-preferences .fta-checkin-tools{gap:7px 10px}
+#fta-preferences .fta-checkin-tools .fta-secondary{margin-inline-start:auto}
 #fta-preferences .fta-binding-panel select{margin-bottom:7px}
 #fta-preferences .fta-empty{padding:28px 18px;color:var(--fta-muted);font-size:.95em;text-align:center;border:1px dashed var(--fta-border);border-radius:8px;line-height:1.7}
 #fta-preferences .fta-existing{margin-top:22px;padding-top:18px;border-top:1px solid var(--fta-border);font-size:.92em}

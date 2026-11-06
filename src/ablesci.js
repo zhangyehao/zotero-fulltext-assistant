@@ -21,7 +21,7 @@
 (function (root) {
   "use strict";
   const ORIGIN = "https://www.ablesci.com";
-  const PATHS = Object.freeze({ account: "/my/assist-my", ownRequests: "/my/assist-my", create: "/assist/create", login: "/site/login", messages: "/my/message", downloadSettings: "/my/assist-my-set" });
+  const PATHS = Object.freeze({ account: "/my/assist-my", ownRequests: "/my/assist-my", create: "/assist/create", login: "/site/login", messages: "/my/message", downloadSettings: "/my/assist-my-set", points: "/my/point" });
   const REMOTE_STATES = ["waiting", "uploaded", "finished", "closed"];
   const FILE_STATES = ["waiting", "accept", "reject", "withdraw"];
   const NORMAL_DOWNLOAD_ORIGINS = Object.freeze(["https://filehub2.ablesci.com", "https://filehub3.ablesci.com", "https://filehub4.ablesci.com"]);
@@ -39,6 +39,9 @@
   }
 
   function fail(code, message, options) { throw new AbleSciError(code, message, options); }
+  function doiEvidence(value, model) {
+    try { return model.normalizeDOI(value) || ""; } catch (_) { return ""; }
+  }
   function shortText(value, limit = 2000) { return String(value || "").replace(/\s+/g, " ").trim().slice(0, limit); }
   function siteURL(value, base = ORIGIN) {
     let url;
@@ -124,19 +127,24 @@
       try { doi = model.normalizeDOI(doiNode.getAttribute("data-clipboard-text")); }
       catch (_) { fail("DOI_MISMATCH", "详情页 DOI 字段无法校验。"); }
     }
-    let ownerID = null, points = null, downloadText = "";
+    let ownerID = null, points = null, ownerRows = 0, downloadText = "";
     for (const row of detail ? detail.querySelectorAll("table.stable tr") : []) {
       const cells = row.querySelectorAll("td");
       if (cells.length !== 2) continue;
       const label = shortText(cells[0].textContent);
       if (label === "求助人") {
+        ownerRows++;
         const owner = Array.from(cells[1].querySelectorAll("a[href]")).find(a => ownID(a.getAttribute("href"), "/user/home"));
         ownerID = owner ? ownID(owner.getAttribute("href"), "/user/home") : null;
-        const match = shortText(cells[1].textContent).match(/悬赏\s*(\d+)\s*积分/);
-        points = match ? Number(match[1]) : null;
+        const matches = [...shortText(cells[1].textContent).matchAll(/悬赏\s*(\d+)\s*积分/g)];
+        try { points = matches.length === 1 ? model.validatePoints(matches[0][1]) : null; }
+        catch (_) { points = null; }
       }
       if (label === "下载") downloadText = shortText(cells[1].textContent);
     }
+    // The configured default is not evidence of an old request's actual reward.
+    // Ambiguous or changed markup leaves it unknown without losing its files.
+    if (ownerRows !== 1) { ownerID = null; points = null; }
     const files = [];
     for (const entry of page.querySelectorAll("#assist-timeline .layui-timeline-item")) {
       const info = entry.querySelector(".file-info");
@@ -167,7 +175,7 @@
       const url = new URL(official?.getAttribute("href"));
       if (/^https?:$/.test(url.protocol) && !url.username && !url.password) officialURL = url.href;
     } catch (_) {}
-    return { ...identity, title: shortText(titleNode?.getAttribute("data-clipboard-text") || titleCell?.firstElementChild?.textContent), doi, officialURL, ownerID, points, remoteState, state, files, expired, downloadText, permissionRequired: files.some(file => file.permissionRequired), evidence: "scoped-request-badge-and-file-records" };
+    return { ...identity, title: shortText(titleNode?.getAttribute("data-clipboard-text") || titleCell?.firstElementChild?.textContent), doi, officialURL, ownerID, points, requestedPoints: points, pointsVerified: points !== null, remoteState, state, files, expired, downloadText, permissionRequired: files.some(file => file.permissionRequired), evidence: "scoped-request-badge-and-file-records" };
   }
 
   function csrf(doc) {
@@ -222,6 +230,22 @@
   function plainMessage(value, parseHTML) { return shortText(parseHTML("<div>" + String(value || "") + "</div>").body.textContent, 700); }
   function scriptText(doc) { return Array.from(doc.querySelectorAll("script:not([src])")).map(node => node.textContent).join("\n"); }
 
+  async function lookupDOIMetadata({ doi, query, delay, checkCancelled }) {
+    let lookup = await query("/assist/onekey-query", { onekey: doi });
+    if (lookup.code === 0 && lookup.job_uuid && lookup.status === "queued") {
+      const jobID = lookup.job_uuid;
+      if (!/^[A-Za-z0-9_-]{1,128}$/.test(jobID)) fail("INVALID_RESPONSE", "文献查询任务标识无法核实。");
+      for (let attempt = 0; attempt < 30; attempt++) {
+        await delay(1500);checkCancelled();
+        lookup = await query("/assist/paper-lookup-status", { job_uuid: jobID });
+        if (!["queued", "running"].includes(lookup.status)) break;
+      }
+    }
+    if (["queued", "running"].includes(lookup.status)) fail("LOOKUP_PENDING", "文献信息仍在查询，未发布求助，请稍后重试。", { retryable: true });
+    if (lookup.code !== 0 || !lookup.data || typeof lookup.data !== "object" || Array.isArray(lookup.data)) fail("LOOKUP_FAILED", "科研通未能核实该 DOI 的文献信息，未发布求助。");
+    return lookup.data;
+  }
+
   function parseMessages(doc, account) {
     if (accountScope(doc) !== account.accountID) fail("ACCOUNT_MISMATCH", "消息列表与当前登录账号不一致。");
     const page = doc.querySelector(".user-message-page");
@@ -246,8 +270,23 @@
   function parseDownloadPage(doc, pageURL, file, account) {
     const url = new URL(siteURL(pageURL));
     if (url.pathname !== "/assist/download" || url.searchParams.get("id") !== file.fileID || accountScope(doc) !== account.accountID) fail("DOWNLOAD_MISMATCH", "文件下载页与当前文件或账号不一致。");
-    const page = doc.querySelector('.download-progress-page[data-download-blob-check="chunked-v1"]');
-    if (!page || shortText(page.querySelector(".download-progress-file-name")?.textContent, 255) !== file.filename) fail("DOWNLOAD_MISMATCH", "下载页面文件名与应助文件不一致。");
+    const pages = doc.querySelectorAll('.download-progress-page[data-download-blob-check="chunked-v1"]');
+    const page = pages.length === 1 ? pages[0] : null;
+    const names = page ? page.querySelectorAll(".download-progress-file-name") : [];
+    const name = names.length === 1 ? names[0] : null;
+    // The current download page shortens long visible names with U+2026 but
+    // keeps the complete filename in this node's title. The title is usable
+    // only when the visible name agrees with it; detail anchors have a generic
+    // "click to download" title, so their actual text remains authoritative.
+    // Do not truncate either side before identity checks.
+    const renderedName = shortText(name?.textContent, 4097);
+    const titleName = shortText(name?.getAttribute("title"), 4097);
+    const abbreviatedPrefix = renderedName.endsWith("…") ? renderedName.slice(0, -1) : "";
+    const consistentTitle = !titleName || renderedName === titleName
+      || !!abbreviatedPrefix && titleName.startsWith(abbreviatedPrefix) && titleName.length > abbreviatedPrefix.length;
+    const filename = titleName || renderedName;
+    if (!name || !renderedName || renderedName.length > 4096 || filename.length > 4096
+      || !consistentTitle || filename !== file.filename) fail("DOWNLOAD_MISMATCH", "下载页面文件名与应助文件不一致。");
     if (!/普通下载线路始终保持免积分|普通下载不扣积分/.test(page.textContent)) fail("UNVERIFIED_CONTRACT", "当前页面没有确认普通线路免费，未请求下载令牌。");
     let config;
     try { config = JSON.parse(scriptText(doc).match(/\bconst\s+config\s*=\s*(\{[^\r\n]*\})\s*;/)?.[1]); }
@@ -348,7 +387,7 @@
         return { url: url.href, costPoints: 0, expectedSize, allowedOrigins, filename: shortText(data.output_filename, 255), route, transport: data.transport, serverID, normalServerIndex: options.normalServerIndex, normalServerCount: config.normalServers.length, canFallback: route === "highspeed" && data.transport === "vip", timeoutMs: downloadTimeout(expectedSize), retryable: true, entitlement: entitlement.reason, ...(data.transport === "cdn" ? { allowedRedirectDomain: "ablesci.com" } : {}) };
       },
       submission: {
-        async prepare({ doc, url, doi, points, account, query, delay, checkCancelled }) {
+        async prepare({ doc, url, doi, points, acceptSiteMinimum = false, account, query, delay, checkCancelled }) {
           if (accountScope(doc) !== account.accountID) fail("ACCOUNT_MISMATCH", "创建页面的登录账号发生变化。");
           const form = doc.querySelector("#assist-create-form"), code = scriptText(doc);
           if (!form || String(form.getAttribute("method")).toLowerCase() !== "post" || new URL(siteURL(form.getAttribute("action"), url)).pathname !== PATHS.create || doc.querySelector("#action-url")?.getAttribute("value") !== PATHS.create) fail("STRUCTURE_CHANGED", "创建求助的真实表单发生变化。");
@@ -360,20 +399,12 @@
           }
           const balance = integer(doc.querySelector("#point-has")?.textContent.trim(), "当前可用积分", true);
           if (points > balance) fail("INSUFFICIENT_POINTS", "悬赏积分超过当前账号可用积分，未发起求助。");
-          let lookup = await query("/assist/onekey-query", { onekey: doi });
-          if (lookup.code === 0 && lookup.job_uuid && lookup.status === "queued") {
-            const jobID = lookup.job_uuid;
-            if (!/^[A-Za-z0-9_-]{1,128}$/.test(jobID)) fail("INVALID_RESPONSE", "文献查询任务标识无法核实。");
-            for (let attempt = 0; attempt < 30; attempt++) {
-              await delay(1500); checkCancelled();
-              lookup = await query("/assist/paper-lookup-status", { job_uuid: jobID });
-              if (!["queued", "running"].includes(lookup.status)) break;
-            }
+          const metadata = await lookupDOIMetadata({ doi, query, delay, checkCancelled });
+          const receivedDOI = doiEvidence(metadata.doi, model);
+          if (receivedDOI !== doi) {
+            const error = new AbleSciError("DOI_MISMATCH", "科研通查询返回的 DOI 与条目不一致，未发布求助。条目 DOI：" + doi + "；网站 DOI：" + (receivedDOI || "未提供有效 DOI") + "。请核对 Zotero 条目的 DOI，再重新尝试；不要仅凭标题相似确认。");
+            error.expectedDOI = doi;error.receivedDOI = receivedDOI;error.submissionStage = "before_submit";throw error;
           }
-          if (["queued", "running"].includes(lookup.status)) fail("LOOKUP_PENDING", "文献信息仍在查询，未发布求助，请稍后重试。", { retryable: true });
-          if (lookup.code !== 0 || !lookup.data) fail("LOOKUP_FAILED", "科研通未能核实该 DOI 的文献信息，未发布求助。");
-          const metadata = lookup.data;
-          if (model.normalizeDOI(metadata.doi) !== doi) fail("DOI_MISMATCH", "科研通查询结果的 DOI 与 Zotero 条目不一致，未发布求助。");
           const title = shortText(metadata.title, 2000);
           if (!title) fail("LOOKUP_FAILED", "文献查询没有返回标题，未发布求助。");
           const type = String(metadata.type);
@@ -388,15 +419,19 @@
           const lowest = await query("/assist/query-lowest-point", { doi, url: officialURL });
           if (lowest.code !== 0) fail("STRUCTURE_CHANGED", "网站未能确认本篇文献最低悬赏积分。");
           const minimumPoints = Math.max(integer(doc.querySelector("#point-low")?.textContent.trim(), "表单最低积分"), integer(metadata.min_point, "文献最低积分"), integer(typeNode.getAttribute("data-point"), "文献类型最低积分"), integer(lowest.point, "出版社最低积分"), metadata.publisher?.point == null ? 1 : integer(metadata.publisher.point, "出版社规则积分"));
-          if (points < minimumPoints) fail("POINTS_TOO_LOW", "网站最低要求为 " + minimumPoints + " 积分，超过当前配置；未发布、未自动加价。");
-          const check = await query("/assist/check-before-assist-create", { title, doi, url: officialURL, point: points });
+          if (points < minimumPoints && !acceptSiteMinimum) fail("POINTS_TOO_LOW", "网站最低要求为 " + minimumPoints + " 积分，超过当前配置；未发布、未自动加价。");
+          let amount;
+          try { amount = model.validatePoints(Math.max(points, minimumPoints)); }
+          catch (_) { fail("UNVERIFIED_CONTRACT", "网站最低悬赏积分超出有效范围，未发布求助。"); }
+          if (amount > balance) fail("INSUFFICIENT_POINTS", "网站要求的悬赏积分超过当前账号可用积分，未发起求助。");
+          const check = await query("/assist/check-before-assist-create", { title, doi, url: officialURL, point: amount });
           if (check.code === 2) fail("REQUEST_REVIEW_REQUIRED", "网站要求核对文献信息或重复求助提示，请在科研通页面确认后继续；插件没有自动确认或加价。");
           if (check.code !== 0) fail("REQUEST_REJECTED", "网站未通过发布前检查，未发布求助。");
           const closeNode = form.querySelector('[name="Assist[close_at]"]');
           const closeAt = closeNode.getAttribute("value") || code.match(/\$\(['"]#Assist-close_at['"]\)\.val\(['"](\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})['"]\)/)?.[1];
           if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(closeAt || "")) fail("STRUCTURE_CHANGED", "网站默认自动关闭时间无法核实。");
           const note = "期刊：" + shortText(metadata.journal, 200) + "\r\n作者：" + shortText(metadata.authors, 600) + "\r\n出版日期：" + shortText(metadata.publish_at, 100);
-          return { url: siteURL(form.getAttribute("action"), url), method: "POST", minimumPoints, fields: { doi: "Assist[doi]", points: "Assist[point]" }, body: { onekey: doi, "Assist[doi]": doi, "Assist[title]": title, "Assist[url]": officialURL, "Assist[type]": type, "Assist[point]": points, "Assist[note]": note.slice(0, 1000), "Assist[remark]": "", "Assist[suppl]": "0", "Assist[close_at]": closeAt } };
+          return { url: siteURL(form.getAttribute("action"), url), method: "POST", minimumPoints, fields: { doi: "Assist[doi]", points: "Assist[point]" }, body: { onekey: doi, "Assist[doi]": doi, "Assist[title]": title, "Assist[url]": officialURL, "Assist[type]": type, "Assist[point]": amount, "Assist[note]": note.slice(0, 1000), "Assist[remark]": "", "Assist[suppl]": "0", "Assist[close_at]": closeAt } };
         },
         parse(response, parseHTML) {
           const result = parseJSON(response);
@@ -557,6 +592,120 @@
       return (await searchOwnRequests(doi)).matches[0] || null;
     }
 
+    // Observed authenticated home/points HTML, 2026-11-06. The current site's
+    // sign-in notice forbids programmatic sign-in, so this capability is GET-only:
+    // it never invokes a sign-in endpoint or infers absence from a missing button.
+    async function getCheckInStatus({ isCancelled = () => false } = {}) {
+      if (typeof isCancelled !== "function") throw new TypeError("isCancelled must be a function");
+      const localDay = () => {
+        const date = new Date(now());
+        if (!Number.isFinite(date.getTime())) fail("CHECKIN_DAY_INVALID", "当前日期无法核实，未更新签到状态。");
+        return date.getFullYear() + "-" + String(date.getMonth() + 1).padStart(2, "0") + "-" + String(date.getDate()).padStart(2, "0");
+      };
+      const day = localDay();
+      const checkCancelled = () => {
+        if (isCancelled()) { const error = new Error("签到状态检查已取消。");error.name = "AbortError";throw error; }
+        if (localDay() !== day) fail("CHECKIN_DAY_CHANGED", "检查期间日期已变化，请重新刷新签到状态。", { retryable: true });
+      };
+      checkCancelled();
+      const account = await requireAccount();checkCancelled();
+      const checkedPage = async (url, expectedPath) => {
+        checkCancelled();const result = await page(url);checkCancelled();
+        const target = new URL(result.response.url);
+        if (target.pathname === PATHS.login) fail("LOGIN_REQUIRED", "请先在插件内登录科研通。");
+        if (target.pathname !== expectedPath || accountScope(result.doc) !== account.accountID) fail("ACCOUNT_MISMATCH", "签到状态页面与当前登录账号不一致，未更新状态。");
+        return result;
+      };
+      const home = await checkedPage("/", "/");
+      const signPanels = home.doc.querySelectorAll(".fly-signin");
+      const readNumber = selector => {
+        const nodes = signPanels.length === 1 ? signPanels[0].querySelectorAll(selector) : [];
+        const text = nodes.length === 1 ? shortText(nodes[0].textContent, 30) : "";
+        const value = /^\d+$/.test(text) ? Number(text) : NaN;
+        return Number.isSafeInteger(value) && value >= 0 ? value : null;
+      };
+      const balance = readNumber("#user-point-now"), consecutiveDays = readNumber("#sign-count");
+      const entries = [];let ledgerComplete = false, nextURL = ORIGIN + PATHS.points, previousTime = null;
+      const validTime = text => {
+        if (!/^\d{4}-\d{2}-\d{2} (?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d$/.test(text)) return false;
+        const date = new Date(text.slice(0, 10) + "T00:00:00Z");
+        return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === text.slice(0, 10);
+      };
+      for (let pageNumber = 1; nextURL && pageNumber <= 5; pageNumber++) {
+        const result = await checkedPage(nextURL, PATHS.points);
+        if (result.response.url !== nextURL) fail("STRUCTURE_CHANGED", "积分明细分页发生未核实跳转，未更新签到状态。");
+        const tables = Array.from(result.doc.querySelectorAll(".layui-tab-item.layui-show table.layui-table")).filter(table => {
+          const headers = Array.from(table.querySelectorAll("tr")).find(row => row.querySelectorAll("th").length);
+          return headers && Array.from(headers.querySelectorAll("th")).map(node => shortText(node.textContent)).join("|") === "时间|积分|说明";
+        });
+        if (tables.length !== 1) fail("STRUCTURE_CHANGED", "未找到唯一的本人积分明细表，签到状态暂时无法核实。");
+        let olderSeen = false, pageRows = 0;
+        for (const row of tables[0].querySelectorAll("tr")) {
+          const cells = row.querySelectorAll("td");if (!cells.length) continue;
+          if (cells.length !== 3) fail("STRUCTURE_CHANGED", "积分明细的列结构发生变化，未更新签到状态。");
+          const time = shortText(cells[0].textContent, 40);
+          if (!validTime(time) || previousTime && time > previousTime) fail("STRUCTURE_CHANGED", "积分明细的日期或排序无法核实，未更新签到状态。");
+          previousTime = time;pageRows++;
+          if (time.slice(0, 10) < day) olderSeen = true;
+          if (time.slice(0, 10) !== day || shortText(cells[2].textContent) !== "签到") continue;
+          const amount = shortText(cells[1].textContent, 30), value = /^\+[1-9]\d*$/.test(amount) ? Number(amount.slice(1)) : NaN;
+          if (Number.isSafeInteger(value) && value > 0) entries.push({ time, reward: value });
+        }
+        if (olderSeen) { ledgerComplete = true;break; }
+        const paginations = result.doc.querySelectorAll(".pages .pagination");
+        if (paginations.length > 1) fail("STRUCTURE_CHANGED", "积分明细分页不唯一，未更新签到状态。");
+        if (!paginations.length) { ledgerComplete = true;break; }
+        const next = paginations[0].querySelector("li.next");
+        if (!next) break;
+        if (next.classList.contains("disabled")) { ledgerComplete = true;break; }
+        const links = next.querySelectorAll("a[href]");
+        if (links.length !== 1 || shortText(links[0].textContent) !== "下页" || !pageRows) break;
+        const target = new URL(siteURL(links[0].getAttribute("href"), result.response.url));
+        if (target.pathname !== PATHS.points || target.hash || target.searchParams.getAll("page").length !== 1
+          || target.searchParams.get("page") !== String(pageNumber + 1)
+          || [...target.searchParams.keys()].some(key => !["page", "per-page"].includes(key))
+          || target.searchParams.has("per-page") && (!/^[1-9]\d*$/.test(target.searchParams.get("per-page")) || Number(target.searchParams.get("per-page")) > 100)) break;
+        nextURL = target.href;
+      }
+      checkCancelled();
+      const rewardVerified = entries.length === 1 && ledgerComplete;
+      return { accountID: account.accountID, day, signed: entries.length ? true : null, balance,
+        reward: rewardVerified ? entries[0].reward : null, rewardVerified, consecutiveDays, ledgerComplete,
+        checkedAt: new Date(now()).toISOString(), evidence: entries.length ? "own-point-ledger-checkin-entry" : "no-verified-today-checkin-entry" };
+    }
+
+    // Diagnostic metadata lookup only. These observed lookup endpoints may use
+    // POST to start/poll a search job; this method never sends a creation,
+    // pre-publication check, adoption, message-read or download-token request.
+    async function inspectDOI(doi, { isCancelled = () => false } = {}) {
+      if (typeof isCancelled !== "function") throw new TypeError("isCancelled must be a function");
+      const expectedDOI = model.normalizeDOI(doi);
+      if (!expectedDOI) fail("DOI_REQUIRED", "自动求助需要有效 DOI。");
+      const checkCancelled = () => { if (isCancelled()) { const error = new Error("文献信息检查已取消。");error.name = "AbortError";throw error; } };
+      checkCancelled();
+      const account = await requireAccount();checkCancelled();
+      const formPage = await page(PATHS.create);checkCancelled();
+      if (new URL(formPage.response.url).pathname === PATHS.login) fail("LOGIN_REQUIRED", "发布前登录已失效。");
+      if (accountScope(formPage.doc) !== account.accountID) fail("ACCOUNT_MISMATCH", "创建页面的登录账号发生变化。");
+      const form = formPage.doc.querySelector("#assist-create-form"), code = scriptText(formPage.doc);
+      if (!form || new URL(siteURL(form.getAttribute("action"), formPage.response.url)).pathname !== PATHS.create
+        || !["onekey-query", "paper-lookup-status"].every(endpoint => code.includes(endpoint))) fail("STRUCTURE_CHANGED", "页面的文献查询或发布检查步骤发生变化。");
+      const query = async (url, fields) => { checkCancelled();const result = await postFormJSON(formPage.doc, url, fields);checkCancelled();return result; };
+      const metadata = await lookupDOIMetadata({ doi: expectedDOI, query, delay, checkCancelled });
+      const receivedDOI = doiEvidence(metadata.doi, model);
+      const reason = receivedDOI ? receivedDOI === expectedDOI ? "match" : "doi_mismatch"
+        : metadata.doi == null || typeof metadata.doi === "string" && !metadata.doi.trim() ? "doi_missing" : "doi_invalid";
+      let sourceURL = "";
+      try {
+        const url = new URL(metadata.url);
+        if (/^https?:$/.test(url.protocol) && !url.username && !url.password) {
+          url.search = "";url.hash = "";
+          if (url.href.length <= 4096) sourceURL = url.href;
+        }
+      } catch (_) {}
+      return { expectedDOI, receivedDOI, title: shortText(metadata.title, 2000), sourceURL, reason };
+    }
+
     async function listMessages() {
       const contract = requireContract("messages", value => typeof value.prepare === "function" && typeof value.parse === "function");
       const account = await requireAccount();
@@ -614,7 +763,7 @@
       return { url, method: "POST", body: body.toString(), headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8", "X-CSRF-Token": token.token, "X-Requested-With": "XMLHttpRequest", "Accept": "application/json" }, responseType: "text" };
     }
     function acceptanceConfirmed(options, detail, alreadyAccepted) {
-      return { accepted: true, alreadyAccepted, requestID: options.requestID, fileID: options.fileID, accountID: options.accountID, doi: detail.doi, points: detail.points };
+      return { accepted: true, alreadyAccepted, requestID: options.requestID, fileID: options.fileID, accountID: options.accountID, doi: detail.doi, points: detail.points, requestedPoints: detail.requestedPoints, pointsVerified: detail.pointsVerified };
     }
     async function acceptFile(value) {
       const options = completionOptions(value), key = options.accountID + ":" + options.requestID;
@@ -727,8 +876,25 @@
       });
     }
 
-    async function submitRequest({ doi, points, isCancelled = () => false }) {
+    function publishedSubmissionError(error, identity, expectedDOI, receivedDOI = "", reason = error.code || "DETAIL_UNAVAILABLE") {
+      if (error.submissionReview) return error;
+      const received = doiEvidence(receivedDOI, model);
+      const explanation = reason === "DOI_MISMATCH"
+        ? "科研通求助已创建，但 DOI 尚未核对一致。条目 DOI：" + expectedDOI + "；网站 DOI：" + (received || "未提供有效 DOI") + "。请打开已发布求助核对并重新检查；不要重复发布。"
+        : reason === "ACCOUNT_MISMATCH"
+          ? "科研通求助已创建，但所属账号与当前账号不一致。请切换到原科研通账号后重新检查；不要重复发布。"
+          : reason === "POINTS_MISMATCH"
+            ? "科研通求助已创建，但网站悬赏积分与提交记录不一致。请打开已发布求助核对实际悬赏后重新检查；不要重复发布。"
+            : "科研通求助已创建，但详情尚未核实。请打开已发布求助核对并重新检查；不要重复发布。";
+      const result = new AbleSciError(error.code || "SUBMISSION_REVIEW_REQUIRED", explanation, { reconcileRequired: true });
+      result.submissionStage = "after_submit";
+      result.submissionReview = { ...identity, expectedDOI, receivedDOI: received, reason: /^[A-Z0-9_]{1,80}$/.test(reason) ? reason : "DETAIL_UNAVAILABLE" };
+      return result;
+    }
+
+    async function submitRequest({ doi, points, acceptSiteMinimum = false, isCancelled = () => false }) {
       if (typeof isCancelled !== "function") throw new TypeError("isCancelled must be a function");
+      if (typeof acceptSiteMinimum !== "boolean") throw new TypeError("acceptSiteMinimum must be a boolean");
       function checkCancelled() {
         if (!isCancelled()) return;
         const error = new Error("求助已取消，未继续发布。");
@@ -738,7 +904,7 @@
       checkCancelled();
       const normalized = model.normalizeDOI(doi);
       if (!normalized) fail("DOI_REQUIRED", "自动求助需要有效 DOI。");
-      const amount = model.validatePoints(points);
+      const configuredAmount = model.validatePoints(points);
       const contract = requireContract("submission", value => typeof value.prepare === "function" && typeof value.parse === "function");
       if (!intentStore || !["get", "claim", "set"].every(name => typeof intentStore[name] === "function")) fail("PERSISTENCE_REQUIRED", "必须先配置可持久保存的提交记录，避免重启后重复扣分。");
       const account = await requireAccount();
@@ -749,10 +915,17 @@
         const previous = await intentStore.get(key);
         checkCancelled();
         if (previous?.state === "confirmed" && previous.requestID) {
-          const confirmed = await getRequest(previous.requestID);
-          checkCancelled();
-          if (confirmed.doi !== normalized || confirmed.ownerID !== account.accountID) fail("REQUEST_MISMATCH", "已保存的求助记录与当前文献或账号不一致，未再次发布。");
-          return { ...confirmed, reused: true };
+          const identity = requestIdentity(previous.requestID);
+          try {
+            const confirmed = await getRequest(identity.requestID);
+            checkCancelled();
+            if (confirmed.doi !== normalized) throw publishedSubmissionError(new AbleSciError("REQUEST_MISMATCH", ""), identity, normalized, confirmed.doi, "DOI_MISMATCH");
+            if (confirmed.ownerID !== account.accountID) throw publishedSubmissionError(new AbleSciError("REQUEST_MISMATCH", ""), identity, normalized, confirmed.doi, "ACCOUNT_MISMATCH");
+            return { ...confirmed, reused: true };
+          } catch (error) {
+            if (error.name === "AbortError") throw error;
+            throw publishedSubmissionError(error, identity, normalized);
+          }
         }
         const existing = await searchOwnRequests(normalized, checkCancelled);
         checkCancelled();
@@ -772,12 +945,13 @@
           checkCancelled();
           return response;
         };
-        const prepared = await contract.prepare({ doc: formPage.doc, url: formPage.response.url, doi: normalized, points: amount, account, page: cancellablePage, query, delay, checkCancelled });
+        const prepared = await contract.prepare({ doc: formPage.doc, url: formPage.response.url, doi: normalized, points: configuredAmount, acceptSiteMinimum, account, page: cancellablePage, query, delay, checkCancelled });
         checkCancelled();
         if (!prepared || prepared.method !== "POST" || !prepared.fields || !prepared.body || typeof prepared.body !== "object") fail("UNVERIFIED_CONTRACT", "未能从真实发布页面核实提交字段。");
         const submitURL = siteURL(prepared.url);
-        if (!Number.isInteger(prepared.minimumPoints) || prepared.minimumPoints < 1) fail("UNVERIFIED_CONTRACT", "网站最低悬赏积分尚未核实。");
-        if (prepared.minimumPoints > amount) fail("POINTS_TOO_LOW", "网站最低要求为 " + prepared.minimumPoints + " 积分，超过当前配置；未发布、未自动加价。");
+        if (!Number.isSafeInteger(prepared.minimumPoints) || prepared.minimumPoints < 1 || prepared.minimumPoints > 10000) fail("UNVERIFIED_CONTRACT", "网站最低悬赏积分尚未核实或超出有效范围。");
+        if (prepared.minimumPoints > configuredAmount && !acceptSiteMinimum) fail("POINTS_TOO_LOW", "网站最低要求为 " + prepared.minimumPoints + " 积分，超过当前配置；未发布、未自动加价。");
+        const amount = model.validatePoints(Math.max(configuredAmount, prepared.minimumPoints));
         if (model.normalizeDOI(prepared.body[prepared.fields.doi]) !== normalized || model.validatePoints(prepared.body[prepared.fields.points]) !== amount) fail("SUBMISSION_MISMATCH", "提交表单中的 DOI 或积分与任务不一致。");
         const token = csrf(formPage.doc);
         const body = new URLSearchParams();
@@ -786,14 +960,14 @@
           body.set(name, String(value));
         }
         body.set(token.name, token.token);
-        const intent = { accountID: account.accountID, doi: normalized, points: amount, state: "sending", createdAt: new Date().toISOString() };
+        const intent = { accountID: account.accountID, doi: normalized, points: amount, configuredPoints: configuredAmount, minimumPoints: prepared.minimumPoints, acceptSiteMinimum, state: "sending", createdAt: new Date().toISOString() };
         checkCancelled();
         // A verified rejection confirms that no request was accepted. An explicit
         // later invocation may retry after a fresh own-list check. claim must
         // atomically replace only absent, cancelled_before_send or rejected records.
         const claimed = await intentStore.claim(key, intent);
         if (!claimed) { checkCancelled(); fail("SUBMISSION_UNKNOWN", "另一个任务已记录本篇提交；已阻止重复发送。", { reconcileRequired: true }); }
-        let result, postStarted = false;
+        let result, postStarted = false, confirmedIdentity = null;
         try {
           // Cancellation can arrive while the durable claim is being written. There
           // is no await between this final guard and dispatching the actual POST.
@@ -808,10 +982,13 @@
             fail("REQUEST_REJECTED", shortText(result.message, 500) || "网站拒绝此次求助。");
           }
           const identity = requestIdentity(result.requestURL || result.requestID);
+          confirmedIdentity = identity;
           await intentStore.set(key, { ...intent, state: "confirmed", requestID: identity.requestID });
           invalidateLookups();
           const detail = await getRequest(identity.requestID);
-          if (detail.doi !== normalized || detail.ownerID !== account.accountID || detail.points !== amount) fail("SUBMISSION_MISMATCH", "求助已创建，但详情中的文献、账号或积分需人工核实；不会再次发布。");
+          if (detail.doi !== normalized) throw publishedSubmissionError(new AbleSciError("SUBMISSION_MISMATCH", ""), identity, normalized, detail.doi, "DOI_MISMATCH");
+          if (detail.ownerID !== account.accountID) throw publishedSubmissionError(new AbleSciError("SUBMISSION_MISMATCH", ""), identity, normalized, detail.doi, "ACCOUNT_MISMATCH");
+          if (detail.points !== amount) throw publishedSubmissionError(new AbleSciError("SUBMISSION_MISMATCH", ""), identity, normalized, detail.doi, "POINTS_MISMATCH");
           return { ...detail, reused: false };
         } catch (error) {
           if (!postStarted && error.name === "AbortError") {
@@ -823,6 +1000,8 @@
               try { await intentStore.set(key, { ...intent, state: "unknown" }); } catch (_) {}
             }
           }
+          if (confirmedIdentity) throw publishedSubmissionError(error, confirmedIdentity, normalized);
+          if (postStarted && result?.kind === "confirmed") error.reconcileRequired = true;
           throw error;
         }
       })();
@@ -859,7 +1038,7 @@
       return { requestID: detail.requestID, fileID: file.fileID, accountID: account.accountID, filename: resolved.filename || file.filename, url: url.href, method: "GET", resolved: true, costPoints: 0, expectedSize: resolved.expectedSize || null, allowedOrigins: resolved.allowedOrigins || [url.origin], route: selectedRoute, transport, serverID: resolved.serverID || "", normalServerIndex: resolved.normalServerIndex ?? normalServerIndex, normalServerCount: resolved.normalServerCount || 1, timeoutMs: downloadTimeout(resolved.expectedSize), retryable: true, canFallback: selectedRoute === "highspeed" && transport === "vip" && resolved.canFallback === true, entitlement: resolved.entitlement || "normal-requested", ...(transport === "cdn" && resolved.allowedRedirectDomain === "ablesci.com" ? { allowedRedirectDomain: "ablesci.com" } : {}) };
     }
 
-    return Object.freeze({ getAccount, listMessages, findExistingRequest, submitRequest, getRequest, getDownload, acceptFile, markRequestMessagesRead });
+    return Object.freeze({ getAccount, getCheckInStatus, listMessages, findExistingRequest, inspectDOI, submitRequest, getRequest, getDownload, acceptFile, markRequestMessagesRead });
   }
 
   const api = Object.freeze({ ORIGIN, PATHS, AbleSciError, parseAccount, parseRequest, parseOwnRequests, parseMessages, parseDownloadPage, parseDownloadSettings, create });

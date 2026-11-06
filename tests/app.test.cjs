@@ -18,10 +18,12 @@ const settle = () => new Promise(resolve=>setImmediate(resolve));
 async function until(condition) {const end=Date.now()+2000;while(!condition()){if(Date.now()>end)throw new Error('Fixture condition timed out');await settle();}}
 function item(id) {return {id,key:'ITEM'+id,libraryID:1,deleted:false,isRegularItem:()=>true,getAttachments:()=>[],async getBestAttachment(){return null;},getField(name){return {DOI:'10.1234/paper'+id,title:'Fixture paper '+id,url:'https://publisher.test/paper'+id}[name]||'';}};}
 
-function environment({acquire,initialTasks,initialQueue,initialAccessHistory,initialPrefs,initialIntents,realPublisher=false,writePDFError=false,pickPDF,pickDirectory,pdfIdentity,discoverDirectories,watchNow,edgeAcquire,edgeHost}={}) {
+function environment({acquire,initialTasks,initialQueue,initialAccessHistory,initialPrefs,initialIntents,realPublisher=false,writePDFError=false,pickPDF,pickDirectory,pdfIdentity,discoverDirectories,watchNow,appTime,edgeAcquire,edgeHost}={}) {
   const files=new Map(),prefs=new Map(),items=new Map(),menus=new Map(),publisherCalls=[],submissions=[],remoteRequests=[],errors=[],httpCalls=[],imports=[];
-  const directories=new Set([downloadDirectory]),fileMetadata=new Map(),openedURLs=[],openedFiles=[],identityCalls=[];
+  const directories=new Set([downloadDirectory]),fileMetadata=new Map(),openedURLs=[],openedFiles=[],identityCalls=[],timers=[];
   let clock=Date.now(),fileRevision=1;
+  let appClock=appTime===undefined?Date.now():Number(appTime);
+  const AppDate=appTime===undefined?Date:class extends Date{constructor(...args){super(...(args.length?args:[appClock]));}static now(){return appClock;}};
   let accountCalls=0,active=0,peak=0,writeHook=null,importCount=0,oaCalls=0;
   if(initialTasks)files.set(queuePath,MODEL.serializeQueue(initialTasks));
   if(initialQueue)files.set(queuePath,MODEL.serializeQueue(initialQueue));
@@ -32,11 +34,12 @@ function environment({acquire,initialTasks,initialQueue,initialAccessHistory,ini
   const session={destroyed:false,cleared:0,async initialize(){},getStatus(){return {hasCookies:false,persistent:true};},async flush(){},async destroy(){this.destroyed=true;},async clearSession(){this.cleared++;},async request(){throw new Error('No real request permitted in app fixture');}};
   const credentials={saved:false,username:'',async getSummary(){return {saved:this.saved,username:this.username};},async save(value){this.saved=true;this.username=value.username;},async remove(){this.saved=false;this.username='';}};
   const adapter={async getAccount(){accountCalls++;return account;},async findExistingRequest(){return null;},async submitRequest(value){submissions.push(value);return {requestID:'Request'+submissions.length,requestURL:'https://www.ablesci.com/assist/detail?id=Request'+submissions.length};},async getRequest(id){remoteRequests.push(id);return {requestID:id,doi:submissions[Number(id.replace('Request',''))-1]?.doi||'',state:'waiting',files:[]};},async listMessages(){return [];}};
+  adapter.getCheckInStatus=async()=>{const date=new AppDate(),day=[date.getFullYear(),String(date.getMonth()+1).padStart(2,'0'),String(date.getDate()).padStart(2,'0')].join('-');return{accountID:account.accountID,day,signed:true,balance:88,reward:5,rewardVerified:true,checkedAt:date.toISOString()};};
   const IOUtils={async exists(file){return files.has(file);},async readUTF8(file){return files.get(file);},async makeDirectory(){},async writeUTF8(file,value){if(writeHook)await writeHook(file,value);files.set(file,value);},async write(file,value){if(writePDFError)throw new Error('fixture disk full');files.set(file,value);},async remove(file){files.delete(file);}};
   const Services={prefs:{getIntPref(key,fallback){return prefs.get(key)??fallback;},getBoolPref(key,fallback){return prefs.get(key)??fallback;},getStringPref(key,fallback){return prefs.get(key)??fallback;},setIntPref(key,value){prefs.set(key,value);},setBoolPref(key,value){prefs.set(key,value);},setStringPref(key,value){prefs.set(key,value);}},prompt:{alert(){}}};
   const pdf=new TextEncoder().encode('%PDF-1.7\n'+'0'.repeat(1200)+'\n%%EOF\n');
   const Zotero={DataDirectory:{dir:'C:\\isolated'},Items:{async getAsync(id){return items.get(id);}},Libraries:{get(){return {editable:true,filesEditable:true};}},MenuManager:{registerMenu(value){menus.set(value.menuID,value);return value.menuID;},unregisterMenu(id){menus.delete(id);}},PreferencePanes:{async register(value){return value.id;}},Utilities:{Internal:{openPreferences(){}}},getMainWindow(){return {openDialog(){return {closed:false,close(){this.closed=true;},focus(){}};}};},logError(error){errors.push(error);},Promise:{delay(ms){return new Promise(resolve=>setTimeout(resolve,Math.min(ms,5)));}},HTTP:{async request(method,url){httpCalls.push({method,url});return {status:200,response:pdf.buffer,responseURL:url,getResponseHeader(){return 'application/pdf';}};}},Attachments:{async createTemporaryStorageDirectory(){return {path:'C:\\isolated\\publisher-temp'};},async importFromFile(options){importCount++;imports.push(options);return {id:900,setField(){},async saveTx(){}};},getFileBaseNameFromItem(){return 'fixture-paper';},getFileResolvers(){oaCalls++;return [];}}};
-  const scope={URL,URLSearchParams,Promise,Date,JSON,Set,Map,Uint8Array,ArrayBuffer,TextDecoder,crypto:webcrypto,FulltextTaskModel:MODEL,FulltextPublisherWindow:{create(){return {open(){},destroy(){}};}},setInterval(){return 1;},clearInterval(){},FulltextCredentials:{create(){return credentials;}},FulltextSession:{create(){return session;}},FulltextAbleSci:{create(){return adapter;}}};
+  const scope={URL,URLSearchParams,Promise,Date:AppDate,JSON,Set,Map,Uint8Array,ArrayBuffer,TextDecoder,crypto:webcrypto,FulltextTaskModel:MODEL,FulltextPublisherWindow:{create(){return {open(){},destroy(){}};}},setInterval(callback,ms){timers.push({callback,ms});return timers.length;},clearInterval(){},FulltextCredentials:{create(){return credentials;}},FulltextSession:{create(){return session;}},FulltextAbleSci:{create(){return adapter;}}};
   vm.runInNewContext(publisherSource,scope);
   vm.runInNewContext(publisherWindowSource,scope);
   vm.runInNewContext(downloadWatchSource,scope);
@@ -54,7 +57,7 @@ function environment({acquire,initialTasks,initialQueue,initialAccessHistory,ini
   Zotero.launchURL=async url=>openedURLs.push(url);Zotero.launchFile=async file=>openedFiles.push(file);
   const identity=pdfIdentity||{async inspect(file,paper,options){identityCalls.push({file,paper,bytes:options?.bytes});return {status:'match',matchedBy:'doi',message:'Fixture DOI match'};}};
   const app=scope.FulltextApp.create({Zotero,Services,IOUtils,PathUtils:path.win32,rootURI:'file:///fixture/',pluginID:'fixture@local.invalid',version:'0.6.0',pickPDF,pickDirectory,pdfIdentity:identity,discoverDownloadDirectories:discoverDirectories||(async()=>[downloadDirectory]),edgeAcquire,edgeHost});
-  return {app,Zotero,Services,IOUtils,files,prefs,items,menus,publisherCalls,submissions,remoteRequests,errors,httpCalls,imports,session,credentials,adapter,account,directories,fileMetadata,openedURLs,openedFiles,identityCalls,pdf,downloadDirectory,advanceTime(ms){clock+=ms;},putFile(file,bytes,metadata={}){files.set(file,bytes);fileMetadata.set(file,{lastModified:++fileRevision,...metadata});},addItem(value){items.set(value.id,value);return value;},setWriteHook(value){writeHook=value;},get accountCalls(){return accountCalls;},get peak(){return peak;},get importCount(){return importCount;},get oaCalls(){return oaCalls;}};
+  return {app,Zotero,Services,IOUtils,files,prefs,items,menus,publisherCalls,submissions,remoteRequests,errors,httpCalls,imports,session,credentials,adapter,account,directories,fileMetadata,openedURLs,openedFiles,identityCalls,timers,pdf,downloadDirectory,advanceTime(ms){clock+=ms;},advanceAppTime(ms){appClock+=ms;},setAppTime(value){appClock=Number(value);},putFile(file,bytes,metadata={}){files.set(file,bytes);fileMetadata.set(file,{lastModified:++fileRevision,...metadata});},addItem(value){items.set(value.id,value);return value;},setWriteHook(value){writeHook=value;},get accountCalls(){return accountCalls;},get peak(){return peak;},get importCount(){return importCount;},get oaCalls(){return oaCalls;}};
 }
 
 test('retry refreshes a DOI corrected in the original Zotero item',async()=>{
@@ -1341,4 +1344,391 @@ test('copy bridge writes the exact supplied title or DOI and reports invalid or 
   env.app.copyText('A title with < and > symbols');env.app.copyText('10.1111/mec.12915');
   assert.deepEqual(copied,['A title with < and > symbols','10.1111/mec.12915']);assert.throws(()=>env.app.copyText('  '),/可复制/);
   env.Zotero.Utilities.Internal.copyTextToClipboard=()=>{throw new Error('clipboard unavailable');};assert.throws(()=>env.app.copyText('Title'),/clipboard unavailable/);await env.app.stop();
+});
+
+test('verified identical assistance bytes recover local and browser history without a duplicate import or completion-date change',async()=>{
+  for(const source of ['local_file','browser_download','existing']){
+    const task=MODEL.updateTask(remoteFixture('imported'),{source,attachmentID:900,officialURL:'https://publisher.test/paper1'});
+    const env=completionEnvironment({initialTasks:[task]});env.installAttachment();await env.app.start();
+    const result=await env.app.verifyAssistCompletion(task.id),current=env.app.getSnapshot().tasks[0];
+    assert.equal(result.completed,true,source);assert.equal(current.source,'ablesci');assert.equal(current.attachmentID,900);
+    assert.equal(current.completedAt,task.completedAt);assert.equal(current.assistReceipt.sha256,sha256(env.pdf));
+    assert.equal(current.assistReceipt.messages,'done');assert.equal(env.importCount,0);assert.equal(env.posts.length,1);
+    assert.equal(current.accessHint.kind==='browser_success',false,'an assistance-linked import is not publisher-access evidence');
+    await env.app.verifyAssistCompletion(task.id);assert.equal(env.posts.length,1);assert.equal(env.downloadCalls.length,1);
+    await env.app.stop();
+  }
+});
+
+test('a request link alone never changes a local source, replaces its file or adopts different remote bytes',async()=>{
+  for(const source of ['local_file','browser_download','existing']){
+    const task=MODEL.updateTask(remoteFixture('imported'),{source,attachmentID:900}),env=completionEnvironment({initialTasks:[task]});
+    const local=env.pdf.slice();local[100]=49;const attachment=env.installAttachment({bytes:local});await env.app.start();
+    const result=await env.app.verifyAssistCompletion(task.id),current=env.app.getSnapshot().tasks[0];
+    assert.equal(result.completed,false);assert.equal(current.source,source);assert.equal(current.state,'imported');
+    assert.equal(current.completedAt,task.completedAt);assert.equal(current.attachmentID,900);assert.equal(current.assistReceipt,null);
+    assert.equal(sha256(env.files.get(await attachment.getFilePathAsync())),sha256(local));
+    assert.equal(env.importCount,0);assert.equal(env.posts.length,0);assert.equal(env.messageReads.length,0);await env.app.stop();
+  }
+});
+
+test('manually selecting a matching PDF for an assistance task waits for explicit confirmation then recovers its verified source',async()=>{
+  const task=remoteFixture('waiting'),file='C:\\isolated\\manually-downloaded.pdf';
+  const env=completionEnvironment({initialTasks:[task],pickPDF:async()=>file});env.files.set(file,env.pdf);await env.app.start();
+  const result=await env.app.importLocalPDF(task.id),pending=env.app.getSnapshot().tasks[0];
+  assert.equal(result.needsReview,true);assert.equal(pending.state,'manual_review');assert.equal(pending.requestID,'Request1');
+  assert.equal(env.importCount,0);assert.equal(env.downloadCalls.length,0);assert.equal(env.posts.length,0);
+  await env.app.previewDownloadedPDF(task.id);assert.deepEqual(env.openedFiles,[file]);
+  await env.app.confirmDownloadedPDF(task.id);await until(()=>env.app.getSnapshot().tasks[0].assistReceipt?.messages==='done');
+  const current=env.app.getSnapshot().tasks[0];assert.equal(current.source,'ablesci');assert.equal(current.requestID,'Request1');
+  assert.equal(env.importCount,1);assert.equal(env.posts.length,1);assert.equal(env.messageReads.length,1);
+  assert.equal(current.accessHint.kind==='browser_success',false);await env.app.stop();
+});
+
+test('confirming a local assistance-task PDF preserves the local source when website bytes differ',async()=>{
+  const task=remoteFixture('waiting'),file='C:\\isolated\\independent-copy.pdf';
+  const env=completionEnvironment({initialTasks:[task],pickPDF:async()=>file}),local=env.pdf.slice();local[100]=49;env.files.set(file,local);await env.app.start();
+  assert.equal((await env.app.importLocalPDF(task.id)).needsReview,true);await env.app.confirmDownloadedPDF(task.id);
+  await until(()=>env.downloadCalls.length===1);await settle();
+  const current=env.app.getSnapshot().tasks[0];assert.equal(current.state,'imported');assert.equal(current.source,'local_file');
+  assert.equal(current.assistReceipt,null);assert.equal(current.requestID,'Request1');assert.equal(env.posts.length,0);
+  assert.equal(env.importCount,1);assert.equal(sha256(env.files.get(await env.items.get(900).getFilePathAsync())),sha256(local));
+  await env.app.stop();
+});
+
+test('a confirmed assistance-task selection cannot bypass a contradictory PDF identity',async()=>{
+  const task=remoteFixture('waiting'),file='C:\\isolated\\wrong-assistance.pdf';
+  const env=completionEnvironment({initialTasks:[task],pickPDF:async()=>file,pdfIdentity:{async inspect(){return{status:'mismatch',message:'Different DOI'};}}});env.files.set(file,env.pdf);await env.app.start();
+  await assert.rejects(env.app.importLocalPDF(task.id),/不匹配/);
+  assert.equal(env.importCount,0);assert.equal(env.downloadCalls.length,0);assert.equal(env.posts.length,0);assert.equal(env.app.getSnapshot().tasks[0].assistReceipt,null);await env.app.stop();
+});
+
+test('an existing assistance task can recheck recent downloads without opening a page and recover a matching website file',async()=>{
+  const task=remoteFixture('waiting'),file=path.win32.join(downloadDirectory,'downloaded-assistance.pdf');
+  const env=completionEnvironment({initialTasks:[task]});env.putFile(file,env.pdf,{lastModified:Date.parse(task.createdAt)+100});await env.app.start();
+  await env.app.recheckDownloadedPDFs(task.id);let current=env.app.getSnapshot().tasks[0];
+  assert.equal(current.state,'manual_waiting');assert.equal(current.requestID,'Request1');assert.equal(current.downloadStatus.watching,true);assert.equal(env.openedURLs.length,0);
+  await env.app.checkDownloads();env.advanceTime(2500);await env.app.checkDownloads();await until(()=>env.app.getSnapshot().tasks[0].assistReceipt?.messages==='done');
+  current=env.app.getSnapshot().tasks[0];assert.equal(current.source,'ablesci');assert.equal(current.requestID,'Request1');assert.equal(env.importCount,1);assert.equal(env.posts.length,1);
+  assert.equal(env.submissions.length,0);assert.equal(current.accessHint.kind==='browser_success',false);await env.app.stop();
+});
+
+test('checking a request after rechecking local downloads stops that watcher before remote processing',async()=>{
+  const task=remoteFixture('waiting'),env=completionEnvironment({initialTasks:[task]});
+  env.adapter.getRequest=async id=>({requestID:id,doi:task.doi,state:'waiting',files:[]});await env.app.start();await env.app.recheckDownloadedPDFs(task.id);
+  assert.equal(env.app.getSnapshot().tasks[0].downloadStatus.watching,true);await env.app.checkTask(task.id);
+  const current=env.app.getSnapshot().tasks[0];assert.equal(current.state,'waiting');assert.equal(current.downloadStatus.watching,false);
+  assert.equal(current.requestID,'Request1');assert.equal(env.importCount,0);assert.equal(env.posts.length,0);assert.equal(env.submissions.length,0);await env.app.stop();
+});
+
+test('site-minimum acceptance defaults off and persists independently of language and other settings',async()=>{
+  const env=environment();await env.app.start();assert.equal(env.app.getSnapshot().settings.acceptSiteMinimum,false);
+  await env.app.saveSettings({points:13,acceptSiteMinimum:true});await env.app.saveSettings({language:'en'});
+  assert.equal(env.app.getSnapshot().settings.acceptSiteMinimum,true);assert.equal(env.app.getSnapshot().settings.points,13);
+  const prefs=Object.fromEntries(env.prefs);await env.app.stop();const restored=environment({initialPrefs:prefs});await restored.app.start();
+  assert.equal(restored.app.getSnapshot().settings.acceptSiteMinimum,true);assert.equal(restored.app.getSnapshot().settings.points,13);
+  await restored.app.saveSettings({acceptSiteMinimum:false});assert.equal(restored.app.getSnapshot().settings.acceptSiteMinimum,false);await restored.app.stop();
+});
+
+test('submission passes the minimum policy and preserves the verified actual reward across refresh, settings changes and restart',async()=>{
+  const env=environment({acquire:async()=>({state:'not_found',message:'Unavailable'})}),parent=env.addItem(item(1));
+  env.adapter.submitRequest=async value=>{env.submissions.push(value);return{requestID:'Request1',requestURL:'https://www.ablesci.com/assist/detail?id=Request1',requestedPoints:37,pointsVerified:true};};
+  await env.app.start();await env.app.saveSettings({points:10,acceptSiteMinimum:true});await env.app.captureItems([parent],{allowAssist:true});
+  await until(()=>env.app.getSnapshot().tasks[0]?.state==='waiting');let current=env.app.getSnapshot().tasks[0];
+  assert.equal(env.submissions[0].acceptSiteMinimum,true);assert.equal(env.submissions[0].points,10);
+  assert.equal(current.requestedPoints,37);assert.equal(current.pointsVerified,true);
+  await env.app.saveSettings({points:99,acceptSiteMinimum:false});await env.app.checkTask(current.id);current=env.app.getSnapshot().tasks[0];
+  assert.equal(current.requestedPoints,37);assert.equal(current.pointsVerified,true);assert.equal(env.submissions.length,1);
+  await env.app.stop();const restored=environment({initialQueue:MODEL.deserializeQueue(env.files.get(queuePath))});await restored.app.start();
+  assert.equal(restored.app.getSnapshot().tasks[0].requestedPoints,37);assert.equal(restored.app.getSnapshot().tasks[0].pointsVerified,true);await restored.app.stop();
+});
+
+test('unverified old rewards stay unknown until the website provides a verified amount',async()=>{
+  const task=remoteFixture('waiting'),env=completionEnvironment({initialTasks:[task]});
+  let proven=false;env.adapter.getRequest=async id=>({requestID:id,doi:task.doi,state:'waiting',files:[],...(proven?{requestedPoints:42,pointsVerified:true}:{})});
+  await env.app.start();await env.app.saveSettings({points:99});await env.app.checkTask(task.id);
+  assert.equal(env.app.getSnapshot().tasks[0].pointsVerified,false);assert.equal(env.app.getSnapshot().tasks[0].requestedPoints,10);
+  proven=true;await env.app.checkTask(task.id);assert.equal(env.app.getSnapshot().tasks[0].pointsVerified,true);assert.equal(env.app.getSnapshot().tasks[0].requestedPoints,42);await env.app.stop();
+});
+
+test('an old polling snapshot cannot replace a newer explicit folder check on a queued remote task',async()=>{
+  const first=remoteFixture('waiting'),second=MODEL.createTask({libraryID:1,itemID:2,itemKey:'ITEM2',doi:'10.1234/paper2',title:'Fixture paper 2',state:'waiting',requestURL:'https://www.ablesci.com/assist/detail?id=Request2'});
+  const env=environment({initialTasks:[first,second]}),gate=deferred(),checked=[];env.addItem(item(1));env.addItem(item(2));
+  env.adapter.getRequest=async id=>{checked.push(id);if(id==='Request1')await gate.promise;return{requestID:id,doi:id==='Request1'?first.doi:second.doi,state:'waiting',files:[]};};
+  await env.app.start();const polling=env.timers.find(timer=>timer.ms===15000).callback();await until(()=>checked.includes('Request1'));
+  await env.app.recheckDownloadedPDFs(second.id);gate.resolve();await polling;
+  const current=env.app.getSnapshot().tasks.find(task=>task.id===second.id);
+  assert.deepEqual(checked,['Request1']);assert.equal(current.state,'manual_waiting');assert.equal(current.downloadStatus.watching,true);
+  assert.equal(env.submissions.length,0);assert.equal(env.importCount,0);await env.app.stop();
+});
+
+test('manual confirmation of an unidentifiable local PDF can settle only the identical website file with a manual receipt',async()=>{
+  const task=remoteFixture('waiting'),file='C:\\isolated\\scanned-assistance.pdf';
+  const env=completionEnvironment({initialTasks:[task],pickPDF:async()=>file,pdfIdentity:{async inspect(){return{status:'unknown',message:'Scanned PDF'};}}});env.files.set(file,env.pdf);await env.app.start();
+  assert.equal((await env.app.importLocalPDF(task.id)).needsReview,true);assert.equal(env.importCount,0);assert.equal(env.posts.length,0);
+  await env.app.confirmDownloadedPDF(task.id);await until(()=>env.app.getSnapshot().tasks[0].assistReceipt?.messages==='done');
+  const current=env.app.getSnapshot().tasks[0];assert.equal(current.source,'ablesci');assert.equal(current.assistReceipt.verifiedBy,'manual');
+  assert.equal(current.assistReceipt.sha256,sha256(env.pdf));assert.equal(env.importCount,1);assert.equal(env.posts.length,1);await env.app.stop();
+});
+
+test('old local history with unknown PDF identity cannot obtain a manual receipt from identical bytes alone',async()=>{
+  const task=MODEL.updateTask(remoteFixture('imported'),{source:'local_file',attachmentID:900});
+  const env=completionEnvironment({initialTasks:[task],pdfIdentity:{async inspect(){return{status:'unknown'};}}});env.installAttachment();await env.app.start();
+  const result=await env.app.verifyAssistCompletion(task.id),current=env.app.getSnapshot().tasks[0];
+  assert.equal(result.completed,false);assert.equal(current.source,'local_file');assert.equal(current.assistReceipt,null);
+  assert.equal(env.posts.length,0);assert.equal(env.messageReads.length,0);assert.equal(env.importCount,0);await env.app.stop();
+});
+
+test('a local manual confirmation never overrides a contradictory remote PDF identity',async()=>{
+  const task=remoteFixture('waiting'),file='C:\\isolated\\manual-then-conflicting.pdf';
+  const env=completionEnvironment({initialTasks:[task],pickPDF:async()=>file,pdfIdentity:{async inspect(file){return file?{status:'unknown'}:{status:'mismatch',message:'Remote DOI contradicts target'};}}});env.files.set(file,env.pdf);await env.app.start();
+  await env.app.importLocalPDF(task.id);await env.app.confirmDownloadedPDF(task.id);
+  const current=env.app.getSnapshot().tasks[0];assert.equal(current.state,'imported');assert.equal(current.source,'local_file');
+  assert.equal(current.assistReceipt,null);assert.equal(env.posts.length,0);assert.equal(env.messageReads.length,0);assert.equal(env.importCount,1);await env.app.stop();
+});
+
+test('changing the saved file while manually confirmed remote verification is downloading prevents source recovery and adoption',async()=>{
+  const task=remoteFixture('waiting'),file='C:\\isolated\\manual-snapshot.pdf',gate=deferred();let downloading=false;
+  const env=completionEnvironment({initialTasks:[task],pickPDF:async()=>file,pdfIdentity:{async inspect(){return{status:'unknown'};}}});env.files.set(file,env.pdf);
+  const request=env.Zotero.HTTP.request;env.Zotero.HTTP.request=async(...args)=>{downloading=true;await gate.promise;return request(...args);};await env.app.start();
+  await env.app.importLocalPDF(task.id);const confirming=env.app.confirmDownloadedPDF(task.id);await until(()=>downloading);
+  const saved=await env.items.get(900).getFilePathAsync(),changed=env.pdf.slice();changed[100]=49;env.files.set(saved,changed);gate.resolve();await confirming;
+  const current=env.app.getSnapshot().tasks[0];assert.equal(current.source,'local_file');assert.equal(current.assistReceipt,null);
+  assert.equal(env.posts.length,0);assert.equal(env.messageReads.length,0);assert.equal(sha256(env.files.get(saved)),sha256(changed));await env.app.stop();
+});
+
+test('logout during a remote source verification prevents late attribution, account restoration and website writes',async()=>{
+  const task=MODEL.updateTask(remoteFixture('imported'),{source:'local_file',attachmentID:900}),env=completionEnvironment({initialTasks:[task]}),gate=deferred();let downloading=false;
+  env.installAttachment();const request=env.Zotero.HTTP.request;env.Zotero.HTTP.request=async(...args)=>{downloading=true;await gate.promise;return request(...args);};await env.app.start();
+  const verifying=env.app.verifyAssistCompletion(task.id);await until(()=>downloading);await env.app.logout();const accountCalls=env.accountCalls;
+  gate.resolve();const result=await verifying,current=env.app.getSnapshot().tasks[0];
+  assert.equal(result.cancelled,true);assert.equal(current.source,'local_file');assert.equal(current.assistReceipt,null);
+  assert.equal(env.app.getSnapshot().session.status,'signed_out');assert.equal(env.accountCalls,accountCalls);assert.equal(env.posts.length,0);assert.equal(env.messageReads.length,0);await env.app.stop();
+});
+
+test('changing the global minimum-price setting cannot change an already-authorized queued task budget policy',async()=>{
+  const gate=deferred(),env=environment({acquire:async()=>{await gate.promise;return{state:'not_found',message:'Unavailable'};}}),parent=env.addItem(item(1));
+  await env.app.start();await env.app.saveSettings({points:10,acceptSiteMinimum:true});await env.app.captureItems([parent],{allowAssist:true});await until(()=>env.publisherCalls.length===1);
+  await env.app.saveSettings({points:99,acceptSiteMinimum:false});gate.resolve();await until(()=>env.submissions.length===1);
+  assert.equal(env.submissions[0].acceptSiteMinimum,true);assert.equal(env.submissions[0].points,10);await env.app.stop();
+});
+
+test('a verified website amount returned by adoption replaces a stale reward without changing the completed attachment',async()=>{
+  const task=importedReceiptFixture(),env=completionEnvironment({initialTasks:[task]});env.installAttachment();
+  const accept=env.adapter.acceptFile;env.adapter.acceptFile=async options=>({...await accept(options),requestedPoints:46,pointsVerified:true});await env.app.start();
+  const result=await env.app.retryAssistCompletion(task.id),current=env.app.getSnapshot().tasks[0];
+  assert.equal(result.completed,true);assert.equal(current.requestedPoints,46);assert.equal(current.pointsVerified,true);
+  assert.equal(current.attachmentID,900);assert.equal(current.completedAt,task.completedAt);assert.equal(env.importCount,0);assert.equal(env.posts.length,1);await env.app.stop();
+});
+
+function submissionReviewFixture(state='submission_unknown') {
+  return MODEL.createTask({libraryID:1,itemID:1,itemKey:'ITEM1',doi:'10.1234/paper1',title:'Fixture paper 1',state,allowAssist:true,requestedPoints:10,
+    submissionReview:{requestID:'Published1',requestURL:'https://www.ablesci.com/assist/detail?id=Published1',expectedDOI:'10.1234/paper1',receivedDOI:'10.1234/other',reason:'DOI_MISMATCH'}});
+}
+
+test('an uncertain response after publication retains the exact unbound request for read-only review and restart',async()=>{
+  const review=submissionReviewFixture().submissionReview,env=environment({acquire:async()=>({state:'not_found',message:'Unavailable'})});env.addItem(item(1));
+  env.adapter.submitRequest=async value=>{env.submissions.push(value);throw Object.assign(new Error('Published but detail parsing failed'),{code:'SUBMISSION_UNCERTAIN',reconcileRequired:true,submissionReview:{...review,receivedDOI:'',reason:'DETAIL_UNAVAILABLE'}});};
+  await env.app.start();await env.app.captureItems([env.items.get(1)],{allowAssist:true});await until(()=>env.app.getSnapshot().tasks[0]?.state==='submission_unknown');
+  const current=env.app.getSnapshot().tasks[0];assert.equal(current.requestID,'');assert.equal(current.requestURL,'');assert.equal(current.submissionReview.requestID,'Published1');
+  current.submissionReview.requestID='Tampered';assert.equal(env.app.getSnapshot().tasks[0].submissionReview.requestID,'Published1');
+  await env.app.stop();const restored=environment({initialQueue:MODEL.deserializeQueue(env.files.get(queuePath))});await restored.app.start();
+  assert.equal(restored.app.getSnapshot().tasks[0].submissionReview.requestID,'Published1');assert.equal(restored.submissions.length,0);assert.equal(env.submissions.length,1);await restored.app.stop();
+});
+
+test('review checks only the retained published request and binds after a corrected live DOI agrees without reposting',async()=>{
+  const task=submissionReviewFixture(),env=environment({initialTasks:[task]}),parent=env.addItem(item(1)),calls=[];let doi=task.doi;
+  const get=parent.getField;parent.getField=name=>name==='DOI'?doi:get(name);
+  env.adapter.findExistingRequest=async()=>{throw new Error('Do not replace the exact retained candidate with a search');};
+  env.adapter.getRequest=async id=>{calls.push(id);return{requestID:'Published1',requestURL:task.submissionReview.requestURL,doi:'10.1234/other',ownerID:'FixtureAccount',state:'waiting',files:[],requestedPoints:30,pointsVerified:true};};
+  await env.app.start();await env.app.checkTask(task.id);let current=env.app.getSnapshot().tasks[0];
+  assert.equal(current.state,'submission_unknown');assert.equal(current.requestID,'');assert.equal(current.submissionReview.receivedDOI,'10.1234/other');
+  doi='10.1234/other';await env.app.checkTask(task.id);current=env.app.getSnapshot().tasks[0];
+  assert.equal(current.state,'waiting');assert.equal(current.doi,doi);assert.equal(current.requestID,'Published1');assert.equal(current.submissionReview,null);
+  assert.equal(current.requestedPoints,30);assert.equal(current.pointsVerified,true);assert(calls.every(id=>id==='Published1'));assert.equal(env.submissions.length,0);assert.equal(env.publisherCalls.length,0);await env.app.stop();
+});
+
+test('published review refuses another owner, changed item identity and changed request ID without binding or reposting',async()=>{
+  for(const mode of ['owner','item','request']){
+    const task=submissionReviewFixture(),env=environment({initialTasks:[task]}),parent=env.addItem(item(1));
+    env.adapter.getRequest=async()=>{if(mode==='item')parent.key='REPLACED';return{requestID:mode==='request'?'Other':'Published1',requestURL:task.submissionReview.requestURL,doi:task.doi,ownerID:mode==='owner'?'SomeoneElse':'FixtureAccount',state:'waiting',files:[]};};
+    await env.app.start();const result=await env.app.checkTask(task.id),current=env.app.getSnapshot().tasks[0];
+    assert.equal(result.completed,false,mode);assert.equal(current.state,'submission_unknown');assert.equal(current.requestID,'');assert.equal(current.submissionReview.requestID,'Published1');assert.equal(env.submissions.length,0);await env.app.stop();
+  }
+});
+
+test('a paused published review retries the retained request and its separate open action never binds it',async()=>{
+  const task=submissionReviewFixture('paused'),env=environment({initialTasks:[task]}),dialogs=[];env.addItem(item(1));
+  env.Zotero.getMainWindow=()=>({openDialog(...args){dialogs.push(args);return{closed:false,close(){this.closed=true;},focus(){}};}});
+  env.adapter.getRequest=async id=>{env.remoteRequests.push(id);return{requestID:id,requestURL:task.submissionReview.requestURL,doi:'10.1234/other',ownerID:'FixtureAccount',state:'waiting',files:[]};};
+  await env.app.start();await env.app.openSubmissionReview(task.id);assert.equal(dialogs.length,1);assert.equal(dialogs[0][3].url,task.submissionReview.requestURL);
+  assert.equal(env.app.getSnapshot().tasks[0].requestID,'');await env.app.retryTask(task.id);
+  assert.deepEqual(env.remoteRequests,['Published1']);assert.equal(env.app.getSnapshot().tasks[0].state,'submission_unknown');assert.equal(env.submissions.length,0);assert.equal(env.publisherCalls.length,0);await env.app.stop();
+});
+
+test('a delayed published-review read cannot bind after pause or logout',async()=>{
+  for(const action of ['pause','logout']){
+    const task=submissionReviewFixture(),env=environment({initialTasks:[task]}),gate=deferred();env.addItem(item(1));let reading=false;
+    env.adapter.getRequest=async()=>{reading=true;await gate.promise;return{requestID:'Published1',requestURL:task.submissionReview.requestURL,doi:task.doi,ownerID:'FixtureAccount',state:'waiting',files:[]};};
+    await env.app.start();const checking=env.app.checkTask(task.id);await until(()=>reading);await(action==='pause'?env.app.pauseTask(task.id):env.app.logout());gate.resolve();const result=await checking;
+    const current=env.app.getSnapshot().tasks[0];assert.equal(result.cancelled,true);assert.equal(current.requestID,'');assert.equal(current.submissionReview.requestID,'Published1');assert.equal(env.submissions.length,0);
+    if(action==='pause')assert.equal(current.state,'paused');else assert.equal(env.app.getSnapshot().session.status,'signed_out');await env.app.stop();
+  }
+});
+
+test('a late failed published-review read preserves a newer pause instead of reopening the review task',async()=>{
+  const task=submissionReviewFixture(),env=environment({initialTasks:[task]}),gate=deferred();env.addItem(item(1));let reading=false;
+  env.adapter.getRequest=async()=>{reading=true;await gate.promise;throw new Error('late network failure');};
+  await env.app.start();const checking=env.app.checkTask(task.id);await until(()=>reading);await env.app.pauseTask(task.id);gate.resolve();await checking;
+  const current=env.app.getSnapshot().tasks[0];assert.equal(current.state,'paused');assert.equal(current.requestID,'');assert.equal(current.submissionReview.requestID,'Published1');assert.equal(env.submissions.length,0);await env.app.stop();
+});
+
+test('a retained published-review reference blocks another batch or assistance authorization even without an intent file',async()=>{
+  for(const state of ['paused','error']){
+    const task=submissionReviewFixture(state),env=environment({initialTasks:[task]}),parent=env.addItem(item(1));await env.app.start();
+    const result=await env.app.requestAssist(task.id);assert.equal(result.accepted,0);assert.equal(result.skipped,1);
+    const capture=await env.app.captureItems([parent],{allowAssist:true});assert.equal(capture.queued,0);assert.equal(capture.retained,1);
+    const current=env.app.getSnapshot().tasks[0];assert.equal(current.submissionReview.requestID,'Published1');assert.equal(current.state,state);
+    assert.equal(env.submissions.length,0);assert.equal(env.publisherCalls.length,0);await env.app.stop();
+  }
+});
+
+test('a paused published-review reference cannot be discarded by switching to a local or browser download route',async()=>{
+  for(const method of ['importLocalPDF','recheckDownloadedPDFs','openSystemBrowserTask','openExternalTask']){
+    const task=submissionReviewFixture('paused'),env=environment({initialTasks:[task],pickPDF:async()=>null});env.addItem(item(1));await env.app.start();
+    await assert.rejects(env.app[method](task.id),/求助|核对|核实|请先/);
+    const current=env.app.getSnapshot().tasks[0];assert.equal(current.submissionReview.requestID,'Published1',method);assert.equal(current.state,'paused',method);
+    assert.equal(env.openedURLs.length,0);assert.equal(env.importCount,0);assert.equal(env.submissions.length,0);await env.app.stop();
+  }
+});
+
+test('read-only DOI inspection uses live item metadata, saves a safe diagnostic, and refuses changes during lookup',async()=>{
+  const task=localFixture(),env=environment({initialTasks:[task]}),parent=env.addItem(item(1)),calls=[];let doi='10.1234/corrected',title='Corrected title';
+  const get=parent.getField;parent.getField=name=>name==='DOI'?doi:name==='title'?title:get(name);
+  env.adapter.inspectDOI=async value=>{calls.push(value);return{receivedDOI:value,title:'Website title',reason:'match',cookie:'private-secret',raw:{token:'private-secret'}};};
+  await env.app.start();await env.app.inspectDOI(task.id);const current=env.app.getSnapshot().tasks[0];
+  assert.deepEqual(calls,['10.1234/corrected']);assert.equal(current.doi,task.doi);assert.equal(current.doiCheck.expectedDOI,doi);assert.equal(current.doiCheck.expectedTitle,title);assert.equal(current.doiCheck.receivedTitle,'Website title');
+  assert.equal(current.doiCheck.cookie,undefined);assert.equal(current.doiCheck.raw,undefined);assert.equal(env.files.get(queuePath).includes('private-secret'),false);
+  current.doiCheck.expectedTitle='Tampered';assert.equal(env.app.getSnapshot().tasks[0].doiCheck.expectedTitle,title);
+  const before=JSON.stringify(env.app.getSnapshot().tasks[0].doiCheck),gate=deferred();let reading=false;
+  env.adapter.inspectDOI=async()=>{reading=true;await gate.promise;return{receivedDOI:doi,title:'Late website title',reason:'match'};};
+  const checking=env.app.inspectDOI(task.id);await until(()=>reading);title='Changed during lookup';gate.resolve();await assert.rejects(checking,/条目信息已改变/);
+  assert.equal(JSON.stringify(env.app.getSnapshot().tasks[0].doiCheck),before);assert.equal(env.submissions.length,0);assert.equal(env.publisherCalls.length,0);await env.app.stop();
+});
+
+test('old assistance costs refresh read-only with exact owner and DOI checks, preserving receipts and throttling unknown amounts',async()=>{
+  for(const mode of ['verified','unknown','wrong-owner','wrong-doi']){
+    const pending=importedReceiptFixture(),at=pending.assistReceipt.verifiedAt,task=MODEL.updateTask(pending,{assistReceipt:{...pending.assistReceipt,adoption:'accepted',messages:'done',acceptedAt:at,readAt:at}}),env=completionEnvironment({initialTasks:[task]});env.installAttachment();let reads=0;
+    env.adapter.getRequest=async()=>{reads++;return{requestID:task.requestID,doi:mode==='wrong-doi'?'10.1234/other':task.doi,ownerID:mode==='wrong-owner'?'SomeoneElse':'FixtureAccount',state:'available',files:[],...(mode==='unknown'?{}:{requestedPoints:42,pointsVerified:true})};};
+    await env.app.start();const before=env.app.getSnapshot().tasks[0],result=await env.app.refreshAssistPoints(task.id),current=env.app.getSnapshot().tasks[0];
+    assert.equal(result.verified,mode==='verified',mode);assert.equal(current.requestedPoints,mode==='verified'?42:10);assert.equal(current.pointsVerified,mode==='verified');
+    assert.equal(current.attachmentID,before.attachmentID);assert.equal(current.completedAt,before.completedAt);assert.equal(current.assistReceipt.messages,'done');assert.equal(JSON.stringify(current.assistReceipt),JSON.stringify(before.assistReceipt));
+    assert.equal(env.posts.length,0);assert.equal(env.messageReads.length,0);assert.equal(env.downloadCalls.length,0);assert.equal(env.submissions.length,0);
+    assert.ok(current.lastCheckedAt,'every attempted cost lookup is throttled, including unmatched ownership or DOI');
+    await env.timers.find(timer=>timer.ms===15000).callback();assert.equal(reads,1,'poll cannot immediately repeat the cost lookup');await env.app.stop();
+  }
+});
+
+const checkInPath=path.win32.join('C:\\isolated','fulltext-assistant','checkin-status.json');
+function checkInStatus(time,overrides={}){
+  const date=new Date(time),day=[date.getFullYear(),String(date.getMonth()+1).padStart(2,'0'),String(date.getDate()).padStart(2,'0')].join('-');
+  return{accountID:'FixtureAccount',day,signed:false,balance:88,reward:null,rewardVerified:false,checkedAt:date.toISOString(),...overrides};
+}
+
+test('check-in reminder defaults on, persists independently, and disabled reminders leave explicit read-only refresh available',async()=>{
+  const time=new Date(2026,10,8,8).getTime(),env=environment({appTime:time});let reads=0;
+  env.adapter.getCheckInStatus=async()=>{reads++;return checkInStatus(time);};await env.app.start();assert.equal(env.app.getSnapshot().settings.checkInReminder,true);
+  await env.app.saveSettings({checkInReminder:false,points:29});await env.app.saveSettings({language:'en'});await env.app.refreshAccount();
+  await env.app.preferencesOpened();await env.timers.find(timer=>timer.ms===60000).callback();assert.equal(reads,0);
+  await env.app.refreshCheckIn({force:true});assert.equal(reads,1);assert.equal(env.submissions.length,0);assert.equal(env.httpCalls.length,0);
+  const prefs=Object.fromEntries(env.prefs);await env.app.stop();const restored=environment({initialPrefs:prefs,appTime:time});await restored.app.start();
+  assert.equal(restored.app.getSnapshot().settings.checkInReminder,false);assert.equal(restored.app.getSnapshot().settings.points,29);assert.equal(restored.app.getSnapshot().settings.language,'en');await restored.app.stop();
+});
+
+test('concurrent check-in reads share one request and persist only safe account-scoped status, balance and verified reward',async()=>{
+  const time=new Date(2026,10,8,8).getTime(),env=environment({appTime:time}),gate=deferred();let reads=0;
+  env.adapter.getCheckInStatus=async()=>{reads++;await gate.promise;return{...checkInStatus(time,{signed:true,balance:93,reward:5,rewardVerified:true}),cookie:'private-secret',password:'private-secret'};};
+  await env.app.start();await env.app.refreshAccount();const first=env.app.refreshCheckIn(),second=env.app.refreshCheckIn({force:true});await until(()=>reads===1);
+  assert.equal(env.app.getSnapshot().checkIn.state,'checking');gate.resolve();await Promise.all([first,second]);
+  const current=env.app.getSnapshot().checkIn;assert.equal(current.state,'loaded');assert.equal(current.signed,true);assert.equal(current.balance,93);assert.equal(current.reward,5);assert.equal(current.rewardVerified,true);assert.equal(current.accountID,undefined);
+  current.balance=999;assert.equal(env.app.getSnapshot().checkIn.balance,93);
+  const saved=env.files.get(checkInPath);assert.equal(saved.includes('private-secret'),false);assert.equal(JSON.parse(saved).accounts[0].accountID,'FixtureAccount');assert.equal(env.submissions.length,0);assert.equal(env.httpCalls.length,0);await env.app.stop();
+});
+
+test('check-in state restores for the matching account and never exposes the previous account balance after a switch or logout',async()=>{
+  const time=new Date(2026,10,8,8).getTime(),env=environment({appTime:time});env.adapter.getCheckInStatus=async()=>checkInStatus(time,{signed:true,balance:93,reward:5,rewardVerified:true});
+  await env.app.start();await env.app.refreshAccount();await env.app.refreshCheckIn();const saved=env.files.get(checkInPath);await env.app.stop();
+  const restored=environment({appTime:time});restored.files.set(checkInPath,saved);await restored.app.start();assert.equal(restored.app.getSnapshot().checkIn.balance,null);
+  await restored.app.refreshAccount();assert.equal(restored.app.getSnapshot().checkIn.balance,93);assert.equal(restored.app.getSnapshot().checkIn.rewardVerified,true);
+  restored.account.accountID='OtherAccount';await restored.app.refreshAccount();assert.equal(restored.app.getSnapshot().checkIn.balance,null);assert.equal(restored.app.getSnapshot().checkIn.signed,null);
+  restored.account.accountID='FixtureAccount';await restored.app.refreshAccount();assert.equal(restored.app.getSnapshot().checkIn.balance,93);
+  await restored.app.logout();assert.equal(restored.app.getSnapshot().checkIn.state,'signed_out');assert.equal(restored.app.getSnapshot().checkIn.balance,null);assert.equal(restored.app.getSnapshot().checkIn.reward,null);await restored.app.stop();
+});
+
+test('daily check-in timer waits until local six, checks once per day, and clears yesterday success and reward at midnight',async()=>{
+  let time=new Date(2026,10,8,5,59).getTime();const env=environment({appTime:time});let reads=0;
+  env.adapter.getCheckInStatus=async()=>{reads++;return checkInStatus(time,{signed:true,reward:5,rewardVerified:true});};await env.app.start();await env.app.refreshAccount();
+  const tick=env.timers.find(timer=>timer.ms===60000).callback;await tick();assert.equal(reads,0);
+  time+=60000;env.setAppTime(time);await tick();assert.equal(reads,1);assert.equal(env.app.getSnapshot().checkIn.signed,true);
+  time+=6*3600000;env.setAppTime(time);await tick();assert.equal(reads,1);
+  time=new Date(2026,10,9,0,1).getTime();env.setAppTime(time);let current=env.app.getSnapshot().checkIn;
+  assert.equal(current.state,'idle');assert.equal(current.signed,null);assert.equal(current.reward,null);assert.equal(current.rewardVerified,false);assert.equal(current.balance,88);
+  await tick();assert.equal(reads,1);time=new Date(2026,10,9,6).getTime();env.setAppTime(time);await tick();assert.equal(reads,2);assert.equal(env.submissions.length,0);await env.app.stop();
+});
+
+test('opening preferences restores an available session and throttles unsigned check-in reads for two minutes',async()=>{
+  let time=new Date(2026,10,8,5).getTime();const env=environment({appTime:time});let reads=0;
+  env.adapter.getCheckInStatus=async()=>{reads++;return checkInStatus(time);};await env.app.start();assert.equal(env.app.getSnapshot().session.status,'signed_out');
+  env.session.getStatus=()=>({hasCookies:true,persistent:true});await env.app.preferencesOpened();assert.equal(env.accountCalls,1);assert.equal(reads,1);assert.equal(env.app.getSnapshot().checkIn.signed,false);
+  time+=119000;env.setAppTime(time);await env.app.preferencesOpened();assert.equal(reads,1);
+  time+=1000;env.setAppTime(time);await env.app.preferencesOpened();assert.equal(reads,2);
+  await env.app.refreshCheckIn({force:true});assert.equal(reads,3);assert.equal(env.submissions.length,0);await env.app.stop();
+});
+
+test('failed check-in reads retry automatically only after fifteen minutes and do not claim a successful reward',async()=>{
+  let time=new Date(2026,10,8,8).getTime();const env=environment({appTime:time});let reads=0;
+  env.adapter.getCheckInStatus=async()=>{reads++;if(reads<2)throw new Error('Temporary website error');return checkInStatus(time);};await env.app.start();await env.app.refreshAccount();
+  await assert.rejects(env.app.refreshCheckIn(),/Temporary website/);assert.equal(env.app.getSnapshot().checkIn.state,'error');assert.equal(env.app.getSnapshot().checkIn.rewardVerified,false);
+  time+=14*60000;env.setAppTime(time);await env.app.preferencesOpened();await env.timers.find(timer=>timer.ms===60000).callback();assert.equal(reads,1);
+  time+=60000;env.setAppTime(time);await env.timers.find(timer=>timer.ms===60000).callback();assert.equal(reads,2);assert.equal(env.app.getSnapshot().checkIn.state,'loaded');assert.equal(env.app.getSnapshot().checkIn.signed,false);await env.app.stop();
+});
+
+test('opening check-in only opens the official page and briefly observes human completion without any submission',async()=>{
+  let time=new Date(2026,10,8,5).getTime();const env=environment({appTime:time}),dialogs=[];let reads=0,signed=false;
+  env.Zotero.getMainWindow=()=>({openDialog(...args){dialogs.push(args);return{closed:false,close(){this.closed=true;},focus(){}};}});
+  env.adapter.getCheckInStatus=async()=>{reads++;return checkInStatus(time,{signed,balance:signed?93:88,reward:signed?5:null,rewardVerified:signed});};
+  await env.app.start();await env.app.refreshAccount();await env.app.refreshCheckIn();await env.app.openCheckIn();
+  assert.equal(dialogs.length,1);assert.equal(dialogs[0][3].url,'https://www.ablesci.com/');assert.equal(dialogs[0][3].mode,'checkin');assert.equal(reads,1);
+  const tick=env.timers.find(timer=>timer.ms===60000).callback;time+=60000;env.setAppTime(time);await tick();assert.equal(reads,1);
+  signed=true;time+=60000;env.setAppTime(time);await tick();assert.equal(reads,2);assert.equal(env.app.getSnapshot().checkIn.rewardVerified,true);
+  time+=11*60000;env.setAppTime(time);await tick();assert.equal(reads,2);assert.equal(env.submissions.length,0);assert.equal(env.httpCalls.length,0);await env.app.stop();
+});
+
+test('late check-in responses cannot restore old account data after logout, account switch or shutdown',async()=>{
+  for(const action of ['logout','switch','stop']){
+    const time=new Date(2026,10,8,8).getTime(),env=environment({appTime:time}),gate=deferred();let reading=false;
+    env.adapter.getCheckInStatus=async()=>{reading=true;await gate.promise;return checkInStatus(time,{signed:true,balance:93,reward:5,rewardVerified:true});};
+    await env.app.start();await env.app.refreshAccount();const pending=env.app.refreshCheckIn().catch(error=>error);await until(()=>reading);
+    if(action==='logout')await env.app.logout();else if(action==='switch'){env.account.accountID='OtherAccount';await env.app.refreshAccount();}else await env.app.stop();
+    gate.resolve();const result=await pending;assert.equal(result.name,'AbortError');assert.equal(env.app.getSnapshot().checkIn.balance,null);assert.equal(env.files.has(checkInPath),false);assert.equal(env.submissions.length,0);
+    if(action!=='stop')await env.app.stop();
+  }
+});
+
+test('a new account can start its own check-in read while an obsolete account read is still pending',async()=>{
+  const time=new Date(2026,10,8,8).getTime(),env=environment({appTime:time}),gate=deferred();let reads=0;
+  env.adapter.getCheckInStatus=async()=>{const accountID=env.account.accountID;reads++;if(accountID==='FixtureAccount')await gate.promise;return checkInStatus(time,{accountID,balance:accountID==='OtherAccount'?17:93});};
+  await env.app.start();await env.app.refreshAccount();const old=env.app.refreshCheckIn().catch(error=>error);await until(()=>reads===1);
+  env.account.accountID='OtherAccount';await env.app.refreshAccount();await env.app.refreshCheckIn();assert.equal(reads,2);assert.equal(env.app.getSnapshot().checkIn.balance,17);
+  gate.resolve();await old;assert.equal(env.app.getSnapshot().checkIn.balance,17);assert.deepEqual(JSON.parse(env.files.get(checkInPath)).accounts.map(record=>record.accountID),['OtherAccount']);await env.app.stop();
+});
+
+test('check-in replies from another account or day cannot claim a reward and malformed rewards remain unverified',async()=>{
+  const time=new Date(2026,10,8,8).getTime();
+  for(const patch of [{accountID:'OtherAccount'},{day:'2026-11-07'}]){
+    const env=environment({appTime:time});env.adapter.getCheckInStatus=async()=>checkInStatus(time,{...patch,signed:true,balance:93,reward:5,rewardVerified:true});await env.app.start();await env.app.refreshAccount();
+    await assert.rejects(env.app.refreshCheckIn());assert.equal(env.app.getSnapshot().checkIn.state,'error');assert.equal(env.app.getSnapshot().checkIn.signed,null);assert.equal(env.app.getSnapshot().checkIn.balance,null);assert.equal(env.app.getSnapshot().checkIn.rewardVerified,false);await env.app.stop();
+  }
+  const env=environment({appTime:time});env.adapter.getCheckInStatus=async()=>checkInStatus(time,{signed:true,balance:93,reward:-1,rewardVerified:true});await env.app.start();await env.app.refreshAccount();await env.app.refreshCheckIn();
+  assert.equal(env.app.getSnapshot().checkIn.balance,93);assert.equal(env.app.getSnapshot().checkIn.reward,null);assert.equal(env.app.getSnapshot().checkIn.rewardVerified,false);await env.app.stop();
 });
