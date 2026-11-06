@@ -1308,30 +1308,64 @@ async function siteControls(mode = "request") {
   app.recheckDownloadedPDFs = async id => { calls.push(["recheckPDFs", id]); };
   app.reviewDownloadCandidate = async (id, candidate) => { calls.push(["reviewCandidate", id, candidate]); };
   model.tasks = [{ id: "diagnostic", state: "manual_waiting", itemID: 301, title: "下载设置", doi: "10.1234/diagnostic", acquisitionMode: "manual",
-    downloadStatus: { scanned: 4, unknown: 1, mismatched: 2, lastScanAt: "2026-11-05T08:30:00Z" },
-    downloadCandidates: [{ id: "candidate-one", filename: "<img src=x onerror=bad>.pdf", message: "无法自动确认所选 PDF 的论文身份。请先预览并核对标题、作者和 DOI，再明确确认。" }],
+    downloadStatus: { scanned: 23, unknown: 21, related: 4, unreadable: 1, unrelated: 16, mismatched: 2, lastScanAt: "2026-11-05T08:30:00Z" },
+    downloadCandidates: [
+      { id: "candidate-three", filename: "third.pdf", related: true, candidateScore: 0.7, titleSimilarity: 0.72, evidence: { candidateBasis: ["front_title_similar"] } },
+      { id: "candidate-unrelated", filename: "unrelated.pdf", related: false, candidateScore: 1 },
+      { id: "candidate-one", filename: "<img src=x onerror=bad>.pdf", related: true, candidateScore: 0.92, titleSimilarity: 0.94, detectedTitle: "科研通账号", detectedDOIs: ["10.1234/diagnostic"], evidence: { titleReliable: true, doiReliable: true, candidateBasis: ["article_doi_match", "front_title_similar", "article_doi_match", "unknown_future_basis"] }, message: "无法自动确认所选 PDF 的论文身份。请先预览并核对标题、作者和 DOI，再明确确认。" },
+      { id: "candidate-four", filename: "fourth.pdf", related: true, candidateScore: 0.6 },
+      { id: "candidate-legacy", filename: "legacy.pdf" },
+      { id: "candidate-two", filename: "second.pdf", related: true, candidateScore: 0.8, titleSimilarity: 0.81, evidence: { candidateBasis: ["front_title_similar"] } },
+      { filename: "missing-id.pdf", related: true, candidateScore: 1 }
+    ],
+    downloadDiagnostics: [
+      { category: "unrelated", filename: "other-article.pdf", detectedTitle: "A different article", detectedDOIs: ["10.1234/other"], titleSimilarity: 0.1, evidence: { candidateBasis: ["front_title_different"] } },
+      { category: "unreadable", filename: "scanned.pdf", evidence: { extractionSucceeded: false, candidateBasis: ["no_extractable_text"] }, message: "PDF 未提取到可核验文字，可能是扫描件或受保护文件，需人工核对。" },
+      { category: "mismatch", filename: "<svg onload=bad>.pdf", detectedTitle: "<img src=x onerror=bad>下载设置", detectedDOIs: ["10.1234/<svg onload=bad>"], evidence: { candidateBasis: ["article_doi_mismatch"] } },
+      { category: "constructor", filename: "invalid-category.pdf" }
+    ],
     accessEvidence: { kind: "institutional_entry", confidence: "explicit" }, accessHint: { scope: "host_hint", kind: "institutional_confirmed", institutionalConfirmed: false }
   }];
   model.currentBatch = { id: "diagnostic-batch", createdAt: "2026-11-05T08:00:00Z", taskIDs: ["diagnostic"] };
   filterButton("unfinished").click();renderListener();
   const diagnostic = taskRow("diagnostic").querySelector(".fta-download-details");
   assert.equal(diagnostic.hasAttribute("open"), false, "download diagnostics start collapsed");
-  assert.match(diagnostic.textContent, /已检查 4 个 PDF；身份待核对 1 个，不匹配 2 个/);
+  assert.match(diagnostic.textContent, /已检查 23 个 PDF；相关候选 4 个，已排除 18 个，识别不足 1 个/);
+  assert.doesNotMatch(diagnostic.textContent, /身份待核对 21/);
+  assert.deepEqual([...diagnostic.querySelectorAll(".fta-download-candidate")].map(node => node.dataset.candidateId), ["candidate-one", "candidate-two", "candidate-three"], "only the three highest-ranked explicitly related candidates can be reviewed");
+  assert.doesNotMatch(diagnostic.textContent, /unrelated\.pdf|legacy\.pdf|fourth\.pdf|missing-id\.pdf|invalid-category\.pdf/);
+  assert.match(diagnostic.querySelector(".fta-detected-title").textContent, /识别标题：科研通账号/);
+  assert.match(diagnostic.querySelector(".fta-detected-dois").textContent, /识别 DOI：10\.1234\/diagnostic/);
+  assert.equal(diagnostic.querySelector(".fta-evidence-basis").textContent, "判定依据：本文 DOI 一致 · 首页标题相近，待核对");
+  assert.equal(diagnostic.querySelector(".fta-title-similarity").textContent, "标题相似度 94%");
+  assert.match(diagnostic.querySelector(".fta-title-similarity").title, /不是论文匹配概率/);
+  const excludedDiagnostic = diagnostic.querySelector(".fta-download-diagnostics");
+  assert.equal(excludedDiagnostic.hasAttribute("open"), false, "excluded files and insufficient evidence start collapsed separately");
+  assert.equal(excludedDiagnostic.querySelectorAll(".fta-download-diagnostic").length, 3);
+  assert.equal(excludedDiagnostic.querySelectorAll("button").length, 0, "low-relevance and unreadable files are not presented as actionable candidates");
+  assert.match(excludedDiagnostic.textContent, /明确不匹配 2 个；低相关 16 个；识别不足 1 个/);
+  assert.match(excludedDiagnostic.textContent, /不能据此断定文件错误/);
   assert.equal(diagnostic.querySelector("img"), null);
+  assert.equal(diagnostic.querySelector("svg"), null);
   assert.match(taskRow("diagnostic").textContent, /不代表当前账号拥有此论文权限/);
   assert.match(taskRow("diagnostic").textContent, /仅供参考/);
   assert.doesNotMatch(taskRow("diagnostic").textContent, /此论文已确认机构访问/);
   diagnostic.setAttribute("open", "");
+  excludedDiagnostic.setAttribute("open", "");
   renderListener();
   assert.equal(taskRow("diagnostic").querySelector(".fta-download-details").hasAttribute("open"), true, "an immediate polling refresh preserves the user's expanded diagnostic before toggle dispatch");
+  assert.equal(taskRow("diagnostic").querySelector(".fta-download-diagnostics").hasAttribute("open"), true, "the diagnostic section also survives polling refreshes");
   model.tasks.push({ id: "diagnostic-other", state: "manual_waiting", itemID: 302, title: "Another download", downloadStatus: { scanned: 0 } });
   renderListener();
   assert.equal(taskRow("diagnostic-other").querySelector(".fta-download-details").hasAttribute("open"), false, "expansion belongs only to the selected task");
   filterButton("all").click();filterButton("unfinished").click();
   assert.equal(taskRow("diagnostic").querySelector(".fta-download-details").hasAttribute("open"), true, "filtering away and back preserves the expanded task");
+  assert.equal(taskRow("diagnostic").querySelector(".fta-download-diagnostics").hasAttribute("open"), true, "filter changes retain the separate diagnostic expansion");
   taskRow("diagnostic").querySelector(".fta-download-details").removeAttribute("open");
+  taskRow("diagnostic").querySelector(".fta-download-diagnostics").removeAttribute("open");
   renderListener();
   assert.equal(taskRow("diagnostic").querySelector(".fta-download-details").hasAttribute("open"), false, "an explicitly collapsed diagnostic stays collapsed after refresh");
+  assert.equal(taskRow("diagnostic").querySelector(".fta-download-diagnostics").hasAttribute("open"), false, "explicitly collapsing diagnostic records is preserved");
   taskRow("diagnostic").querySelector(".fta-download-details").setAttribute("open", "");
   model.tasks.pop();renderListener();
   const beforeDiagnostic = calls.length;
@@ -1341,6 +1375,19 @@ async function siteControls(mode = "request") {
   assert.deepEqual(calls.slice(beforeDiagnostic), [["recheckPDFs", "diagnostic"], ["reviewCandidate", "diagnostic", "candidate-one"]]);
   assert.equal(model.tasks[0].state, "manual_waiting");
   assert.equal(taskRow("diagnostic").querySelector(".fta-download-details").hasAttribute("open"), true, "preview refresh does not hide the candidate or imply confirmation");
+
+  // Unknown counts from older versions are not inferred to be candidates or
+  // mismatches. Missing or malformed classifications remain explicitly unknown.
+  model.tasks.push({ id: "legacy-diagnostic", state: "manual_waiting", itemID: 302, title: "Legacy check", downloadStatus: { scanned: 23, unknown: 19, mismatched: 4 }, downloadCandidates: [{ id: "old-unknown", filename: "old.pdf" }] });
+  renderListener();
+  const legacyDiagnostic = taskRow("legacy-diagnostic").querySelector(".fta-download-details");
+  assert.match(legacyDiagnostic.textContent, /已检查 23 个 PDF。/);
+  assert.match(legacyDiagnostic.textContent, /尚无完整的相关性分类/);
+  assert.doesNotMatch(legacyDiagnostic.textContent, /相关候选|已排除 4|尚未找到足够相关/);
+  assert.equal(legacyDiagnostic.querySelectorAll(".fta-download-candidate").length, 0);
+  Object.assign(model.tasks.at(-1).downloadStatus, { related: -1, unreadable: 4, unrelated: 15 });renderListener();
+  assert.match(taskRow("legacy-diagnostic").textContent, /尚无完整的相关性分类/);
+  model.tasks.pop();renderListener();
 
   // A saved minimum policy is explicit at the action, while an unsaved checkbox
   // does not change what a request button promises to use.
@@ -1392,7 +1439,11 @@ async function siteControls(mode = "request") {
   assert.equal(get("fta-pref-message-list").querySelector(".fta-row-title").textContent, "下载设置");
   assert.equal(get("fta-pref-message-list").querySelector(".fta-message-summary").textContent, "科研通账号");
   assert.equal(taskRow("diagnostic").querySelector(".fta-candidate-name").textContent, "<img src=x onerror=bad>.pdf");
-  assert.match(taskRow("diagnostic").textContent, /Checked 4 PDFs: 1 need identity review, 2 do not match/);
+  assert.equal(taskRow("diagnostic").querySelector(".fta-detected-title [data-i18n-skip]").textContent, "科研通账号", "detected titles matching UI translation keys remain raw metadata");
+  assert.match(taskRow("diagnostic").textContent, /Checked 23 PDFs: 4 relevant candidates, 18 excluded, 1 with insufficient identity evidence/);
+  assert.equal(taskRow("diagnostic").querySelector(".fta-evidence-basis").textContent, "Evidence: Article DOI matches · Similar first-page title; review required");
+  assert.equal(taskRow("diagnostic").querySelector(".fta-title-similarity").textContent, "Title similarity 94%");
+  assert.equal(taskRow("diagnostic").querySelector(".fta-download-diagnostics > summary").textContent, "Excluded files and insufficient evidence");
   assert.match(taskRow("diagnostic").textContent, /does not confirm that the current account/);
   const untranslatedUI = [];
   (function inspect(node) {
@@ -1406,6 +1457,8 @@ async function siteControls(mode = "request") {
   assert.equal(get("fta-pref-account-state").textContent, "未登入");
   assert.equal(get("fta-pref-password").value, "do-not-save-this-draft");
   assert.equal(taskRow("diagnostic").querySelector(".fta-row-title button span").textContent, "下载设置");
+  assert.equal(taskRow("diagnostic").querySelector(".fta-download-diagnostics > summary").textContent, "已排除與識別不足");
+  assert.equal(taskRow("diagnostic").querySelector(".fta-detected-title [data-i18n-skip]").textContent, "科研通账号");
   await chooseLanguage("zh-CN");
   assert.equal(pageTab("settings").textContent, "设置");
   assert.match(get("fta-pref-bulk-assist").textContent, /每篇 37 积分/);

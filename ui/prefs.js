@@ -28,6 +28,7 @@
     let currentBatchIDs = new Set();
     const selectedTasks = new Set();
     const expandedDownloadDetails = new Set();
+    const expandedDownloadDiagnostics = new Set();
     const expandedDOIChecks = new Set();
     const copyTimers = new Set();
     const bindings = [];
@@ -333,12 +334,20 @@
           else expandedDownloadDetails.delete(id);
         }
       }
+      for (const details of list.querySelectorAll(".fta-download-diagnostics")) {
+        const id = details.closest(".fta-row")?.dataset.taskId;
+        if (id) {
+          if (details.hasAttribute("open")) expandedDownloadDiagnostics.add(id);
+          else expandedDownloadDiagnostics.delete(id);
+        }
+      }
       for (const details of list.querySelectorAll(".fta-doi-check")) {
         const id = details.closest(".fta-row")?.dataset.taskId;
         if (id) { if (details.hasAttribute("open")) expandedDOIChecks.add(id);else expandedDOIChecks.delete(id); }
       }
       const taskIDs = new Set(tasks.map(task => String(task.id)));
       for (const id of expandedDownloadDetails) if (!taskIDs.has(id)) expandedDownloadDetails.delete(id);
+      for (const id of expandedDownloadDiagnostics) if (!taskIDs.has(id)) expandedDownloadDiagnostics.delete(id);
       for (const id of expandedDOIChecks) if (!taskIDs.has(id)) expandedDOIChecks.delete(id);
       list.replaceChildren();
       $("fta-pref-task-count").textContent = String(scopeTasks.length);
@@ -502,32 +511,100 @@
           if (snapshot.settings?.acceptSiteMinimum === true) row.append(make("p", "fta-note", "已启用自动接受网站最低积分；最终悬赏可能高于按钮中的基础积分。"));
         }
         row.append(actions);
-        const downloadStatus = task.downloadStatus;
-        const candidates = Array.isArray(task.downloadCandidates) ? task.downloadCandidates.slice(0, 5) : [];
-        if (!acquired && (downloadStatus || candidates.length)) {
-          const details = make("details", "fta-download-details");details.append(make("summary", "", "下载检查详情"));
-          if (expandedDownloadDetails.has(String(task.id))) details.setAttribute("open", "");
-          if (downloadStatus) {
-            const scanned = Number.isSafeInteger(downloadStatus.scanned) ? downloadStatus.scanned : 0;
-            const unknown = Number.isSafeInteger(downloadStatus.unknown) ? downloadStatus.unknown : 0;
-            const mismatch = Number.isSafeInteger(downloadStatus.mismatched) ? downloadStatus.mismatched : 0;
-            details.append(make("p", "fta-note", "已检查 " + scanned + " 个 PDF；身份待核对 " + unknown + " 个，不匹配 " + mismatch + " 个。"));
-            if (downloadStatus.lastScanAt) details.append(make("p", "fta-note", "最近检查 " + dateText(downloadStatus.lastScanAt)));
-          }
-          for (const candidate of candidates) {
-            if (!candidate?.id) continue;
-            const candidateRow = make("div", "fta-download-candidate");
-            candidateRow.append(raw(make("span", "fta-candidate-name", candidate.filename || "PDF")));
-            if (candidate.message) candidateRow.append(make("p", "fta-note", candidate.message));
-            candidateRow.append(button("预览并核对", "reviewDownloadCandidate", [task.id, candidate.id], false, "请核对 PDF 的标题、作者和 DOI，再决定是否导入。"));
-            details.append(candidateRow);
-          }
-          row.append(details);
-        }
+        if (!acquired) renderDownloadDetails(task, row);
         if (unboundAvailable) renderBinding(task, row);
         list.append(row);
       }
       renderSelection();
+    }
+    function renderDownloadDetails(task, row) {
+      const downloadStatus = task.downloadStatus;
+      const storedCandidates = Array.isArray(task.downloadCandidates) ? task.downloadCandidates : [];
+      // Ranking and identity classification are supplied by the PDF checker.
+      // Older unknown records must not become recommendations merely because
+      // they were stored in a candidate list by a previous plugin version.
+      const score = candidate => Number.isFinite(candidate.candidateScore) && candidate.candidateScore >= 0 && candidate.candidateScore <= 1 ? candidate.candidateScore : -1;
+      const candidates = storedCandidates.filter(candidate => candidate?.id && candidate.related === true)
+        .sort((a, b) => score(b) - score(a)).slice(0, 3);
+      const categoryLabels = { mismatch: "明确不匹配", unrelated: "低相关", unreadable: "识别不足" };
+      const diagnostics = (Array.isArray(task.downloadDiagnostics) ? task.downloadDiagnostics : [])
+        .filter(record => record && Object.hasOwn(categoryLabels, record.category)).slice(0, 5);
+      if (!downloadStatus && !storedCandidates.length && !diagnostics.length) return;
+      const count = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
+      const scanned = count(downloadStatus?.scanned);
+      const related = count(downloadStatus?.related);
+      const unreadable = count(downloadStatus?.unreadable);
+      const unrelated = count(downloadStatus?.unrelated);
+      const mismatch = count(downloadStatus?.mismatched ?? downloadStatus?.mismatch);
+      const classified = [scanned, related, unreadable, unrelated, mismatch].every(value => value !== null);
+      const details = make("details", "fta-download-details");
+      details.append(make("summary", "", "下载检查详情"));
+      if (expandedDownloadDetails.has(String(task.id))) details.setAttribute("open", "");
+      if (classified) details.append(make("p", "fta-download-counts", "已检查 " + scanned + " 个 PDF；相关候选 " + related + " 个，已排除 " + (unrelated + mismatch) + " 个，识别不足 " + unreadable + " 个。"));
+      else {
+        if (scanned !== null) details.append(make("p", "fta-note", "已检查 " + scanned + " 个 PDF。"));
+        details.append(make("p", "fta-note", "此记录尚无完整的相关性分类，请重新检查已下载文件。"));
+      }
+      if (downloadStatus?.lastScanAt) details.append(make("p", "fta-note", "最近检查 " + dateText(downloadStatus.lastScanAt)));
+      if (candidates.length) {
+        details.append(make("p", "fta-candidate-heading", "推荐核对"));
+        details.append(make("p", "fta-note", "仅展示最相关的 " + candidates.length + " 个候选。请预览核对；预览不会自动确认或导入。"));
+        for (const candidate of candidates) {
+          const candidateRow = make("div", "fta-download-candidate");
+          candidateRow.dataset.candidateId = String(candidate.id);
+          candidateRow.append(raw(make("span", "fta-candidate-name", candidate.filename || "PDF")));
+          renderPDFEvidence(candidate, candidateRow);
+          candidateRow.append(button("预览并核对", "reviewDownloadCandidate", [task.id, candidate.id], false, "请核对 PDF 的标题、作者和 DOI，再决定是否导入。"));
+          details.append(candidateRow);
+        }
+      } else if (classified) details.append(make("p", "fta-note", "尚未找到足够相关的候选。"));
+      if (diagnostics.length || classified && unreadable + unrelated + mismatch > 0) {
+        const diagnostic = make("details", "fta-download-diagnostics");
+        diagnostic.append(make("summary", "", "已排除与识别不足"));
+        if (expandedDownloadDiagnostics.has(String(task.id))) diagnostic.setAttribute("open", "");
+        if (classified) diagnostic.append(make("p", "fta-note", "明确不匹配 " + mismatch + " 个；低相关 " + unrelated + " 个；识别不足 " + unreadable + " 个。"));
+        diagnostic.append(make("p", "fta-note", "已排除的文件不会作为推荐候选。识别不足表示证据不够，不能据此断定文件错误；如确认是目标论文，可选择已下载的 PDF 预览并核对。"));
+        if (diagnostics.length) diagnostic.append(make("p", "fta-note", "以下仅显示部分诊断记录。"));
+        for (const record of diagnostics) {
+          const recordRow = make("div", "fta-download-diagnostic");
+          const heading = make("div", "fta-diagnostic-heading");
+          heading.append(raw(make("span", "fta-diagnostic-name", record.filename || "PDF")), make("span", "fta-diagnostic-category", categoryLabels[record.category]));
+          recordRow.append(heading);
+          renderPDFEvidence(record, recordRow);
+          diagnostic.append(recordRow);
+        }
+        details.append(diagnostic);
+      }
+      row.append(details);
+    }
+    function renderPDFEvidence(record, container) {
+      const evidence = record.evidence || {};
+      const basisLabels = {
+        article_doi_match: "本文 DOI 一致", article_doi_mismatch: "本文 DOI 不同",
+        front_title_match: "首页完整标题一致", front_title_similar: "首页标题相近，待核对", front_title_different: "首页标题不同",
+        identity_conflict: "DOI 与标题证据冲突", title_outside_front_matter: "目标标题仅在后续版面或参考文献区域",
+        no_reliable_identity: "没有可靠的本文身份信息", no_extractable_text: "未提取到可核验文字", extraction_failed: "文字提取失败或不可用"
+      };
+      const metadata = make("div", "fta-pdf-evidence");
+      const line = (label, value, className, isRaw = false) => {
+        const paragraph = make("p", className);paragraph.append(make("span", "fta-evidence-label", label));
+        const content = make("span", "", value);paragraph.append(isRaw ? raw(content) : content);metadata.append(paragraph);
+      };
+      line("识别标题：", record.detectedTitle ? titleText(record.detectedTitle) : "未可靠识别", "fta-detected-title", Boolean(record.detectedTitle));
+      const dois = Array.isArray(record.detectedDOIs) ? record.detectedDOIs.filter(value => typeof value === "string" && value).slice(0, 5) : [];
+      line("识别 DOI：", dois.length ? dois.join(" · ") : "未可靠识别", "fta-detected-dois", dois.length > 0);
+      const basis = Array.isArray(evidence.candidateBasis) ? [...new Set(evidence.candidateBasis)].filter(value => Object.hasOwn(basisLabels, value)) : [];
+      if (basis.length) {
+        const paragraph = make("p", "fta-evidence-basis");paragraph.append(make("span", "fta-evidence-label", "判定依据："));
+        basis.forEach((value, index) => { if (index) paragraph.append(document.createTextNode(" · "));paragraph.append(make("span", "", basisLabels[value])); });
+        metadata.append(paragraph);
+      }
+      if (Number.isFinite(record.titleSimilarity) && record.titleSimilarity >= 0 && record.titleSimilarity <= 1) {
+        const similarity = make("p", "fta-title-similarity", "标题相似度 " + Math.round(record.titleSimilarity * 100) + "%");
+        similarity.title = "文字相似度用于辅助筛选，不是论文匹配概率。";metadata.append(similarity);
+      }
+      if (record.message) metadata.append(make("p", "fta-note", record.message));
+      container.append(metadata);
     }
     function renderCheckIn() {
       const info = snapshot.checkIn || {}, currentDate = new Date();

@@ -1245,7 +1245,7 @@ test('explicit recheck finds a recent already-downloaded PDF without reopening t
 
 test('unknown browser files become bounded preview candidates and still require explicit confirmation',async()=>{
   const task=MODEL.createTask({libraryID:1,itemID:1,itemKey:'ITEM1',doi:'10.1234/paper1',state:'paused'});
-  const env=environment({initialTasks:[task],pdfIdentity:{async inspect(){return{status:'unknown',message:'The title starts after an earlier article'};}}});env.addItem(item(1));await env.app.start();
+  const env=environment({initialTasks:[task],pdfIdentity:{async inspect(){return{status:'unknown',related:true,candidateScore:0.85,message:'The title starts after an earlier article'};}}});env.addItem(item(1));await env.app.start();
   await env.app.openSystemBrowserTask(task.id);const file=path.win32.join(downloadDirectory,'needs-review.pdf');env.putFile(file,env.pdf);
   await env.app.checkDownloads();env.advanceTime(2500);await env.app.checkDownloads();
   let snapshot=env.app.getSnapshot();assert.equal(snapshot.tasks[0].state,'manual_waiting');assert.equal(env.importCount,0);
@@ -1258,7 +1258,7 @@ test('unknown browser files become bounded preview candidates and still require 
 
 test('changed or mismatched browser candidates never inherit a preview confirmation',async()=>{
   const task=MODEL.createTask({libraryID:1,itemID:1,itemKey:'ITEM1',doi:'10.1234/paper1',state:'paused'});
-  const env=environment({initialTasks:[task],pdfIdentity:{async inspect(file){return{status:file.endsWith('wrong.pdf')?'mismatch':'unknown',message:'Fixture diagnostic'};}}});env.addItem(item(1));await env.app.start();
+  const env=environment({initialTasks:[task],pdfIdentity:{async inspect(file){return{status:file.endsWith('wrong.pdf')?'mismatch':'unknown',related:!file.endsWith('wrong.pdf'),candidateScore:0.8,message:'Fixture diagnostic'};}}});env.addItem(item(1));await env.app.start();
   await env.app.openSystemBrowserTask(task.id);const file=path.win32.join(downloadDirectory,'uncertain.pdf');env.putFile(file,env.pdf);env.putFile(path.win32.join(downloadDirectory,'wrong.pdf'),env.pdf);
   await env.app.checkDownloads();env.advanceTime(2500);await env.app.checkDownloads();
   const taskView=env.app.getSnapshot().tasks[0];assert.equal(taskView.downloadCandidates.length,1);assert.equal(taskView.downloadStatus.mismatched,1);
@@ -1269,7 +1269,7 @@ test('changed or mismatched browser candidates never inherit a preview confirmat
 
 test('a candidate that becomes identifiable during preview still requires explicit confirmation',async()=>{
   const task=localFixture();let matches=false;
-  const env=environment({initialTasks:[task],pdfIdentity:{async inspect(){return{status:matches?'match':'unknown',message:'Candidate identity'};}}});
+  const env=environment({initialTasks:[task],pdfIdentity:{async inspect(){return{status:matches?'match':'unknown',related:true,candidateScore:0.8,message:'Candidate identity'};}}});
   env.addItem(item(1));await env.app.start();await env.app.openSystemBrowserTask(task.id);
   const file=path.win32.join(downloadDirectory,'candidate.pdf');env.putFile(file,env.pdf);
   await env.app.checkDownloads();env.advanceTime(2500);await env.app.checkDownloads();matches=true;
@@ -1282,7 +1282,7 @@ test('a candidate that becomes identifiable during preview still requires explic
 
 test('pausing while a candidate file is read prevents a late preview and task revival',async()=>{
   const task=localFixture(),gate=deferred();let reading=false;
-  const env=environment({initialTasks:[task],pdfIdentity:{async inspect(){return{status:'unknown',message:'Candidate identity'};}}});
+  const env=environment({initialTasks:[task],pdfIdentity:{async inspect(){return{status:'unknown',related:true,candidateScore:0.8,message:'Candidate identity'};}}});
   env.addItem(item(1));await env.app.start();await env.app.openSystemBrowserTask(task.id);
   const file=path.win32.join(downloadDirectory,'candidate.pdf');env.putFile(file,env.pdf);
   await env.app.checkDownloads();env.advanceTime(2500);await env.app.checkDownloads();
@@ -1292,6 +1292,39 @@ test('pausing while a candidate file is read prevents a late preview and task re
   const rejected=assert.rejects(pending,/已取消/);await env.app.pauseTask(task.id);gate.resolve();await rejected;
   assert.equal(env.app.getSnapshot().tasks[0].state,'paused');assert.equal(env.importCount,0);assert.equal(env.openedFiles.length,0);
   await env.app.stop();
+});
+
+test('only the three strongest related PDF candidates are exposed, with evidence and separate diagnostics',async()=>{
+  const task=localFixture();const scores={weak:0.7,middle:0.85,strong:0.94,best:0.98,scan:0,unrelated:0};
+  const env=environment({initialTasks:[task],pdfIdentity:{async inspect(file){
+    const name=path.win32.basename(file,'.pdf'),score=scores[name];
+    return {status:'unknown',related:score>0,candidateScore:score,titleSimilarity:name==='scan'?null:score,
+      detectedTitle:name==='scan'?'':name+' scientific paper',detectedDOIs:[],
+      evidence:{extractionSucceeded:true,firstPageCharacterCount:name==='scan'?0:450,titleReliable:name!=='scan',candidateBasis:score?['similar_title']:[]}};
+  }}});
+  env.addItem(item(1));await env.app.start();await env.app.openSystemBrowserTask(task.id);
+  let n=0;for(const name of Object.keys(scores)){const bytes=env.pdf.slice();bytes[40]=++n;env.putFile(path.win32.join(downloadDirectory,name+'.pdf'),bytes);}
+  await env.app.checkDownloads();env.advanceTime(2500);await env.app.checkDownloads();
+  const row=env.app.getSnapshot().tasks[0];assert.equal(env.importCount,0);
+  assert.deepEqual(Array.from(row.downloadCandidates,c=>c.filename),['best.pdf','strong.pdf','middle.pdf']);
+  assert.equal(row.downloadStatus.related,4);assert.equal(row.downloadStatus.unreadable,1);assert.equal(row.downloadStatus.unrelated,1);
+  assert.deepEqual(Array.from(row.downloadDiagnostics,d=>d.filename).sort(),['scan.pdf','unrelated.pdf']);
+  assert.match(row.lastError,/相关候选/);assert.doesNotMatch(JSON.stringify(row.downloadDiagnostics),/isolated|Downloads/);
+  row.downloadCandidates[0].evidence.candidateBasis.push('tampered');row.downloadDiagnostics[0].detectedDOIs.push('tampered');
+  assert.doesNotMatch(JSON.stringify(env.app.getSnapshot().tasks[0]),/tampered/);
+  await env.app.stop();
+});
+
+test('a changed candidate that is now a different paper is removed from review suggestions',async()=>{
+  const task=localFixture();let different=false;
+  const env=environment({initialTasks:[task],pdfIdentity:{async inspect(){return different?{status:'mismatch',related:false,candidateScore:0}:{status:'unknown',related:true,candidateScore:0.9};}}});
+  env.addItem(item(1));await env.app.start();await env.app.openSystemBrowserTask(task.id);
+  const file=path.win32.join(downloadDirectory,'candidate.pdf');env.putFile(file,env.pdf);
+  await env.app.checkDownloads();env.advanceTime(2500);await env.app.checkDownloads();assert.equal(env.app.getSnapshot().tasks[0].downloadCandidates.length,1);
+  different=true;const changed=env.pdf.slice();changed[40]=65;env.putFile(file,changed);
+  await env.app.checkDownloads();env.advanceTime(2500);await env.app.checkDownloads();
+  const row=env.app.getSnapshot().tasks[0];assert.equal(row.downloadCandidates.length,0);assert.equal(row.downloadStatus.related,0);assert.equal(row.downloadStatus.mismatched,1);assert.equal(row.downloadStatus.scanned,1);
+  assert.equal(env.importCount,0);await env.app.stop();
 });
 
 test('institutional experience requires explicit user confirmation, survives restart, and does not prevent explicit fallback',async()=>{

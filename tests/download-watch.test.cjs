@@ -146,7 +146,7 @@ test('mismatching, unknown and failed identity checks never import unrelated PDF
   await env.watch.poll();
   assert.equal(env.inspections.length, 3, 'unchanged rejected PDFs are not checked repeatedly');
   assert.deepEqual(env.issues.map(issue => [issue.kind, issue.status]), [['identity','mismatch'],['identity','unknown'],['identity','unknown']]);
-  assert.deepEqual(env.candidates.map(candidate => candidate.path), [pathFor('unknown.pdf'),pathFor('failed.pdf')]);
+  assert.deepEqual(env.candidates, [], 'unknown extraction is diagnostic, not evidence of a related paper');
   assert.equal(env.watch.getStatus('one').scanned,3);
   assert.equal(env.watch.getStatus('one').unknown,2);
   assert.equal(env.watch.getStatus('one').mismatched,1);
@@ -428,8 +428,8 @@ test('cancelling while a match handoff is pending cannot resurrect its watch on 
   assert.equal(env.matches.length, 1);
 });
 
-test('an unknown candidate reports its exact checked snapshot once while the watch keeps waiting', async () => {
-  const env=setup({inspect:async()=>({status:'unknown',reason:'title_outside_front_matter',message:'Title occurs after prior references.'})});
+test('a related unknown candidate reports its exact checked snapshot once while the watch keeps waiting', async () => {
+  const env=setup({inspect:async()=>({status:'unknown',related:true,candidateScore:0.85,reason:'title_outside_front_matter',message:'Title occurs after prior references.'})});
   await env.watch.start('one',directory,expected);const file=env.put('candidate.pdf');await settle(env);
   assert.equal(env.matches.length,0);assert.equal(env.candidates.length,1);assert.equal(env.watch.isWatching('one'),true);
   assert.equal(env.candidates[0].path,file);assert.deepEqual(env.candidates[0].bytes,env.files.get(file).bytes);assert.deepEqual(env.candidates[0].expected,expected);
@@ -450,7 +450,7 @@ test('explicit recent-file rescan can inspect downloaded baseline PDFs without a
 });
 
 test('rescan retries a checked unknown file and still requires the stable interval and full identity check',async()=>{
-  let match=false;const env=setup({inspect:async()=>({status:match?'match':'unknown',reason:'insufficient_identity'})});
+  let match=false;const env=setup({inspect:async()=>({status:match?'match':'unknown',related:true,candidateScore:0.8,reason:'insufficient_identity'})});
   await env.watch.start('one',directory,expected);env.put('review.pdf');await settle(env);assert.equal(env.candidates.length,1);
   match=true;const result=await env.watch.rescan('one');assert.equal(result.eligible,1);await env.watch.poll();assert.equal(env.matches.length,0);
   env.time(4000);await env.watch.poll();assert.equal(env.matches.length,1);assert.equal(env.inspections.length,2);
@@ -468,4 +468,38 @@ test('invalid stable PDFs expose a reason once without repeated reads and oversi
   const env=setup();await env.watch.start('one',directory,expected);env.put('invalid.pdf',{bytes:Buffer.alloc(2048,32)});env.put('large.pdf',{size:101*1024*1024});await settle(env);
   assert.deepEqual(env.issues.map(issue=>issue.reason).sort(),['file_size','invalid_pdf']);assert.equal(env.watch.getStatus('one').rejected,2);
   await env.watch.poll();assert.equal(env.reads.length,1);assert.equal(env.issues.length,2);assert.equal(env.candidates.length,0);assert.equal(env.matches.length,0);
+});
+
+test('nineteen unrelated or unreadable downloads do not become nineteen review candidates',async()=>{
+  const env=setup({inspect:async path=>path.endsWith('likely.pdf')
+    ?{status:'unknown',related:true,candidateScore:0.87,titleSimilarity:0.92,detectedTitle:'A related paper title',evidence:{extractionSucceeded:true,titleReliable:true}}
+    :path.endsWith('scan.pdf')?{status:'unknown',related:false,candidateScore:0,reason:'no_text',evidence:{extractionSucceeded:true,firstPageCharacterCount:0}}
+    :{status:'unknown',related:false,candidateScore:0,titleSimilarity:0.1,detectedTitle:'An entirely different publication',evidence:{extractionSucceeded:true,titleReliable:true}}});
+  await env.watch.start('one',directory,expected);
+  for(let i=0;i<18;i++)env.put('other-'+i+'.pdf');env.put('scan.pdf');env.put('likely.pdf');
+  await settle(env);await env.watch.poll();await env.watch.poll();
+  const status=env.watch.getStatus('one');assert.equal(status.scanned,20);assert.equal(status.related,1);assert.equal(status.unrelated,18);assert.equal(status.unreadable,1);
+  assert.equal(env.candidates.length,1);assert.equal(env.candidates[0].path,pathFor('likely.pdf'));assert.equal(env.matches.length,0);
+  const details=env.watch.getDiagnostics('one');assert.equal(details.length,5);assert(details.every(value=>!Object.hasOwn(value,'path')));
+  details[0].evidence.extractionSucceeded=false;assert.equal(env.watch.getDiagnostics('one')[0].evidence.extractionSucceeded,true);
+});
+
+test('rechecking one file replaces its outcome rather than inflating candidate counts',async()=>{
+  let related=true;const env=setup({inspect:async()=>related?{status:'unknown',related:true,candidateScore:0.8}:{status:'mismatch',related:false,candidateScore:0}});
+  await env.watch.start('one',directory,expected);env.put('changing.pdf');await settle(env);
+  assert.equal(env.watch.getStatus('one').related,1);
+  await env.watch.rescan('one');await env.watch.poll();env.time(4000);await env.watch.poll();
+  let status=env.watch.getStatus('one');assert.equal(status.scanned,1);assert.equal(status.related,1);assert.equal(status.unknown,1);
+  related=false;await env.watch.rescan('one');await env.watch.poll();env.time(6000);await env.watch.poll();
+  status=env.watch.getStatus('one');assert.equal(status.scanned,1);assert.equal(status.related,0);assert.equal(status.unknown,0);assert.equal(status.mismatched,1);
+});
+
+test('a candidate overwritten with invalid data moves to unreadable diagnostics and recovers without stale counts',async()=>{
+  const env=setup({inspect:async()=>({status:'unknown',related:true,candidateScore:0.8})});
+  await env.watch.start('one',directory,expected);env.put('changed.pdf');await settle(env);
+  env.put('changed.pdf',{bytes:Buffer.alloc(2048,32),modified:3000});await env.watch.poll();env.time(4000);await env.watch.poll();
+  let status=env.watch.getStatus('one');assert.equal(status.scanned,1);assert.equal(status.related,0);assert.equal(status.unreadable,1);assert.equal(status.rejected,1);
+  assert.equal(env.watch.getDiagnostics('one')[0].reason,'invalid_pdf');
+  env.put('changed.pdf',{bytes:pdf(),modified:5000});await env.watch.poll();env.time(6000);await env.watch.poll();
+  status=env.watch.getStatus('one');assert.equal(status.scanned,1);assert.equal(status.related,1);assert.equal(status.unreadable,0);assert.equal(status.rejected,0);assert.deepEqual(env.watch.getDiagnostics('one'),[]);
 });

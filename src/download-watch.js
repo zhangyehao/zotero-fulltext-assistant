@@ -3,13 +3,41 @@
   "use strict";
   const MAX_BYTES = 100 * 1024 * 1024;
   function create({ IOUtils, PathUtils, inspect, validPDF, onMatch, onCandidate = async () => {}, onIssue = async () => {}, now = () => Date.now(), stableMs = 2000, timeoutMs = 30 * 60 * 1000 }) {
-    const records = new Map(), diagnostics = new Map();
+    const records = new Map(), diagnostics = new Map(), detailLogs = new Map();
     let stopped = false, running = null;
     const stamp = info => String(info.size) + ":" + String(info.lastModified || 0);
     const current = record => !stopped && records.get(record.id) === record && !record.isCancelled();
     const live = record => current(record) && record.armed && now() < record.expiresAt;
     const filename = path => PathUtils.filename ? PathUtils.filename(path) : path.split(/[\\/]/).pop();
     const timeValue = value => typeof value === "number" ? value : typeof value === "string" ? Date.parse(value) : NaN;
+    function category(identity) {
+      if (identity.status === "match") return "matched";
+      if (identity.status === "mismatch") return "mismatched";
+      if (identity.related === true && Number.isFinite(identity.candidateScore) && identity.candidateScore > 0) return "related";
+      return identity.evidence?.extractionSucceeded === true && identity.evidence?.titleReliable === true
+        && Number.isFinite(identity.titleSimilarity) && identity.titleSimilarity < 0.65 && !identity.evidence?.identityConflict ? "unrelated" : "unreadable";
+    }
+    function recordIdentity(record, path, identity) {
+      const next = category(identity), previous = record.outcomes.get(path);
+      if (previous) {
+        record.stats[previous]--;
+        if (["related", "unrelated", "unreadable"].includes(previous)) record.stats.unknown--;
+      } else record.stats.scanned++;
+      record.outcomes.set(path, next);record.stats[next]++;
+      if (["related", "unrelated", "unreadable"].includes(next)) record.stats.unknown++;
+      const old = detailLogs.get(record.id) || [];
+      const remaining = old.filter(entry => entry.path !== path);
+      if (["matched", "related"].includes(next)) detailLogs.set(record.id, remaining);
+      else {
+        const detail = { path, filename: filename(path), category: next === "mismatched" ? "mismatch" : next,
+          reason: identity.reason || "", message: identity.message || "", detectedTitle: String(identity.detectedTitle || "").slice(0, 320),
+          detectedDOIs: Array.isArray(identity.detectedDOIs) ? identity.detectedDOIs.slice(0, 8) : [],
+          titleSimilarity: Number.isFinite(identity.titleSimilarity) ? identity.titleSimilarity : null,
+          evidence: identity.evidence ? JSON.parse(JSON.stringify(identity.evidence)) : null };
+        detailLogs.set(record.id, [detail, ...remaining].slice(0, 5));
+      }
+      return next;
+    }
     async function issue(record, details) {
       record.stats.lastReason = details.reason || details.kind;
       record.stats.lastMessage = details.message;
@@ -20,7 +48,9 @@
         const key = file.stamp + ":" + reason;
         if (record.reported.get(path) === key) continue;
         record.reported.set(path, key);if (!retry) record.checked.set(path, file.stamp);
-        record.stats.rejected++;
+        if (!record.rejectedPaths.has(path)) { record.rejectedPaths.add(path);record.stats.rejected++; }
+        recordIdentity(record, path, { status: "unknown", related: false, candidateScore: 0, reason, message,
+          evidence: { extractionSucceeded: false, firstPageCharacterCount: 0, titleReliable: false, doiReliable: false } });
         await issue(record, { kind: "file", path, filename: filename(path), reason, message });
       }
     }
@@ -87,15 +117,15 @@
             catch (_) { identity = { status: "unknown", reason: "extraction_failed", message: "PDF 文字提取未完成，请预览后人工核对。" }; }
             if (!live(record)) continue;
             record.checked.set(path, file.stamp);
-            record.stats.scanned++;
-            if (identity.status === "match") { record.stats.matched++;matches.push({ record, identity }); }
+            if (record.rejectedPaths.delete(path)) record.stats.rejected--;
+            const classification = recordIdentity(record, path, identity);
+            if (identity.status === "match") { matches.push({ record, identity }); }
             else {
               const mismatch = identity.status === "mismatch";
-              record.stats[mismatch ? "mismatched" : "unknown"]++;
               const reason = identity.reason || (mismatch ? "identity_mismatch" : "identity_unknown");
               const message = "已检查“" + filename(path) + "”：" + (identity.message || (mismatch ? "文献身份与此任务不符，未导入。" : "身份尚不能自动确认，可预览后人工核对。"));
-              await issue(record, { kind: "identity", path, filename: filename(path), status: mismatch ? "mismatch" : "unknown", reason, message });
-              if (!mismatch && live(record)) await onCandidate(record.id, { path, bytes, identity: { ...identity, status: "unknown" }, expected: { ...record.expected } });
+              await issue(record, { kind: "identity", path, filename: filename(path), status: mismatch ? "mismatch" : "unknown", category: classification, reason, message });
+              if (classification === "related" && live(record)) await onCandidate(record.id, { path, bytes, identity: { ...identity, status: "unknown" }, expected: { ...record.expected } });
             }
           }
           const current = matches.filter(match => live(match.record));
@@ -118,10 +148,11 @@
         if (stopped) throw new Error("下载检查已停止。");
         const directories = Array.isArray(directory) ? [...new Set(directory)] : [directory];
         if (!directories.length || directories.some(value => !value)) throw new Error("请先设置下载文件夹。");
-        const stats = { startedAt: new Date(now()).toISOString(), lastScanAt: null, baseline: 0, seen: 0, scanned: 0, unknown: 0, mismatched: 0, matched: 0, rejected: 0, lastReason: "", lastMessage: "" };
-        const record = { id, directories, expected: { ...expected }, isCancelled, armed: false, baseline: new Map(), seen: new Map(), checked: new Map(), reported: new Map(), stats, expiresAt: now() + timeoutMs };
+        const stats = { startedAt: new Date(now()).toISOString(), lastScanAt: null, baseline: 0, seen: 0, scanned: 0, unknown: 0, related: 0, unreadable: 0, unrelated: 0, mismatched: 0, matched: 0, rejected: 0, lastReason: "", lastMessage: "" };
+        const record = { id, directories, expected: { ...expected }, isCancelled, armed: false, baseline: new Map(), seen: new Map(), checked: new Map(), reported: new Map(), outcomes: new Map(), rejectedPaths: new Set(), stats, expiresAt: now() + timeoutMs };
         records.set(id, record);
-        diagnostics.set(id, stats);if (diagnostics.size > 200) diagnostics.delete(diagnostics.keys().next().value);
+        diagnostics.set(id, stats);detailLogs.set(id, []);
+        if (diagnostics.size > 200) { const oldest = diagnostics.keys().next().value;diagnostics.delete(oldest);detailLogs.delete(oldest); }
         try {
           for (const folder of directories) {
             const files = await listing(folder);
@@ -135,6 +166,7 @@
       cancel(id) { records.delete(id); },
       isWatching(id) { const record = records.get(id); return !!record && live(record); },
       getStatus(id) { const stats = diagnostics.get(id);return stats ? { ...stats, watching: api.isWatching(id) } : null; },
+      getDiagnostics(id) { return (detailLogs.get(id) || []).map(({ path, ...entry }) => JSON.parse(JSON.stringify(entry))); },
       async rescan(id, { includeExisting = false, since } = {}) {
         if (running) await running;
         const record = records.get(id);if (!record || !live(record)) throw new Error("请先开始此任务的下载检查。");
