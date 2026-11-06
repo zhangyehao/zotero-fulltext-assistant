@@ -210,6 +210,48 @@ class BuildTests(unittest.TestCase):
         self.assertIn("group: release-${{ github.repository }}\n", publish)
 
 
+class GitHubReadTests(unittest.TestCase):
+    def test_draft_is_found_by_exact_tag_across_pages_then_refreshed_by_id(self):
+        remote = release.GitHub()
+        first = [{"id": number + 1, "tag_name": "v0.7.2", "draft": True} for number in range(100)]
+        candidate = {"id": 436392839, "tag_name": "v0.8.0", "draft": True, "assets": []}
+        pages = {"releases?per_page=100&page=1": first,
+                 "releases?per_page=100&page=2": [{"id": 200, "tag_name": "v0.8.0-other"}, candidate],
+                 "releases/436392839": candidate}
+        with mock.patch.object(remote, "api", side_effect=lambda path, **_kwargs: pages[path]) as api:
+            self.assertEqual(remote.release("v0.8.0"), candidate)
+            self.assertEqual([call.args[0] for call in api.call_args_list], list(pages))
+            self.assertFalse(any("releases/tags/" in call.args[0] for call in api.call_args_list))
+
+    def test_missing_draft_and_published_state_are_read_without_cached_state(self):
+        remote = release.GitHub()
+        with mock.patch.object(remote, "api", return_value=[]):
+            self.assertIsNone(remote.release("v0.8.0"))
+        candidate = {"id": 100, "tag_name": "v0.8.0", "draft": True}
+        stable = dict(candidate, draft=False, prerelease=False)
+        with mock.patch.object(remote, "api", side_effect=[[candidate], candidate, [candidate], stable]):
+            self.assertTrue(remote.release("v0.8.0")["draft"])
+            self.assertFalse(remote.release("v0.8.0")["draft"])
+
+    def test_duplicate_or_changed_candidate_is_rejected(self):
+        remote = release.GitHub()
+        candidate = {"id": 100, "tag_name": "v0.8.0", "draft": True}
+        for replies in ([[candidate, dict(candidate, id=101)]],
+                        [[candidate], dict(candidate, tag_name="v0.7.2")],
+                        [[candidate], None]):
+            with mock.patch.object(remote, "api", side_effect=replies):
+                with self.assertRaises(release.ReleaseError):
+                    remote.release("v0.8.0")
+
+    def test_release_pagination_is_bounded(self):
+        remote = release.GitHub()
+        page = [{"id": number + 1, "tag_name": "v0.7.2"} for number in range(100)]
+        with mock.patch.object(remote, "api", return_value=page) as api:
+            with self.assertRaisesRegex(release.ReleaseError, "pagination"):
+                remote.release("v0.8.0")
+            self.assertEqual(api.call_count, 100)
+
+
 class ReleaseTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -230,6 +272,30 @@ class ReleaseTests(unittest.TestCase):
         before = list(remote.writes)
         self.assertEqual(release.run_release("prepare", self.bundle, remote, COMMIT), "draft-verified")
         self.assertEqual(remote.writes, before);self.assertEqual(remote.history, history)
+
+    def test_new_draft_listing_delay_retries_without_duplicate_creation(self):
+        remote = FakeGitHub(self.bundle, exists=False)
+        real_read = remote.release
+        calls = []
+        def delayed(tag):
+            calls.append(tag)
+            return None if len(calls) <= 3 else real_read(tag)
+        remote.release = delayed
+        with mock.patch.object(release.time, "sleep") as sleep:
+            self.assertEqual(release.run_release("prepare", self.bundle, remote, COMMIT), "draft-verified")
+            self.assertEqual(sleep.call_args_list, [mock.call(1), mock.call(2)])
+        self.assertEqual(remote.writes.count("create-draft"), 1)
+        self.assertEqual(len([write for write in remote.writes if isinstance(write, tuple) and write[0] == "upload"]), 5)
+
+    def test_unobservable_created_draft_stops_after_bounded_retries(self):
+        remote = FakeGitHub(self.bundle, exists=False)
+        remote.release = mock.Mock(return_value=None)
+        with mock.patch.object(release.time, "sleep") as sleep:
+            with self.assertRaisesRegex(release.ReleaseError, "exact candidate"):
+                release.run_release("prepare", self.bundle, remote, COMMIT)
+            self.assertEqual(sleep.call_args_list, [mock.call(1), mock.call(2), mock.call(4)])
+        self.assertEqual(remote.release.call_count, 5)
+        self.assertEqual(remote.writes, ["create-draft"])
 
     def test_changed_draft_asset_requires_explicit_replacement_and_keeps_others(self):
         remote = FakeGitHub(self.bundle);remote.data["updates.json"] = b"old"

@@ -12,6 +12,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 import zipfile
 
@@ -110,7 +111,26 @@ class GitHub:
         return json.loads(value) if value and value.strip() else None
 
     def release(self, tag):
-        return self.api("releases/tags/" + tag, allow_missing=True)
+        # GitHub's by-tag endpoint can return 404 for authenticated draft
+        # releases. List drafts, find the exact tag, then refresh by numeric ID.
+        matches = []
+        for page in range(1, 101):
+            entries = self.api(f"releases?per_page=100&page={page}")
+            require(isinstance(entries, list), "Could not list candidate releases.")
+            matches.extend(entry for entry in entries if entry.get("tag_name") == tag)
+            require(len(matches) <= 1, "Multiple releases identify this tag; inspect them before proceeding.")
+            if len(entries) < 100:
+                break
+        else:
+            raise ReleaseError("Release pagination exceeded its safety bound.")
+        if not matches:
+            return None
+        release_id = matches[0].get("id")
+        require(isinstance(release_id, int) and release_id > 0, "Invalid candidate release ID.")
+        current = self.api(f"releases/{release_id}", allow_missing=True)
+        require(current and current.get("id") == release_id and current.get("tag_name") == tag,
+                "Listed release no longer identifies the exact candidate.")
+        return current
 
     def tag_commit(self, tag):
         obj = self.api("git/ref/tags/" + tag)["object"]
@@ -186,7 +206,13 @@ def run_release(mode, bundle, remote, expected_commit, expected_sha256=None, rep
     release = remote.release(tag)
     if mode == "prepare":
         if not release:
-            remote.create_draft(tag);release = remote.release(tag)
+            remote.create_draft(tag)
+            for attempt in range(4):
+                release = remote.release(tag)
+                if release:
+                    break
+                if attempt < 3:
+                    time.sleep(2 ** attempt)
         require(release and release.get("tag_name") == tag, "Could not confirm the exact candidate release.")
         if release.get("draft") is not True:
             verify_remote(remote, release, bundle)
