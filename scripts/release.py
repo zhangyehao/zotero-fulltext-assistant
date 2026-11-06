@@ -158,9 +158,14 @@ class GitHub:
             args += ["--pattern", name]
         self.command(args)
 
-    def publish(self, release_id):
+    def publish(self, release_id, tag, expected_commit):
         require(isinstance(release_id, int) and release_id > 0, "Invalid release ID.")
-        self.api(f"releases/{release_id}", method="PATCH", body={"draft": False, "prerelease": False, "make_latest": "true"})
+        require(re.fullmatch(r"v\d+\.\d+\.\d+", tag or ""), "A verified release tag is required.")
+        require(re.fullmatch(r"[a-f0-9]{40,64}", expected_commit or ""), "A verified release commit is required.")
+        # Omitting tag_name from a release PATCH can detach a draft from its
+        # tag. Keep the identity just verified by run_release explicit.
+        self.api(f"releases/{release_id}", method="PATCH", body={"tag_name": tag,
+            "target_commitish": expected_commit, "draft": False, "prerelease": False, "make_latest": "true"})
 
     def latest(self):
         return self.api("releases/latest", allow_missing=True)
@@ -255,10 +260,12 @@ def run_release(mode, bundle, remote, expected_commit, expected_sha256=None, rep
         require(fresh and fresh.get("id") == release.get("id") and fresh.get("draft") is True, "Candidate state changed after review; publication stopped.")
         before, after = remote_assets(release, bundle), remote_assets(fresh, bundle)
         require(all(all(before[name].get(key) == after[name].get(key) for key in ("id", "size", "digest", "state")) for name in before), "Candidate assets changed after byte verification; publication stopped.")
-        remote.publish(release["id"])
+        remote.publish(release["id"], tag, expected_commit)
     else:
         require(release.get("prerelease") is False, "An existing published prerelease is not modified automatically.")
     current, latest = remote.release(tag), remote.latest()
+    require(current and current.get("id") == release.get("id") and current.get("tag_name") == tag,
+            "Release identity changed during publication; inspect the existing release before retrying.")
     require(current and current.get("draft") is False and current.get("prerelease") is False and latest and latest.get("id") == current.get("id"), "Stable release/latest channel was not confirmed; inspect the existing release before retrying.")
     require(remote.public_updates() == bundle["assets"]["updates.json"]["path"].read_bytes(), "Public latest/download/updates.json is not yet the reviewed manifest. Retry verification after CDN propagation.")
     return "published-verified"

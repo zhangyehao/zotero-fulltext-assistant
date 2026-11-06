@@ -78,8 +78,9 @@ class FakeGitHub:
         name = next(name for name, value in self.ids.items() if value == asset_id)
         self.writes.append(("delete", name));del self.data[name]
 
-    def publish(self, release_id):
+    def publish(self, release_id, tag, expected_commit):
         assert release_id == 100 and self.draft
+        assert tag == self.tag and expected_commit == self.commit
         self.writes.append("publish-stable-latest");self.draft = False;self.prerelease = False
         self.latest_release = {"id": 100, "tag_name": self.tag}
 
@@ -211,6 +212,27 @@ class BuildTests(unittest.TestCase):
 
 
 class GitHubReadTests(unittest.TestCase):
+    def test_publish_patch_preserves_verified_tag_and_commit_in_actual_request(self):
+        remote = release.GitHub()
+        response = mock.Mock(returncode=0, stdout='{"id": 100}', stderr="")
+        with mock.patch.object(release.subprocess, "run", return_value=response) as request:
+            remote.publish(100, "v0.8.0", COMMIT)
+        request.assert_called_once()
+        self.assertEqual(request.call_args.args[0], ["gh", "api",
+            "repos/zhangyehao/zotero-fulltext-assistant/releases/100", "--method", "PATCH",
+            "-H", "Accept: application/vnd.github+json", "--input", "-"])
+        self.assertEqual(json.loads(request.call_args.kwargs["input"]), {
+            "tag_name": "v0.8.0", "target_commitish": COMMIT,
+            "draft": False, "prerelease": False, "make_latest": "true"})
+
+    def test_publish_rejects_invalid_identity_before_request(self):
+        remote = release.GitHub()
+        for identity in ((0, "v0.8.0", COMMIT), (100, "", COMMIT), (100, "v0.8.0", "main")):
+            with mock.patch.object(release.subprocess, "run") as request:
+                with self.assertRaises(release.ReleaseError):
+                    remote.publish(*identity)
+                request.assert_not_called()
+
     def test_draft_is_found_by_exact_tag_across_pages_then_refreshed_by_id(self):
         remote = release.GitHub()
         first = [{"id": number + 1, "tag_name": "v0.7.2", "draft": True} for number in range(100)]
@@ -338,6 +360,22 @@ class ReleaseTests(unittest.TestCase):
         self.assertFalse(remote.draft);self.assertFalse(remote.prerelease);self.assertEqual(remote.history, history)
         self.assertEqual(release.run_release("publish", self.bundle, remote, COMMIT, self.bundle["xpi_sha256"]), "published-verified")
         self.assertEqual(remote.writes, ["publish-stable-latest"])
+
+    def test_changed_release_identity_after_publish_is_not_reported_as_success(self):
+        for changed in ("id", "tag_name"):
+            remote = FakeGitHub(self.bundle)
+            original_read = remote.release
+            def read_after_publish(tag):
+                value = original_read(tag)
+                if not remote.draft:
+                    value[changed] = 101 if changed == "id" else "untagged-unexpected"
+                    if changed == "id":
+                        remote.latest_release["id"] = 101
+                return value
+            remote.release = read_after_publish
+            with self.assertRaisesRegex(release.ReleaseError, "identity changed"):
+                release.run_release("publish", self.bundle, remote, COMMIT, self.bundle["xpi_sha256"])
+            self.assertEqual(remote.writes, ["publish-stable-latest"])
 
     def test_newer_latest_or_existing_public_prerelease_is_not_modified(self):
         for prerelease in (False, True):
