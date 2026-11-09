@@ -1,4 +1,4 @@
-# 全文来源与 API 配置（0.9.0）
+# 全文来源与 API 配置（1.0.0）
 
 在 Zotero 设置的“全文助手 → 设置”中集中配置。来源设置和 API 密钥分别保存；密钥只由本机 Zotero 登录管理器保存，不会回显到设置页或写入任务历史。
 
@@ -6,13 +6,13 @@
 
 1. 批量预检：已经有可用本地 PDF 的文献直接跳过，不创建新任务。
 2. Zotero 开放获取解析器：优先使用它提供的开放 PDF 或页面地址。
-3. 启用的 OpenAlex、PMC / Europe PMC、CORE、Semantic Scholar 以及自定义 DOI 来源：并行进行有时限的发现，再按候选顺序下载。优先直接 PDF 与可核实的托管内容。
+3. 启用的 OpenAlex、PMC / Europe PMC、Semantic Scholar 和已配置 key 的 CORE 并行进行有时限的发现。候选进入共享待尝试队列，一次下载并核对一个；每次开始下一候选前重新排序，优先 PMC 数据集，其次其他 PDF，再处理网页。普通来源候选全部未成功后，才尝试已明确启用的 CORE 托管内容。前面未成功时，匿名 CORE 和自定义 DOI 来源仍可继续补充候选；取得并保存匹配文件后停止不必要的后续尝试。
 4. 前面的候选未成功时，尝试条目网页、DOI 跳转及 Zotero 内有效的出版社/机构会话。
 5. 自动获取仍未成功，保留默认浏览器下载与科研通兜底。普通“批量获取全文”不自动发布科研通求助；只有明确授权的兜底任务可以进入求助流程。
 
 所有新来源和出版社自动下载都经过文件格式、完整性和本机 PDF 身份核对。DOI 或可靠标题冲突的文件被拒绝；证据不足时只保留一个待确认 PDF，支持重启后预览和明确确认，不直接转为付积分求助。API 返回链接、HTTP 200 或下载到 `%PDF` 文件均不单独构成“已获取”；附件保存成功才算完成。
 
-“来源检查详情”保留本次来源诊断，区分未配置 key、来源限流、超时、版本筛除、文件不匹配、人工验证和下载失败。它不保存密钥、响应正文或 Cookie。
+“来源检查详情”保留本次来源诊断，区分未配置 key、来源限流、临时退避、超时、版本筛除、文件不匹配、人工验证和下载失败。它不保存密钥、响应正文或 Cookie。已确认的获取记录区分“发现来源”和实际 PDF 响应的主机，例如发现渠道为 Semantic Scholar、文件来自论文仓储；旧记录不推测缺失的主机。
 
 ## 各来源的实际能力
 
@@ -21,11 +21,28 @@
 | Zotero OA | 调用 Zotero 自带的开放获取解析器，再核对候选文件 | 接口和覆盖范围由 Zotero 提供；不是一套额外的付费订阅 |
 | OpenAlex | 查询开放位置；单独启用后使用 `has_content.pdf` / `content_urls.pdf` 指明的缓存 PDF | 缓存内容需要 key 和明确的下载额度授权；元数据命中不等于缓存 PDF 存在 |
 | PMC / Europe PMC | DOI/PMCID 转换、Europe PMC 开放全文位置、PMC 当前公开 Article Datasets 元数据所指向的 PDF | 仅处理服务实际提供的文件，不拼猜 PDF 地址；有些记录只有 XML 或网页 |
-| CORE | 查询 DOI 对应记录并检查返回的下载地址；必要时使用已配置 key | 允许先尝试匿名查询；访问限制、配额和许可由 CORE 决定，不能承诺匿名一定可用或 key 解锁全部论文 |
+| CORE | 优先使用 DOI 一致记录的 `downloadUrl`；另行授权后，可从已核实 output 关联使用官方 `/v3/outputs/{id}/download` 备用接口 | 匿名元数据查询放在后续尝试；API 托管 PDF 需要 key、独立内容下载开关和本机额度，默认关闭；不会将 work ID 当 output ID 或拼猜文件服务器地址 |
 | Semantic Scholar | Graph API 的 `openAccessPdf` 作为候选链接 | 主要是外部 PDF 地址，不是统一 PDF 镜像；匿名请求会限速，配置 key 也不授予出版社订阅 |
 | 自定义 DOI 网址 | 把 DOI 填入用户指定模板，匿名读取 PDF 或页面中的 PDF 元数据、iframe/embed/object 和下载链接 | 默认关闭、模板为空；网站失效、登录或真人验证仍会使此路径失败 |
 
 OpenAlex 与 Zotero OA 可能返回相同开放位置，不把重复来源当成新增覆盖。未接入出版社专用的订阅/TDM API。
+
+这些 API 是发现渠道。拿到地址后，本机 Zotero 继续请求实际文件，不经过开发者下载服务器。API 查询与候选下载使用匿名网页会话；配置的 key 只发送到自己的限定服务端点，不复用 Edge、科研通或机构 Cookie。随后独立的出版社获取路径才可使用 Zotero 内的有效机构会话。
+
+## 读懂来源诊断
+
+| 提示类别 | 表示什么 | 可以怎么做 |
+| --- | --- | --- |
+| 只提供元数据或链接 | 描述该 API 的能力，不能单独判断本次是否有候选或是否完成下载 | 同时查看后续下载结果与实际任务状态 |
+| 缺少 key、需要登录、下载受限 | 当前请求或目标地址受到认证/访问限制 | 核对已保存 key、服务权限；出版社权限可在日常浏览器验证，不必直接购买 API |
+| 限流、端点暂缓 | 当前来源/主机/凭据组合暂停一段时间，减少批量任务重复请求 | 其他来源继续尝试；稍后再试或核对服务配额，不反复点击同一操作 |
+| 超时或网络错误 | 本次请求未及时完成，不能推出论文没有全文 | 查看其他来源，或用浏览器路径 |
+| 需要真人验证 | 网站要求本人操作 | 在日常浏览器完成验证与下载 |
+| DOI/文件冲突 | 候选元数据或 PDF 与目标论文不一致 | 拒绝自动导入，检查条目元数据和文件 |
+| 文件身份不足 | 已取得 PDF，但证据不足以自动确认 | 预览待核对文件，明确确认后再入库 |
+| 版本被筛除或版本未知 | 已知版本不符合偏好，或来源没有版本信息 | 根据需要调整版本偏好；未知不等于正式出版版 |
+
+401/403/429/503 会影响当前来源的后续请求，并采用有上限的临时退避；不会因此永久关闭其他来源，也不会把一次失败写成所有文献都需要登录。填入或更换 key 使用新的凭据范围。退避用于减少无效请求，不是服务可用性或响应时间保证。
 
 ## 版本偏好
 
@@ -35,13 +52,20 @@ OpenAlex 与 Zotero OA 可能返回相同开放位置，不把重复来源当成
 
 未知版本不会被推断成正式版，完成记录显示“版本未核实”。无论是哪种版本，都需核对目标论文身份。当前选择控制明确标注版本的候选筛选，不是对文件出版版本的绝对保证。
 
-## OpenAlex 下载额度
+## OpenAlex 与 CORE 内容下载额度
 
-配置 key 后仍须另行启用“允许使用 OpenAlex 内容下载额度”。默认关闭，本机每日上限默认 100 次，范围 1–1000。
+配置 key 后仍须另行开启对应服务的内容下载，两个开关互相独立，均默认关闭：
 
-计数按 UTC 日期和 key 哈希保存在本机，下载前先原子预留一次；失败、取消和超时也计入，防止重试重复消耗而不记账。跳转到实际文件不另预留一次。重启继续读取；计数文件损坏或无法写入时停止缓存内容下载，其他来源仍可尝试。
+| 服务 | 需要独立授权的操作 | 默认本机每日上限 | 可设范围 |
+| --- | --- | --- | --- |
+| OpenAlex | 缓存内容 PDF 下载 | 100 次 | 1–1000 次 |
+| CORE | 官方 API 托管 PDF 备用下载 | 20 次 | 1–1000 次 |
 
-**本机上限不等于账户免费额度或余额。** 同一个 key 可被其他应用使用，OpenAlex 的实际收费、免费额度及配额以其账户和官方政策为准。插件不承诺启用后绝不会消耗账户付费余额。没有必要为了安装插件先购买 CORE 或 Semantic Scholar 服务。
+计数按服务、UTC 日期和 key 哈希保存在本机，下载前先原子预留一次；失败、取消和超时也计入，防止重试重复消耗而不记账。跳转到实际文件不另预留一次。重启继续读取；计数文件损坏或无法写入时停止这些内容下载，其他来源仍可尝试。只启用元数据来源或保存 key 不等于开启内容下载。
+
+CORE 官方 [PDF 下载政策](https://api.core.ac.uk/docs/v3#operation/PDFDownloadPolicy) 允许在原 `downloadUrl` 受限时使用其 outputs 下载 API。该接口消耗 CORE API tokens，可能比一般查询消耗更多；官方未公布每篇 PDF 固定 token 数。未认证 API 用户不提供托管全文；源链接、API 元数据和 API 托管 PDF 的权限应分别判断。API 仍返回 403/429 时保留失败与退避，不改用猜测的文件服务器地址。
+
+**本机上限不等于账户免费额度、token 数或余额。** 同一个 key 可被其他应用使用，两个服务的实际收费与配额以其账户和官方政策为准。插件不承诺启用后绝不会消耗账户付费额度，也不会自动购买或扩大服务套餐。没有必要为了安装插件先购买 CORE 或 Semantic Scholar 服务。
 
 ## 自定义模板
 
@@ -62,7 +86,7 @@ https://repository.example.org/article/{doi};https://another.example.org/find?do
 - [OpenAlex 认证](https://developers.openalex.org/guides/authentication) 与 [内容下载](https://developers.openalex.org/guides/content)。密钥通过限定端点的认证头发送，不放进 URL。
 - [PMC 旧 OA Web Service](https://pmc.ncbi.nlm.nih.gov/tools/oa-service/) 已于 2026-08-25 停用；本版使用 [当前公开数据集说明](https://pmc-oa-opendata.s3.amazonaws.com/README.txt)。
 - [Europe PMC Web Services](https://www.ebi.ac.uk/europepmc/webservices/rest/)。
-- [CORE API](https://core.ac.uk/services/api) 与 [接口文档](https://core.ac.uk/documentation/api)。
+- [CORE API](https://core.ac.uk/services/api)、[API v3 文档与 PDF 下载政策](https://api.core.ac.uk/docs/v3#operation/PDFDownloadPolicy) 及 [官方 OpenAPI schema](https://api.core.ac.uk/swagger/v3.json)。`outputs` 是关联的 output 资源，不等于 work ID；限制和 token 消耗以实际响应与账户为准。
 - [Semantic Scholar API 产品页](https://www.semanticscholar.org/product/api) 与 [Graph 文档](https://api.semanticscholar.org/api-docs/graph)。
 
-真实与模拟验收范围见 [0.9.0 验收记录](verification-v0.9.0.md)。
+1.0.0 的发行状态与验收说明见 [1.0.0 更新说明](release-v1.0.0.md)；[0.9.0 验收记录](verification-v0.9.0.md) 仅属于该历史版本，不代表本版重跑结果。

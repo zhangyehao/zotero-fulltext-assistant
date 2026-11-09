@@ -161,3 +161,51 @@ test('plain Zotero script loading works without CommonJS', () => {
   assert.equal(typeof scope.FulltextAccessHistory.record, 'function');
   assert.equal(scope.FulltextAccessHistory.empty().schemaVersion, 1);
 });
+
+test('prepared lookup preserves exact article preference, newest host hints and strict host boundaries', () => {
+  const state = success(confirmed(history.empty(), { doi:'10.1016/other', at:new Date(now-1000).toISOString() }));
+  const lookup = history.createLookup(state, { now });
+  for(const query of [
+    {url,doi}, {url,doi:'10.1016/other'}, {url,doi:'10.1016/missing'}, {url,doi:''},
+    {url:'https://api.sciencedirect.com/article',doi}, {url:'https://www.nature.com/article',doi},
+    {url:'https://doi.org/'+doi,doi}, {url:'not a URL',doi},
+  ]) assert.deepEqual(lookup(query),history.lookup(state,{...query,now}));
+  assert.equal(lookup({url,doi}).kind,'browser_success');
+  assert.equal(lookup({url,doi:'10.1016/missing'}).kind,'browser_success');
+  assert.equal(lookup({url,doi:'10.1016/other'}).institutionalConfirmed,true);
+});
+
+test('prepared queries do not reread history and cannot mutate the input or each other', () => {
+  const state=confirmed(),entries=state.entries;let reads=0;
+  const raw={schemaVersion:1,get entries(){reads++;return entries;}};
+  const lookup=history.createLookup(raw,{now}),preparedReads=reads;
+  assert(preparedReads>0);
+  for(let i=0;i<1000;i++)assert.equal(lookup({url,doi}).scope,'article');
+  assert.equal(reads,preparedReads,'Queries must use the prepared index without rescanning history');
+  const first=lookup({url,doi});first.kind='forged';first.institutionalConfirmed=false;
+  entries[0].kind='browser_success';entries[0].host='mutated.test';entries.length=0;
+  assert.equal(lookup({url,doi}).kind,'institutional_confirmed');
+  assert.equal(lookup({url,doi}).institutionalConfirmed,true);
+  assert.equal(history.createLookup(state,{now})({url,doi}).scope,'none');
+});
+
+test('prepared lookup uses one timestamp and preserves the exact 180-day expiry boundary', () => {
+  const at=new Date(now-history.STALE_AFTER_MS).toISOString(),state=confirmed(history.empty(),{at});
+  const before=history.createLookup(state,{now}),after=history.createLookup(state,{now:now+1});
+  assert.equal(before({url,doi}).stale,false);assert.equal(before({url,doi}).institutionalConfirmed,true);
+  assert.equal(after({url,doi}).stale,true);assert.equal(after({url,doi}).institutionalConfirmed,false);
+  // Query-level time cannot give different tasks conflicting snapshot clocks.
+  assert.equal(before({url,doi,now:now+100000}).stale,false);
+});
+
+test('prepared lookup retains normalization limits and rejects forged or future evidence', () => {
+  const entry=confirmed().entries[0];
+  const entries=Array.from({length:230},(_,i)=>({...entry,doi:'10.1234/'+i,at:new Date(now-i*1000).toISOString()}));
+  entries.push({...entry,doi:'10.1234/forged',confirmedByUser:false},{...entry,doi:'10.1234/future',at:new Date(now+300001).toISOString()});
+  const state={schemaVersion:1,entries:entries.reverse()},lookup=history.createLookup(state,{now});
+  assert.equal(lookup({url,doi:'10.1234/0'}).scope,'article');
+  for(const value of ['10.1234/229','10.1234/forged','10.1234/future']){
+    assert.equal(lookup({url,doi:value}).scope,'host_hint');assert.equal(lookup({url,doi:value}).institutionalConfirmed,false);
+  }
+  for(const raw of [null,{}, {schemaVersion:2,entries}])assert.equal(history.createLookup(raw,{now})({url,doi}).scope,'none');
+});

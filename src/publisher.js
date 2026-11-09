@@ -6,6 +6,12 @@
   const MAX_PAGE_BYTES = 10 * 1024 * 1024;
   const MAX_CANDIDATES = 8;
 
+  function responseHeader(response, name) {
+    // Zotero's unfollowed-redirect wrapper uses nsIHttpChannel, which throws
+    // NS_ERROR_NOT_AVAILABLE for an absent header instead of returning null.
+    try { return response.getResponseHeader?.(name) || ""; } catch (_) { return ""; }
+  }
+
   function httpURL(value, base) {
     try {
       const url = new URL(String(value || ""), base);
@@ -278,8 +284,8 @@
         if (exceeded) throw new Error("文件超过 100 MiB 上限。");
         const bytes = asBytes(response.response);
         if (bytes.length > MAX_PDF_BYTES) throw new Error("文件超过 100 MiB 上限。");
-        const result = { response, bytes, url: httpURL(response.responseURL) || url, type: response.getResponseHeader?.("Content-Type") || "" };
-        if (response.getResponseHeader?.("cf-mitigated") === "challenge") {
+        const result = { response, bytes, url: httpURL(response.responseURL) || url, type: responseHeader(response, "Content-Type") };
+        if (responseHeader(response, "cf-mitigated") === "challenge") {
           challengeKind = "cloudflare"; needsLogin = true; loginURL ||= result.url; rememberGate(result.url, challengeKind);
           accessEvidence = { ...evidence("human_verification", "explicit", result.url), source: "response" };
         }
@@ -288,6 +294,11 @@
       async function importPDF(bytes, sourceURL, source, fulltextVersion = "unknown") {
         check();
         if (!validPDF(bytes)) return null;
+        // Discovery APIs may point to an unrelated storage provider. Record the
+        // final response host only after actual PDF bytes have been obtained.
+        const discoveryProvider = source === "rendered_publisher" ? "publisher" : source;
+        let pdfHost = "";
+        try { pdfHost = new URL(sourceURL).hostname.toLowerCase().replace(/\.$/, ""); } catch (_) {}
         try {
         const duplicate = await existingPDF(item);
         check();
@@ -309,7 +320,7 @@
               return null;
             }
             if (identity.status !== "match") {
-              pendingReview ||= { needsReview: true, paper: {doi:expectedDOI,title:expectedTitle}, reviewBytes: bytes, source, sourceURL, fulltextVersion, publisherURL };
+              pendingReview ||= { needsReview: true, paper: {doi:expectedDOI,title:expectedTitle}, reviewBytes: bytes, source, discoveryProvider, pdfHost, sourceURL, fulltextVersion, publisherURL };
               sourceDiagnostics.push({ source, code: "pdf_unknown", message: "已取得 PDF，但 DOI 和标题证据不足，需要预览核对。" });
               return null;
             }
@@ -322,7 +333,7 @@
           const attachment = await Zotero.Attachments.importFromFile({ file, parentItemID: item.id, libraryID: item.libraryID, title: "全文", contentType: "application/pdf" });
           // The import has committed. Cancellation now must not misreport it as absent.
           try { attachment.setField("url", sourceURL); await attachment.saveTx(); } catch (_) {}
-          return { attachmentID: attachment.id, source, sourceURL, publisherURL, fulltextVersion, sourceDiagnostics };
+          return { attachmentID: attachment.id, source, discoveryProvider, pdfHost, sourceURL, publisherURL, fulltextVersion, sourceDiagnostics };
         }
         finally {
           await IOUtils.remove(file, { ignoreAbsent: true }).catch(() => {});
@@ -348,6 +359,7 @@
           url = await sources.validateURL(url, { isCancelled });
           if (seen.has(url)) throw new Error("下载重定向循环。");
           seen.add(url);
+          await sources.beforeRequest?.(url, { source: candidate.source, headers, isCancelled });
           let cancel = () => {}, exceeded = false;
           const operation = Zotero.HTTP.request("GET", url, {
             responseType: "arraybuffer", successCodes: false, anon: true, followRedirects: false,
@@ -357,9 +369,12 @@
           });
           const response = await cancellable(operation, () => cancel());
           if (exceeded) throw new Error("下载文件超过上限。");
+          const actual = response.responseURL || url;
+          if (new URL(actual).href !== new URL(url).href) throw new Error("下载器返回了未经核验的重定向。");
           const status = Number(response.status);
+          sources.recordResponse?.(url, { source: candidate.source, headers, status, retryAfter: responseHeader(response, "Retry-After") });
           if (status >= 300 && status < 400) {
-            const location = response.getResponseHeader?.("Location");
+            const location = responseHeader(response, "Location");
             if (!location) throw new Error("下载重定向缺少地址。");
             const next = await sources.validateURL(new URL(location, url).href, { isCancelled });
             if (new URL(next).origin !== new URL(url).origin) headers = { Accept: headers.Accept };
@@ -367,11 +382,9 @@
             else if (new URL(next).pathname !== new URL(url).pathname || new URL(next).search !== new URL(url).search) headers = { Accept: headers.Accept };
             url = next; continue;
           }
-          const actual = response.responseURL || url;
-          if (new URL(actual).href !== new URL(url).href) throw new Error("下载器返回了未经核验的重定向。");
           const bytes = asBytes(response.response);
           if (bytes.length > MAX_PDF_BYTES) throw new Error("下载文件超过上限。");
-          return { bytes, url, status, type: response.getResponseHeader?.("Content-Type") || "", challenge: response.getResponseHeader?.("cf-mitigated") === "challenge" };
+          return { bytes, url, status, fulltextVersion: prepared.fulltextVersion || candidate.version || "unknown", type: responseHeader(response, "Content-Type"), challenge: responseHeader(response, "cf-mitigated") === "challenge" };
         }
         throw new Error("下载重定向次数超过上限。");
       }
@@ -388,7 +401,7 @@
             return null;
           }
           if (result.status < 200 || result.status >= 300) return null;
-          const imported = await importPDF(result.bytes, result.url, candidate.source, candidate.version || "unknown");
+          const imported = await importPDF(result.bytes, result.url, candidate.source, result.fulltextVersion || candidate.version || "unknown");
           if (imported) return imported;
           if (depth < 1 && !validPDF(result.bytes) && result.bytes.length <= 4 * 1024 * 1024 && !/application\/pdf/i.test(result.type)) {
             const parsed = sources.parsePage(decode(result.bytes, result.type), result.url, expectedDOI);
@@ -560,8 +573,20 @@
       }
       check();
       if (sources && (expectedDOI || pmcid)) {
-        const found = await sources.discover({ doi: expectedDOI, pmcid }, { isCancelled, onProgress });
-        sourceDiagnostics.push(...found.diagnostics);
+        let streamed = false;
+        const found = await sources.discover({ doi: expectedDOI, pmcid }, { isCancelled, onProgress,
+          async onCandidates(batch) {
+            streamed = true;
+            sourceDiagnostics.push(...batch.diagnostics);
+            for (const candidate of batch.candidates) {
+              const imported = await trySource(candidate);
+              if (imported) return imported;
+            }
+            return null;
+          },
+        });
+        if (found.accepted) return found.accepted;
+        if (!streamed) sourceDiagnostics.push(...found.diagnostics);
         for (const candidate of found.candidates) {
           const imported = await trySource(candidate);
           if (imported) return imported;

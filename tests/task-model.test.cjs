@@ -19,6 +19,24 @@ function receivedTask(overrides = {}) {
   return task({ requestURL, state: "imported", source: "ablesci", attachmentID: 81, assistReceipt: receipt(), ...overrides });
 }
 
+test("detailed source provenance survives queue round trips without guessing old history", () => {
+  const value=task({state:"imported",attachmentID:81,source:"openalex",discoveryProvider:"openalex",pdfHost:"Repository.Example.org"});
+  const restored=model.deserializeQueue(model.serializeQueue([value])).tasks[0];
+  assert.equal(restored.discoveryProvider,"openalex");assert.equal(restored.pdfHost,"repository.example.org");
+  const legacy=task({state:"imported",attachmentID:81,source:"openalex"});
+  assert.equal(legacy.discoveryProvider,"");assert.equal(legacy.pdfHost,"");
+  for(const pdfHost of ["https://example.org/file.pdf?token=secret","user@example.org","example.org/path","example.org?key=secret","bad..org","-bad.org"]){
+    const cleaned=task({pdfHost,discoveryProvider:"token=secret"});assert.equal(cleaned.pdfHost,"");assert.equal(cleaned.discoveryProvider,"");
+    assert.equal(model.deserializeQueue(model.serializeQueue([cleaned])).tasks.length,1);
+  }
+});
+
+test("unknown PDF review retains validated source provenance across restart", () => {
+  const value=task({state:"manual_review",sourceReview:{sha256:"ab".repeat(32),doi:input.doi,title:input.title,source:"core",sourceURL:"https://api.core.ac.uk/v3/outputs/123/download",discoveryProvider:"core",pdfHost:"api.core.ac.uk"}});
+  const restored=model.deserializeQueue(model.serializeQueue([value])).tasks[0];
+  assert.equal(restored.sourceReview.discoveryProvider,"core");assert.equal(restored.sourceReview.pdfHost,"api.core.ac.uk");
+});
+
 test("verified assistance receipts persist without inventing evidence for legacy imported history", () => {
   const current=receivedTask();assert.deepEqual(current.assistReceipt,receipt());
   const restored=model.deserializeQueue(model.serializeQueue([current])).tasks[0];assert.deepEqual(restored,current);

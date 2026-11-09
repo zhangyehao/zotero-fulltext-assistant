@@ -10,7 +10,7 @@
 | --- | --- |
 | 仓库 | `zhangyehao/zotero-fulltext-assistant` |
 | 插件 ID | `fulltext-assistant@local.invalid`，沿用旧版本，不能改成另一个插件 |
-| 当前版本 | `0.9.0`；后续版本必须同步 manifest、package 和锁文件 |
+| 当前开发目标 | `1.0.0`；发布前必须同步 manifest、package 和锁文件，正式状态以 Release 为准 |
 | Zotero 安装范围 | `10.0.7`–`10.0.*` |
 | 原生实测环境 | Windows / Zotero 10.0.7 |
 | 更新地址 | `https://github.com/zhangyehao/zotero-fulltext-assistant/releases/latest/download/updates.json` |
@@ -35,7 +35,7 @@ python scripts/release.py verify-local --directory dist
 | 文件 | 核对内容 |
 | --- | --- |
 | `zotero-fulltext-assistant-<version>.xpi` | 安装包内的版本、插件 ID、更新地址和兼容范围。 |
-| `zotero-fulltext-assistant-<version>-source.zip` | 当前版本源码、测试、文档和构建脚本，不含个人配置或依赖目录。 |
+| `zotero-fulltext-assistant-<version>-source.zip` | 当前版本源码、测试、三语 README、文档和构建脚本，不含个人配置或依赖目录。 |
 | `updates.json` | 同一个插件 ID；版本固定的 XPI 地址；`sha256:` 校验值；兼容范围。 |
 | `SHA256SUMS` | XPI、源码 ZIP 和更新清单的完整文件哈希。 |
 | `release-manifest.json` | 仓库、版本、标签、安装包名、更新地址、资产大小及哈希。 |
@@ -52,8 +52,8 @@ python scripts/release.py verify-local --directory dist
 4. 推送标签会触发 **Prepare release candidate**，重新测试和构建，再创建或补齐草稿。也可从同一干净提交手动执行：
 
 ```sh
-python scripts/release.py prepare --tag v0.9.0 --directory dist
-python scripts/release.py verify --tag v0.9.0 --directory dist
+python scripts/release.py prepare --tag v1.0.0 --directory dist
+python scripts/release.py verify --tag v1.0.0 --directory dist
 ```
 
 `prepare` 只处理草稿并逐字节核对远端资产。相同资产可重复核实；内容不同会拒绝覆盖。确有需要且仍是未发布草稿时，才显式使用 `--replace-draft-assets`。不要对已公开版本更换文件来掩盖版本内容变化。
@@ -70,12 +70,12 @@ python scripts/release.py verify --tag v0.9.0 --directory dist
 核对草稿、版本说明和用户可见文件后，以实际 Zotero 验收过的 XPI 哈希执行：
 
 ```sh
-python scripts/release.py publish --tag v0.9.0 --directory dist --expected-sha256 <64位已验收XPI的SHA256>
+python scripts/release.py publish --tag v1.0.0 --directory dist --expected-sha256 <64位已验收XPI的SHA256>
 ```
 
 `publish` 再次核对本地与远端资产，拒绝私有仓库，把已核对草稿发布为稳定版并设为 latest。Actions 中的 **Publish reviewed stable release** 是独立手动入口，同样需要标签与明确的验收哈希；推送标签本身只准备草稿。
 
-发行说明可依据 [0.9.0 说明](release-v0.9.0.md) 编写，附上当前版本的实际验证结果。不要把测试中拦截的提交写成真实科研通发布，也不要把人工下载、合成 PDF、免费下载线路测试写成验证码兼容或收费结算实测。
+发行说明可依据 [1.0.0 草稿](release-v1.0.0.md) 编写，先以当前版本实际结果替换验收待办并确认发行状态。不要把测试中拦截的提交写成真实科研通发布，也不要把人工下载、合成 PDF、免费下载线路测试写成验证码兼容或收费结算实测。性能汇总说明样本与测量边界，真实文库的逐篇结果、DOI 和个人路径只保留本地。
 
 ## 发布后核实更新
 
@@ -109,6 +109,8 @@ addons/zhangyehao@zotero-fulltext-assistant
 
 PR 提交、维护者合并、采集成功、市场客户端显示是独立步骤。记录申请链接与后续结果，未完成时写“已申请，待审核/采集”，不要写“已收录”。
 
+以上是首次收录流程，已存在来源条目时不要每个版本重复申请。2026-11-09 已核对本插件来源条目存在且未固定 0.8.0；采集和发布是自动工作流，目录旧版本号不表示新版正在人工审核。后续实际状态必须重新查看 [发布数据](https://raw.githubusercontent.com/syt2/zotero-addons-scraper/publish/addon_infos_10.json) 和 [工作流](https://github.com/syt2/zotero-addons-scraper/blob/master/.github/workflows/main.yml)，不要把这个历史检查日期当作当前采集结果。
+
 ### Zotero 中文社区插件索引
 
 维护仓库为 [zotero-chinese/zotero-plugins](https://github.com/zotero-chinese/zotero-plugins)，用户入口为 [Zotero 中文社区插件合集](https://zotero-chinese.com/plugins)。当前 README 接受新插件 Issue / PR，并要求可用的正式发行版；若 PR 权限受限，可优先提交 Issue，提供仓库、用途、兼容范围、Release、截图与隐私说明。
@@ -125,3 +127,5 @@ PR 提交、维护者合并、采集成功、市场客户端显示是独立步�
 ```
 
 不要手改生成的 `plugins.json`，也不要宣称支持未验证的 Zotero 版本。`discoverReleases` 发现正式发行版并不代表网站立即显示；源条目审核、后台采集和网站更新分别核实。规则来源为 [中文 README](https://github.com/zotero-chinese/zotero-plugins/blob/main/README-zh.md) 与 [源清单](https://github.com/zotero-chinese/zotero-plugins/blob/main/src/plugins.ts)，申请前再次核对当前要求。
+
+该 README 说明采集器一般会自动发现最新正式版，无需为每次版本发布手动更新清单。2026-11-09 核对时，本插件已经配置 `discoverReleases: true`；网站实际输入是 [gh-pages/dist/plugins.json](https://raw.githubusercontent.com/zotero-chinese/zotero-plugins/gh-pages/dist/plugins.json)。当时的 `shadow` 模式沿用外部采集版本，上游已更新也可能仍需等待中文目录和网站构建。时刻、规则和分层排查见 [更新维护记录](UPDATING.md#插件目录和历史说明)。

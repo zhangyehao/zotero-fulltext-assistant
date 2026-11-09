@@ -20,7 +20,7 @@ function setup({url='https://publisher.test/article/one',doi='',pages={},rendere
       let value=pages[address];if(typeof value==='function')value=await value({renderedOnce,options});
       if(typeof value==='string')value={body:value};
       const bytes=value.bytes||new TextEncoder().encode(value.body||'');
-      return {status:value.status??200,response:bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength),responseURL:value.url||address,getResponseHeader(name){return name==='Content-Type'?(value.type||'text/html; charset=utf-8'):(value.headers?.[name]||null);}};
+      return {status:value.status??200,response:bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength),responseURL:value.url||address,getResponseHeader(name){if(value.getResponseHeader)return value.getResponseHeader(name);return name==='Content-Type'?(value.type||'text/html; charset=utf-8'):(value.headers?.[name]||null);}};
     } finally {active--;}
   }},Attachments:{async createTemporaryStorageDirectory(){return {path:'/tmp/publisher-'+(++tempID)};},async importFromFile(options){imports.push(options);assert.equal(options.parentItemID,1);assert.equal(options.libraryID,1);assert.equal(options.contentType,'application/pdf');assert(files.has(options.file));const attachment={id:++nextID,attachmentContentType:'application/pdf',async getFilePathAsync(){return '/storage/'+this.id+'.pdf';},setField(){},async saveTx(){}};files.set('/storage/'+attachment.id+'.pdf',files.get(options.file));attachments.push(attachment);return attachment;},getFileResolvers(_item,methods){assert.deepEqual(Array.from(methods),['oa']);return [async()=>oa];}}};
   class HiddenBrowser {
@@ -39,6 +39,7 @@ test('HTTP citation_pdf_url yields a verified PDF attached to the original item'
   const env=setup({pages:{'https://publisher.test/article/one':html('<meta name="citation_pdf_url" content="/files/one.pdf">'),'https://publisher.test/files/one.pdf':{bytes:pdf(),type:'application/pdf'}}});
   const result=await env.publisher.acquire(env.item,{onProgress:env.onProgress});
   assert.equal(result.source,'publisher');assert.equal(result.sourceURL,'https://publisher.test/files/one.pdf');assert.equal(env.imports.length,1);assert.equal(env.hidden.length,0);
+  assert.equal(result.discoveryProvider,'publisher');assert.equal(result.pdfHost,'publisher.test');
   assert(env.requests.every(value=>!('userContextId' in value.options)));
   assert.equal(env.requests[1].options.headers.Referer,'https://publisher.test/article/one');
   assert.equal([...env.files.keys()].some(value=>value.startsWith('/tmp/')),false);
@@ -48,6 +49,7 @@ test('JS-rendered download anchor succeeds when the initial HTTP DOM has no PDF'
   const env=setup({pages:{'https://publisher.test/article/one':html('<div id="app"></div>'),'https://publisher.test/secure-download?id=one':{bytes:pdf(),type:'application/octet-stream'}},rendered:{'https://publisher.test/article/one':html('<a href="/secure-download?id=one">Download PDF</a>')}});
   const result=await env.publisher.acquire(env.item,{onProgress:env.onProgress});
   assert.equal(result.source,'rendered_publisher');assert.equal(env.imports.length,1);
+  assert.equal(result.discoveryProvider,'publisher');assert.equal(result.pdfHost,'publisher.test');
   assert.equal(env.hidden[0].options.allowJavaScript,true);assert.equal('userContextId' in env.hidden[0].options,false);assert.equal(env.hidden[0].destroyed,true);
   assert(env.progress.some(value=>value.stage==='rendering'));
 });
@@ -63,6 +65,7 @@ test('OA resolver succeeds before any publisher webpage or challenge is requeste
   const env=setup({doi:'10.1234/one',pages:{'https://publisher.test/article/one':html('<a href="/bad.pdf">PDF</a>'),'https://publisher.test/bad.pdf':{body:html('Sign in to download'),type:'application/pdf'},'https://doi.org/10.1234/one':html('Paywall'),'https://repository.test/one.pdf':{bytes:pdf(),type:'application/pdf'}},oa:[{url:'https://repository.test/one.pdf'}]});
   const result=await env.publisher.acquire(env.item);
   assert.equal(result.source,'open_access');assert.equal(env.imports.length,1);assert.equal(result.sourceURL,'https://repository.test/one.pdf');
+  assert.equal(result.discoveryProvider,'open_access');assert.equal(result.pdfHost,'repository.test');
   assert.deepEqual(env.requests.map(value=>value.url),['https://repository.test/one.pdf']);assert.equal(env.hidden.length,0);
 });
 
@@ -320,6 +323,7 @@ test('API redirects are validated and credentials never cross download origins o
     const url='https://api.test/download.pdf',sources=sourceFixture([{url,source:'openalex',credentialScope:'openalex',kind:'pdf'}]);
     const env=setup({doi:'10.1234/one',sources,pages:{[url]:{status:302,headers:{Location:target}},[target]:{bytes:pdf(),type:'application/pdf'}},pdfIdentity:{async inspect(){return{status:'match'};}}});
     const result=await env.publisher.acquire(env.item);assert(result.attachmentID);assert.equal(env.requests[0].options.headers.Authorization,'Bearer fixture-secret');assert.equal(env.requests[1].options.headers.Authorization,undefined);assert(sources.validated.includes(target));assert.equal(sources.prepared.length,1,'One allowance reservation for a redirected download');
+    assert.equal(result.discoveryProvider,'openalex');assert.equal(result.pdfHost,new URL(target).hostname);
   }
 });
 test('unsafe API redirects and wrong article PDFs never enter Zotero',async()=>{
@@ -329,10 +333,24 @@ test('unsafe API redirects and wrong article PDFs never enter Zotero',async()=>{
     const result=await env.publisher.acquire(env.item);assert.equal(result.state,'not_found');assert.equal(env.imports.length,0);assert.equal(env.hidden.length,0);assert.equal(env.requests.length,1);assert(result.sourceDiagnostics.some(value=>value.code===(mode==='redirect'?'download_failed':'pdf_mismatch')));
   }
 });
+
+test('native redirect headers may throw for absent Retry-After without losing a valid PDF',async()=>{
+  const first='https://api.core.ac.uk/v3/outputs/123/download',final='https://files.test/paper.pdf',responses=[];
+  const sources=sourceFixture([{url:first,source:'core',credentialScope:'core',kind:'pdf'}],{recordResponse(url,options){responses.push(options);}});
+  const env=setup({doi:'10.1234/one',sources,sourceSettings:{enabled:{publisher:false}},pages:{
+    [first]:{status:302,getResponseHeader(name){if(name.toLowerCase()==='location')return final;throw Error('NS_ERROR_NOT_AVAILABLE');}},
+    [final]:{bytes:pdf(),type:'application/pdf'}
+  },pdfIdentity:{async inspect(){return{status:'match'};}}});
+  const result=await env.publisher.acquire(env.item);
+  assert.equal(result.attachmentID,101);assert.equal(result.discoveryProvider,'core');assert.equal(result.pdfHost,'files.test');
+  assert.equal(env.requests.length,2);assert.equal(env.requests[1].options.headers.Authorization,undefined);
+  assert.deepEqual(responses.map(x=>[x.status,x.retryAfter]),[[302,''],[200,'']]);
+});
 test('unknown API identity becomes a single review candidate and does not import silently',async()=>{
   const url='https://dataset.test/file.pdf',sources=sourceFixture([{url,source:'pmc',version:'accepted',kind:'pdf'}]);
   const env=setup({doi:'10.1234/one',sources,sourceSettings:{enabled:{publisher:false}},pages:{[url]:{bytes:pdf(),type:'application/pdf'}},pdfIdentity:{async inspect(){return{status:'unknown'};}}});
   const result=await env.publisher.acquire(env.item);assert.equal(result.needsReview,true);assert.equal(result.fulltextVersion,'accepted');assert.equal(result.paper.doi,'10.1234/one');assert.equal(result.reviewBytes.length,pdf().length);assert.equal(env.imports.length,0);assert.equal([...env.files.keys()].some(value=>value.startsWith('/tmp/')),false);
+  assert.equal(result.discoveryProvider,'pmc');assert.equal(result.pdfHost,'dataset.test');
 });
 test('Extra DOI and PMCID are passed to sources and existing files skip all APIs',async()=>{
   const sources=sourceFixture([]),env=setup({sources,sourceSettings:{enabled:{publisher:false}}});env.item.getExtraField=name=>({DOI:'10.1234/from-extra',PMCID:'PMC12345'})[name]||'';
@@ -347,4 +365,75 @@ test('pause during anonymous transfer aborts it and does not import or visit ano
 test('publisher PDFs also require identity verification before automatic import',async()=>{
   const url='https://publisher.test/article/one',env=setup({pages:{[url]:{bytes:pdf(),type:'application/pdf'}},pdfIdentity:{async inspect(){return{status:'mismatch'};}}});
   const result=await env.publisher.acquire(env.item);assert.equal(result.state,'not_found');assert.equal(env.imports.length,0);assert(result.sourceDiagnostics.some(value=>value.code==='pdf_mismatch'));
+});
+
+test('streamed API candidates are downloaded and verified before discovery returns',async()=>{
+  const url='https://repository.test/stream.pdf';let verified=false,accepted;
+  const sources=sourceFixture([],{async discover(input,options){
+    accepted=await options.onCandidates({candidates:[{url,source:'semanticScholar',kind:'pdf'}],diagnostics:[]});
+    assert(verified);assert.equal(accepted.attachmentID,101);return {candidates:[],diagnostics:[],accepted};
+  }});
+  const env=setup({doi:'10.1234/one',sources,pages:{[url]:{bytes:pdf(),type:'application/pdf'}},pdfIdentity:{async inspect(){verified=true;return {status:'match'};}}});
+  const result=await env.publisher.acquire(env.item);assert.equal(result,accepted);assert.equal(result.discoveryProvider,'semanticScholar');assert.equal(result.pdfHost,'repository.test');
+  assert.equal(env.imports.length,1);assert.equal(env.requests.length,1);
+});
+
+test('streamed mismatches continue to later sources and HTML landing pages never become a reported PDF host',async()=>{
+  const first='https://landing.test/article',wrong='https://wrong.test/paper.pdf',good='https://storage.test/right.pdf';let attempts=0;
+  const sources=sourceFixture([],{async discover(input,options){
+    for(const candidate of [{url:first,source:'openalex',kind:'page'},{url:wrong,source:'core',kind:'pdf'},{url:good,source:'pmc',kind:'pdf'}]){
+      const accepted=await options.onCandidates({candidates:[candidate],diagnostics:[]});
+      if(accepted)return {accepted,candidates:[],diagnostics:[]};
+    }
+    throw Error('Expected final fixture to import');
+  }});
+  const env=setup({doi:'10.1234/one',sources,pages:{[first]:html('No PDF'),[wrong]:{bytes:pdf(),type:'application/pdf'},[good]:{bytes:pdf(),type:'application/pdf'}},pdfIdentity:{async inspect(){return {status:++attempts===1?'mismatch':'match'};}}});
+  const result=await env.publisher.acquire(env.item);assert.equal(result.discoveryProvider,'pmc');assert.equal(result.pdfHost,'storage.test');assert.equal(env.imports.length,1);assert.equal(attempts,2);
+});
+
+test('API download responses feed endpoint backoff and every redirect hop checks its own scope',async()=>{
+  const first='https://api.test/paper.pdf',final='https://cdn.test/paper.pdf?Expires=123';const before=[],responses=[];
+  const sources=sourceFixture([{url:first,source:'openalex',kind:'pdf',credentialScope:'openalex'}],{
+    async beforeRequest(url,options){before.push({url,headers:{...options.headers},source:options.source});},
+    recordResponse(url,options){responses.push({url,status:options.status,source:options.source});},
+  });
+  const env=setup({doi:'10.1234/one',sources,pages:{[first]:{status:302,headers:{Location:final}},[final]:{bytes:pdf(),type:'application/pdf'}},pdfIdentity:{async inspect(){return {status:'match'};}}});
+  const result=await env.publisher.acquire(env.item);assert.equal(result.pdfHost,'cdn.test');assert.equal(result.discoveryProvider,'openalex');
+  assert.deepEqual(before.map(row=>row.url),[first,final]);assert.equal(before[1].headers.Authorization,undefined);assert.deepEqual(responses.map(row=>row.status),[302,200]);
+  assert(!result.pdfHost.includes('Expires'));
+});
+
+test('an unverified transparent redirect is rejected before following a new Location or recording endpoint status',async()=>{
+  const first='https://api.test/paper.pdf',target='https://cdn.test/paper.pdf',responses=[];
+  const sources=sourceFixture([{url:first,source:'openalex',kind:'pdf',credentialScope:'openalex'}],{recordResponse(url,options){responses.push({url,status:options.status});}});
+  const env=setup({doi:'10.1234/one',sources,sourceSettings:{enabled:{publisher:false}},pages:{[first]:{status:302,url:'https://unexpected.test/redirect',headers:{Location:target}},[target]:{bytes:pdf(),type:'application/pdf'}},pdfIdentity:{async inspect(){throw Error('Unexpected identity check');}}});
+  const result=await env.publisher.acquire(env.item);assert.equal(result.state,'not_found');assert.equal(env.requests.length,1);assert.equal(responses.length,0);assert.equal(env.imports.length,0);
+});
+
+test('unsuccessful landing pages and identity conflicts cannot claim a final PDF host',async()=>{
+  for(const kind of ['html','mismatch']){
+    const url='https://repository.test/article',sources=sourceFixture([{url,source:'openalex',kind:'page'}]);
+    const env=setup({doi:'10.1234/one',sources,sourceSettings:{enabled:{publisher:false}},pages:{[url]:kind==='html'?html('No downloadable PDF'):{bytes:pdf(),type:'application/pdf'}},pdfIdentity:{async inspect(){return {status:'mismatch'};}}});
+    const result=await env.publisher.acquire(env.item);assert.equal(result.pdfHost,undefined);assert.equal(result.discoveryProvider,undefined);assert.equal(env.imports.length,0);
+  }
+});
+
+test('a blocked normal CORE address can fall back to its official API but still needs the PDF identity check',async()=>{
+  for(const identity of ['match','unknown','mismatch']){
+    const normal='https://core.ac.uk/download/pdf/123.pdf',hosted='https://api.core.ac.uk/v3/outputs/123/download';let normalFinished=false,hostedPrepared=0,checked=0;
+    const candidates=[{url:normal,source:'core',kind:'pdf'},{url:hosted,source:'core',kind:'pdf',credentialScope:'core',fallbackOnly:true}];
+    const sources=sourceFixture(candidates,{async discover(input,options){
+      const first=await options.onCandidates({candidates:[candidates[0]],diagnostics:[]});assert.equal(first,null);normalFinished=true;
+      const accepted=await options.onCandidates({candidates:[candidates[1]],diagnostics:[]});return {candidates,diagnostics:[],...(accepted?{accepted}:{})};
+    },async prepareRequest(candidate){
+      if(candidate.fallbackOnly){assert(normalFinished);hostedPrepared++;}
+      return {url:candidate.url,headers:candidate.fallbackOnly?{Authorization:'Bearer core-private-fixture'}:{},fulltextVersion:candidate.fallbackOnly?'accepted':'unknown'};
+    }});
+    const env=setup({doi:'10.1234/one',sources,sourceSettings:{enabled:{publisher:false}},pages:{[normal]:{status:403},[hosted]:{bytes:pdf(),type:'application/pdf'}},pdfIdentity:{async inspect(){checked++;return {status:identity};}}});
+    const result=await env.publisher.acquire(env.item);assert.equal(hostedPrepared,1);assert.equal(checked,1);assert.deepEqual(env.requests.map(row=>row.url),[normal,hosted]);
+    assert.equal(env.imports.length,identity==='match'?1:0);
+    if(identity!=='mismatch'){assert.equal(result.discoveryProvider,'core');assert.equal(result.pdfHost,'api.core.ac.uk');assert.equal(result.fulltextVersion,'accepted');}
+    else {assert.equal(result.state,'not_found');assert.equal(result.pdfHost,undefined);}
+    assert(!JSON.stringify(result).includes('core-private-fixture'));
+  }
 });

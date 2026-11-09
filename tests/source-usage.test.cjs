@@ -23,6 +23,29 @@ test('unreadable or malformed quota data fails closed and preserves original byt
 });
 test('invalid reservation settings never spend or overwrite accounting',async()=>{
   const env=environment(),usage=env.make();
-  for(const value of [{provider:'core',key:'x',limit:1},{provider:'openalex',key:'',limit:1},{provider:'openalex',key:'x',limit:0},{provider:'openalex',key:'x',limit:1.5}])assert.equal(await usage.reserve(value),false);
+  for(const value of [{provider:'unknown',key:'x',limit:1},{provider:'openalex',key:'',limit:1},{provider:'openalex',key:'x',limit:0},{provider:'openalex',key:'x',limit:1.5}])assert.equal(await usage.reserve(value),false);
   assert.equal(env.value,undefined);
+});
+
+test('CORE uses an independent durable bucket even when a provider key string happens to be shared',async()=>{
+  const env=environment(),usage=env.make(),key='shared-private-fixture';
+  assert.equal(await usage.reserve({provider:'openalex',key,limit:1}),true);
+  assert.equal(await usage.reserve({provider:'core',key,limit:2}),true);
+  assert.equal(await usage.reserve({provider:'core',key,limit:2}),true);
+  assert.equal(await env.make().reserve({provider:'core',key,limit:2}),false);
+  assert.equal(await env.make().reserve({provider:'openalex',key,limit:1}),false);
+  assert.equal(Object.keys(JSON.parse(env.value).days['2026-11-09']).length,2);
+  assert(!env.value.includes(key));assert(!env.value.includes('core'));
+});
+
+test('CORE simultaneous and failed download reservations cannot exceed allowance or undo the persisted attempt',async()=>{
+  const env=environment(),usage=env.make(),request={provider:'core',key:'core-private-fixture',limit:3};
+  const result=await Promise.all(Array.from({length:12},()=>usage.reserve(request)));
+  assert.equal(result.filter(Boolean).length,3);
+  // There is deliberately no refund on transport failure: a new instance sees
+  // the same exhausted local attempt counter before it may request another PDF.
+  assert.equal(await env.make().reserve(request),false);
+  env.day='2026-11-10';assert.equal(await env.make().reserve(request),true);
+  const damaged=environment('{"schemaVersion":2,"days":{}}');
+  assert.equal(await damaged.make().reserve(request),false);assert.equal(damaged.value,'{"schemaVersion":2,"days":{}}');
 });

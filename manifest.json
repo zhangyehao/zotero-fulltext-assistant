@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "全文助手",
-  "version": "0.9.0",
+  "version": "1.0.0",
   "description": "优先从开放来源与论文网页批量获取全文，跟踪科研通求助并核对 PDF 入库。",
   "author": "zhangyehao",
   "homepage_url": "https://github.com/zhangyehao/zotero-fulltext-assistant",

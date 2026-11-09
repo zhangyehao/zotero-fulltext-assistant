@@ -11,7 +11,8 @@
 (function (global) {
   "use strict";
   const DEFAULT_LIMITS = Object.freeze({ timeoutMs: 15000, providerTimeoutMs: 35000, maxMetadataBytes: 2 * 1024 * 1024,
-    maxPageBytes: 4 * 1024 * 1024, maxCandidates: 24, maxPerSource: 8, maxTemplates: 8, maxPDFBytes: 100 * 1024 * 1024 });
+    maxPageBytes: 4 * 1024 * 1024, maxCandidates: 24, maxPerSource: 8, maxTemplates: 8, maxPDFBytes: 100 * 1024 * 1024,
+    authBackoffMs: 10 * 60 * 1000, rateBackoffMs: 30000, maxBackoffMs: 60 * 60 * 1000, maxEndpointStates: 128 });
   const PROVIDERS = ["openalex", "pmc", "core", "semanticScholar", "custom"];
   const API = Object.freeze({ openalex: "https://api.openalex.org", content: "https://content.openalex.org",
     pmc: "https://pmc-oa-opendata.s3.amazonaws.com", europepmc: "https://www.ebi.ac.uk/europepmc/webservices/rest",
@@ -29,6 +30,7 @@
     login_required: "The anonymous request requires website authentication.", response_too_large: "The response exceeded the bounded discovery size.",
     invalid_response: "The source returned an unsupported response.", unexpected_redirect: "An unverified redirect was rejected.",
     rate_limited: "The source requested a delay beyond this lookup's retry budget.", timeout: "The source lookup reached its time limit.",
+    endpoint_backoff: "This endpoint is temporarily paused after an authentication or rate-limit response; other sources remain available.",
     network_error: "The source request failed.", disabled: "This source is disabled.", key_storage: "The configured API key could not be read.",
     source_not_enabled: "The candidate's source is no longer enabled.", untrusted_candidate: "The candidate does not have a recognized source.",
     credentials_in_url: "A URL containing credentials was rejected.", retracted: "The source marks this article version as retracted." });
@@ -106,7 +108,9 @@
     return { enabled, versionPreference: ["published", "accepted", "any"].includes(value.versionPreference) ? value.versionPreference : "accepted",
       customTemplates: parseTemplates(value.customTemplates || []).templates,
       openalexContentEnabled: value.openalexContentEnabled === true,
-      openalexDailyLimit: Number.isInteger(value.openalexDailyLimit) && value.openalexDailyLimit >= 1 && value.openalexDailyLimit <= 1000 ? value.openalexDailyLimit : 100 };
+      openalexDailyLimit: Number.isInteger(value.openalexDailyLimit) && value.openalexDailyLimit >= 1 && value.openalexDailyLimit <= 1000 ? value.openalexDailyLimit : 100,
+      coreContentEnabled: value.coreContentEnabled === true,
+      coreDailyLimit: Number.isInteger(value.coreDailyLimit) && value.coreDailyLimit >= 1 && value.coreDailyLimit <= 1000 ? value.coreDailyLimit : 20 };
   }
   function bytesOf(value) {
     if (typeof value === "string") return new TextEncoder().encode(value);
@@ -118,7 +122,7 @@
     reserveDownloadSlot, resolveHost, request: injectedRequest, delay, now = () => Date.now(), limits: overrides = {} } = {}) {
     const limits = { ...DEFAULT_LIMITS, ...overrides };
     const sleep = delay || (milliseconds => Zotero?.Promise?.delay ? Zotero.Promise.delay(milliseconds) : new Promise(resolve => setTimeout(resolve, milliseconds)));
-    const secrets = new Set(), rateQueues = new Map(), nextRequest = new Map();
+    const secrets = new Set(), rateQueues = new Map(), nextRequest = new Map(), endpointStates = new Map();
     const settings = () => normalizeSettings(getSettings());
     const check = context => { if (context?.isCancelled?.()) throw abort(); if (context?.deadline && now() >= context.deadline) throw failure("timeout"); };
     async function bounded(operation, context, cancel = () => {}) {
@@ -174,14 +178,49 @@
       rateQueues.set(source, operation);
       try { await bounded(operation, context); } finally { if (rateQueues.get(source) === operation) rateQueues.delete(source); }
     }
-    function responseHeader(response, name) { return response?.getResponseHeader?.(name) || response?.headers?.get?.(name) || response?.headers?.[name.toLowerCase()] || response?.headers?.[name] || ""; }
+    function responseHeader(response, name) {
+      // Native Zotero redirect responses throw when a channel header is absent.
+      try { return response?.getResponseHeader?.(name) || response?.headers?.get?.(name) || response?.headers?.[name.toLowerCase()] || response?.headers?.[name] || ""; }
+      catch (_) { return ""; }
+    }
+    function endpointKey(url, source, headers = {}) {
+      // Authentication is kept only in this bounded in-memory map, never in
+      // returned candidates, diagnostics, history, progress or persisted state.
+      const auth = Object.entries(headers).filter(([name]) => /^(?:authorization|x-api-key)$/i.test(name)).map(([name,value]) => name.toLowerCase() + ":" + value).sort().join("\n");
+      return source + "|" + new URL(url).origin + "|" + auth;
+    }
+    function checkEndpoint(url, source, headers = {}) {
+      const state = endpointStates.get(endpointKey(url, source, headers));
+      if (state?.until > now()) throw failure("endpoint_backoff");
+    }
+    function retryDelay(raw, fallback) {
+      const value = /^\d+(?:\.\d+)?$/.test(String(raw)) ? Number(raw) * 1000 : raw ? Date.parse(raw) - now() : fallback;
+      return Number.isFinite(value) ? Math.max(0, value) : fallback;
+    }
+    function recordResponse(url, { source, headers = {}, status, retryAfter = "" } = {}) {
+      const key = endpointKey(url, source, headers), previous = endpointStates.get(key);
+      if (status >= 200 && status < 300) { endpointStates.delete(key); return; }
+      if (![401,403,429,503].includes(Number(status))) return;
+      const strikes = Math.min(8, (previous?.strikes || 0) + 1);
+      const base = [401,403].includes(Number(status)) ? limits.authBackoffMs : limits.rateBackoffMs;
+      const duration = Math.min(limits.maxBackoffMs, Math.max(base * 2 ** (strikes - 1), retryDelay(retryAfter, 0)));
+      endpointStates.delete(key); endpointStates.set(key, { until: now() + duration, strikes });
+      while (endpointStates.size > limits.maxEndpointStates) endpointStates.delete(endpointStates.keys().next().value);
+    }
+    async function beforeRequest(url, { source, headers = {}, isCancelled = () => false, deadline = now() + limits.timeoutMs } = {}) {
+      const context = { isCancelled, deadline }; check(context); checkEndpoint(url, source, headers);
+      await throttle(source, context); check(context); checkEndpoint(url, source, headers);
+    }
     async function send(address, { source, headers = {}, maxBytes = limits.maxMetadataBytes, context, detectPDF = false, allowRedirects = false } = {}) {
+      checkEndpoint(address, source, headers);
       let url = await validateURL(address, context);
       const initialOrigin = new URL(url).origin;
       for (let hop = 0; hop < 4; hop++) {
         check(context); let response;
         for (let attempt = 0; attempt < 2; attempt++) {
-          await throttle(source, context); check(context);
+          if (!attempt) await beforeRequest(url, { source, headers, ...context });
+          else await throttle(source, context);
+          check(context);
           let cancel = () => {}, oversized = false, directPDF = false;
           const options = { responseType: "arraybuffer", successCodes: false, timeout: Math.max(1, Math.min(limits.timeoutMs, context.deadline - now())),
             anon: true, followRedirects: false, headers: { Accept: detectPDF ? "application/pdf,text/html;q=0.9" : "application/json,application/xml;q=0.9", ...headers },
@@ -207,6 +246,7 @@
           const finalURL = response.responseURL || response.url;
           if (finalURL && finalURL !== url) throw failure("unexpected_redirect");
           const status = Number(response.status);
+          recordResponse(url, { source, headers, status, retryAfter: responseHeader(response, "Retry-After") });
           if (![429, 503].includes(status)) break;
           const raw = responseHeader(response, "Retry-After");
           const retryMs = /^\d+(?:\.\d+)?$/.test(raw) ? Number(raw) * 1000 : raw ? Date.parse(raw) - now() : 1000;
@@ -263,13 +303,20 @@
       }
       return { candidates, code: candidates.length ? null : "no_pdf" };
     }
-    async function discover(input, { isCancelled = () => false, onProgress = () => {} } = {}) {
+    async function discover(input, { isCancelled = () => false, onProgress = () => {}, onCandidates } = {}) {
       const config = settings(), doi = normalizeDOI(typeof input === "string" ? input : input?.doi || input?.DOI || input?.getField?.("DOI"));
       const pmcid = normalizePMCID(input?.pmcid);
       if (isCancelled()) throw abort();
       if (!doi && !pmcid) return { candidates: [], diagnostics: [{ source: "sources", code: "invalid_doi", message: CODES.invalid_doi }] };
-      const jobs = PROVIDERS.filter(name => config.enabled[name] && (doi || name === "pmc")).map(async provider => {
-        const context = { isCancelled, deadline: now() + limits.providerTimeoutMs }, candidates = [], diagnostics = [];
+      const enabled = PROVIDERS.filter(name => config.enabled[name] && (doi || name === "pmc"));
+      let stopped = false, accepted = null, callbackError = null, delivery = Promise.resolve();
+      const cancelled = () => stopped || isCancelled();
+      const results = [], delivered = new Set(), pending = [], pendingDiagnostics = [];
+      let draining = false;
+      const priority = candidate => candidate.fallbackOnly ? 4 : candidate.evidence === "pmc_article_dataset_pdf" ? 0 : candidate.kind === "pdf" ? 1 : 2;
+      const rank = candidates => candidates.sort((a,b) => priority(a) - priority(b));
+      async function runProvider(provider, suppliedKey) {
+        const context = { isCancelled: cancelled, deadline: now() + limits.providerTimeoutMs }, candidates = [], diagnostics = [];
         function note(code) { if (!diagnostics.some(row => row.code === code)) diagnostics.push({ source: provider, code, message: CODES[code] || CODES.network_error }); }
         function add(candidate) {
           const url = safe(candidate.url); if (!url) { note("unsafe_url"); return; }
@@ -335,17 +382,32 @@
               }
             }
           } else if (provider === "core") {
-            const key = await keyFor("core", context), headers = key ? { Authorization: "Bearer " + key } : {};
+            const key = suppliedKey === undefined ? await keyFor("core", context) : suppliedKey, headers = key ? { Authorization: "Bearer " + key } : {};
             const result = await json(API.core + "/search/works/?q=" + encodeURIComponent('doi:"' + doi.replace(/["\\]/g, "") + '"') + "&limit=5", { source: provider, headers, context });
+            const outputIDs = new Set();
             for (const record of (result.results || []).slice(0, 5)) {
               if (normalizeDOI(record.doi) !== doi) { note("doi_mismatch"); continue; }
               const url = record.downloadUrl;
               if (url) {
                 const parsed = safe(url), isAPI = parsed && new URL(parsed).origin === "https://api.core.ac.uk";
-                if (isAPI && !/^\/v3\/outputs\/\d+\/download\/?$/.test(new URL(parsed).pathname)) { note("unsafe_url"); continue; }
-                add({ url, kind: "pdf", source: "core", evidence: "core_download_url", version: "unknown", license: record.license || "", ...(isAPI ? { credentialScope: "core" } : {}) });
+                if (isAPI) {
+                  const id = /^https:\/\/api\.core\.ac\.uk\/v3\/outputs\/([1-9]\d{0,19})\/download\/?$/.exec(parsed)?.[1];
+                  if (id) outputIDs.add(id); else note("unsafe_url");
+                } else add({ url, kind: "pdf", source: "core", evidence: "core_download_url", version: "unknown", license: record.license || "" });
+              }
+              for (const address of (Array.isArray(record.outputs) ? record.outputs : []).slice(0, 8)) {
+                // These are output references supplied by a DOI-matching work.
+                // A work's own id is never an output id or a download locator.
+                const id = typeof address === "string" && /^https:\/\/api\.core\.ac\.uk\/v3\/outputs\/([1-9]\d{0,19})$/.exec(address)?.[1];
+                if (id) outputIDs.add(id); else note("unsafe_url");
               }
             }
+            if (outputIDs.size && !config.coreContentEnabled) note("content_disabled");
+            else if (outputIDs.size && !key) note("key_required");
+            else for (const outputID of [...outputIDs].slice(0, 3)) add({
+              url: API.core + "/outputs/" + outputID + "/download", kind: "pdf", source: "core", evidence: "core_output_reference",
+              doi, outputID, credentialScope: "core", requiresKey: true, fallbackOnly: true, version: "unknown",
+            });
             note("metadata_only");
           } else if (provider === "semanticScholar") {
             const key = await keyFor("semanticScholar", context), headers = key ? { "x-api-key": key } : {};
@@ -371,13 +433,76 @@
           }
         } catch (error) { if (error.name === "AbortError") throw error; note(error.code || "network_error"); }
         if (!candidates.length && !diagnostics.length) note("no_result");
-        check({ isCancelled }); return { candidates, diagnostics };
-      });
-      const results = await Promise.all(jobs); check({ isCancelled });
+        check({ isCancelled: cancelled }); return { provider, candidates: rank(candidates), diagnostics };
+      }
+      function deliver(result, { includeFallback = false, collect = true } = {}) {
+        if (collect) results.push(result);
+        if (typeof onCandidates !== "function") return Promise.resolve();
+        pendingDiagnostics.push(...result.diagnostics);
+        for (const candidate of result.candidates) {
+          if (candidate.fallbackOnly && !includeFallback || delivered.has(candidate.url) || delivered.size >= limits.maxCandidates) continue;
+          delivered.add(candidate.url); pending.push(candidate);
+        }
+        if (!draining) {
+          draining = true;
+          delivery = (async () => {
+            try {
+              while (!stopped && (pending.length || pendingDiagnostics.length)) {
+                check({ isCancelled });
+                // Re-rank at every completed download boundary. A ready PMC
+                // dataset PDF need not wait behind another provider's batch.
+                const candidate = rank(pending).shift();
+                const value = await onCandidates({ candidates: candidate ? [candidate] : [], diagnostics: pendingDiagnostics.splice(0) });
+                // The caller only accepts after download and identity checks.
+                if (value) { accepted = value; stopped = true; }
+              }
+            } catch (error) { callbackError ||= error; stopped = true; }
+            finally { draining = false; }
+          })();
+        }
+        return delivery;
+      }
+      async function job(provider, suppliedKey) {
+        try { if (!stopped) await deliver(await runProvider(provider, suppliedKey)); }
+        catch (error) { if (error.name !== "AbortError" || !stopped) throw error; }
+      }
+      async function phase(jobs) {
+        const completed = await Promise.allSettled(jobs);
+        await delivery;
+        if (callbackError) throw callbackError;
+        const failed = completed.find(result => result.status === "rejected");
+        // A committed import wins over a cancellation arriving during cleanup.
+        if (!accepted) { if (failed) throw failed.reason; check({ isCancelled }); }
+      }
+      let deferredCore = false;
+      const primary = enabled.filter(name => name !== "core" && name !== "custom").map(name => job(name));
+      if (enabled.includes("core")) primary.push((async () => {
+        try {
+          const key = await keyFor("core", { isCancelled: cancelled, deadline: now() + limits.providerTimeoutMs });
+          if (key) await job("core", key); else deferredCore = true;
+        } catch (error) {
+          if (error.name === "AbortError") { if (!stopped) throw error; }
+          else await deliver({ provider: "core", candidates: [], diagnostics: [{ source: "core", code: error.code || "key_storage", message: CODES[error.code] || CODES.key_storage }] });
+        }
+      })());
+      await phase(primary);
+      if (!stopped) await phase([
+        ...(deferredCore ? [job("core", "")] : []),
+        ...(enabled.includes("custom") ? [job("custom")] : []),
+      ]);
+      if (!stopped && typeof onCandidates === "function") {
+        // Hosted CORE PDFs can consume the provider's allowance. All ordinary
+        // source candidates must have had their chance before this fallback.
+        await deliver({ provider: "core", candidates: results.flatMap(result => result.candidates).filter(candidate => candidate.fallbackOnly), diagnostics: [] }, { includeFallback: true, collect: false });
+        if (callbackError) throw callbackError;
+        if (!accepted) check({ isCancelled });
+      }
+      // The non-streaming contract remains deterministic for existing callers.
+      results.sort((a,b) => PROVIDERS.indexOf(a.provider) - PROVIDERS.indexOf(b.provider));
       const all = [], seen = new Set();
       for (const result of results) for (const candidate of result.candidates) if (!seen.has(candidate.url)) { seen.add(candidate.url); all.push(candidate); }
-      all.sort((a,b) => Number(b.kind === "pdf") - Number(a.kind === "pdf") || Number(b.evidence === "pmc_article_dataset_pdf" || b.evidence === "openalex_cached_pdf") - Number(a.evidence === "pmc_article_dataset_pdf" || a.evidence === "openalex_cached_pdf"));
-      return { candidates: all.slice(0, limits.maxCandidates), diagnostics: results.flatMap(result => result.diagnostics) };
+      rank(all);
+      return { candidates: all.slice(0, limits.maxCandidates), diagnostics: results.flatMap(result => result.diagnostics), ...(accepted ? { accepted } : {}) };
     }
     async function prepareRequest(candidate, { isCancelled = () => false } = {}) {
       const context = { isCancelled, deadline: now() + limits.timeoutMs }, config = settings(); check(context);
@@ -385,26 +510,52 @@
       if (!config.enabled[candidate.source]) throw failure("source_not_enabled");
       if (!acceptsVersion(candidate.version, config.versionPreference)) throw failure("version_filtered");
       const url = await validateURL(candidate.url, context), parsed = new URL(url), headers = { Accept: "application/pdf,text/html;q=0.9" };
+      let fulltextVersion = version(candidate.version);
       if (candidate.credentialScope === "openalex" || parsed.origin === API.content) {
         if (candidate.source !== "openalex" || candidate.evidence !== "openalex_cached_pdf" || parsed.origin !== API.content || !/^\/works\/W\d+\.pdf$/.test(parsed.pathname) || parsed.search) throw failure("unsafe_url");
         if (!config.openalexContentEnabled) throw failure("content_disabled");
         const key = await keyFor("openalex", context); if (!key) throw failure("key_required");
+        headers.Authorization = "Bearer " + key;
+        checkEndpoint(url, candidate.source, headers);
         if (!reserveDownloadSlot || !config.openalexDailyLimit) throw failure("daily_limit");
         let reserved;
         try { reserved = await bounded(Promise.resolve().then(() => reserveDownloadSlot({ provider: "openalex", limit: config.openalexDailyLimit, key })), context); }
         catch (error) { if (error.name === "AbortError" || error.code === "timeout") throw error; throw failure("daily_limit"); }
         if (!(reserved === true || reserved?.allowed === true)) throw failure("daily_limit");
+      } else if (candidate.credentialScope === "core" || parsed.origin === "https://api.core.ac.uk") {
+        const outputID = /^\/v3\/outputs\/([1-9]\d{0,19})\/download$/.exec(parsed.pathname)?.[1];
+        if (candidate.source !== "core" || candidate.evidence !== "core_output_reference" || candidate.fallbackOnly !== true || candidate.outputID !== outputID || !outputID || parsed.origin !== "https://api.core.ac.uk" || parsed.search) throw failure("unsafe_url");
+        if (!config.coreContentEnabled) throw failure("content_disabled");
+        const key = await keyFor("core", context); if (!key) throw failure("key_required");
         headers.Authorization = "Bearer " + key;
-      } else if (candidate.credentialScope === "core") {
-        if (candidate.source !== "core" || parsed.origin !== "https://api.core.ac.uk" || !/^\/v3\/outputs\/\d+\/download\/?$/.test(parsed.pathname) || parsed.search) throw failure("unsafe_url");
-        const key = await keyFor("core", context); if (key) headers.Authorization = "Bearer " + key;
+        checkEndpoint(url, candidate.source, headers);
+        const expectedDOI = normalizeDOI(candidate.doi); if (!expectedDOI) throw failure("invalid_doi");
+        const output = await json(API.core + "/outputs/" + outputID, { source: "core", headers: { Accept: "application/json", Authorization: headers.Authorization }, context });
+        if (String(output.id) !== outputID) throw failure("invalid_response");
+        if (normalizeDOI(output.doi) !== expectedDOI) throw failure("doi_mismatch");
+        if (![undefined,null,false,0].includes(output.disabled) || ![undefined,null,false,0,"ALLOWED"].includes(output.deleted)
+          || (output.fulltextStatus ?? output.fulltext_status) !== "enabled") throw failure("no_pdf");
+        const versions = [output.version, ...(Array.isArray(output.versions) ? output.versions : [])].map(version);
+        fulltextVersion = versions.includes("published") ? "published" : versions.includes("accepted") ? "accepted" : versions.includes("submitted") ? "submitted" : "unknown";
+        // Output metadata may take time. Revoked hosted consent or stricter
+        // settings must take effect before a PDF allowance is reserved.
+        const current = settings();
+        if (!current.enabled.core) throw failure("source_not_enabled");
+        if (!current.coreContentEnabled) throw failure("content_disabled");
+        if (!acceptsVersion(fulltextVersion, current.versionPreference)) throw failure("version_filtered");
+        if (!reserveDownloadSlot || !current.coreDailyLimit) throw failure("daily_limit");
+        let reserved;
+        try { reserved = await bounded(Promise.resolve().then(() => reserveDownloadSlot({ provider: "core", limit: current.coreDailyLimit, key })), context); }
+        catch (error) { if (error.name === "AbortError" || error.code === "timeout") throw error; throw failure("daily_limit"); }
+        if (!(reserved === true || reserved?.allowed === true)) throw failure("daily_limit");
       } else if (candidate.credentialScope) throw failure("unsafe_url");
+      checkEndpoint(url, candidate.source, headers);
       check(context);
       return { url, method: "GET", responseType: "arraybuffer", anon: true, followRedirects: false, timeout: limits.timeoutMs, maxBytes: limits.maxPDFBytes,
         debug: false, logBodyLength: 0, errorDelayMax: 0, noRetryOnThrottle: true, headers, allowedRedirectOrigins: [parsed.origin],
-        source: candidate.source, credentialScope: candidate.credentialScope || null };
+        source: candidate.source, credentialScope: candidate.credentialScope || null, fulltextVersion };
     }
-    return Object.freeze({ discover, prepareRequest, validateURL, parsePage });
+    return Object.freeze({ discover, prepareRequest, validateURL, parsePage, beforeRequest, recordResponse });
   }
   global.FulltextSources = Object.freeze({ create, normalizeSettings, normalizeDOI, normalizePMCID, safePublicURL, publicIP, parseTemplates, expandTemplate, version, acceptsVersion, DEFAULT_LIMITS });
 })(globalThis);

@@ -91,6 +91,15 @@
       .replace(/\b(access[_-]?token|refresh[_-]?token|token|api[_-]?key|session(?:[_-]?id)?|password|pwd|secret|signature)\s*[:=]\s*[^\s&;,]+/gi, "$1=[redacted]");
   }
 
+  const discoveryProviders = new Set(["openalex", "pmc", "core", "semanticScholar", "custom", "open_access", "publisher", "ablesci"]);
+  function cleanDiscoveryProvider(value) { return discoveryProviders.has(value) ? value : ""; }
+  function cleanPDFHost(value) {
+    if (typeof value !== "string" || value.length > 253 || !/^[a-z0-9.-]+$/i.test(value) || !value.includes(".")) return "";
+    const host = value.toLowerCase().replace(/\.$/, "");
+    if (host.split(".").some(label => !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) return "";
+    return host;
+  }
+
   function optionalInteger(value, name) {
     if (value === undefined || value === null || value === "") return null;
     if (!Number.isSafeInteger(value) || value < 0) throw new TypeError(name + " must be a nonnegative integer");
@@ -224,6 +233,8 @@
       allowAssist: input.allowAssist === true,
       attachmentID: optionalInteger(input.attachmentID, "attachmentID"),
       source: text(input.source, 100),
+      discoveryProvider: cleanDiscoveryProvider(input.discoveryProvider),
+      pdfHost: cleanPDFHost(input.pdfHost),
       fulltextVersion: ["published", "accepted", "submitted"].includes(input.fulltextVersion) ? input.fulltextVersion : "unknown",
       sourceDiagnostics: (Array.isArray(input.sourceDiagnostics) ? input.sourceDiagnostics : []).slice(0, 24).filter(value => value && typeof value === "object").map(value => ({
         source: text(value.source, 40), code: text(value.code, 60), message: cleanError(value.message),
@@ -248,6 +259,7 @@
         if (normalizeDOI(sourceReview.doi) === task.doi) task.sourceReview = {
           sha256: sourceReview.sha256.toLowerCase(), doi: task.doi, title: text(sourceReview.title, 2000),
           source: text(sourceReview.source, 100), sourceURL: cleanOfficialURL(sourceReview.sourceURL),
+          discoveryProvider: cleanDiscoveryProvider(sourceReview.discoveryProvider), pdfHost: cleanPDFHost(sourceReview.pdfHost),
           fulltextVersion: ["published", "accepted", "submitted"].includes(sourceReview.fulltextVersion) ? sourceReview.fulltextVersion : "unknown",
         };
       } catch (_) { /* Invalid review metadata cannot discard task history. */ }

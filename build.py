@@ -21,7 +21,7 @@ EXCLUDED_PARTS = {"node_modules", "__pycache__", ".git", "dist", "test-results",
 PRIVATE_NAMES = {"logins.json", "key4.db", "tasks.json", "submission-intents.json", "credentials.json"}
 PRIVATE_SUFFIXES = {".db", ".sqlite", ".sqlite3", ".pem", ".key", ".p12", ".pfx"}
 SOURCE_DIRS = {"src", "actors", "ui", "assets", "tests", "docs", ".github", "scripts"}
-SOURCE_ROOT_FILES = {"manifest.json", "bootstrap.js", "build.py", "README.md", "LICENSE", ".gitignore", ".gitattributes", "package.json", "package-lock.json", "CHANGELOG.md", "SECURITY.md", "CONTRIBUTING.md", "PRIVACY.md", "SUPPORT.md"}
+SOURCE_ROOT_FILES = {"manifest.json", "bootstrap.js", "build.py", "README.md", "README.en.md", "README.zh-TW.md", "LICENSE", ".gitignore", ".gitattributes", "package.json", "package-lock.json", "CHANGELOG.md", "SECURITY.md", "CONTRIBUTING.md", "PRIVACY.md", "SUPPORT.md"}
 
 
 def sha256(path):

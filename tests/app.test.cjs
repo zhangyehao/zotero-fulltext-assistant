@@ -1381,11 +1381,12 @@ test('copy bridge writes the exact supplied title or DOI and reports invalid or 
 });
 
 test('verified identical assistance bytes recover local and browser history without a duplicate import or completion-date change',async()=>{
-  for(const source of ['local_file','browser_download','existing']){
-    const task=MODEL.updateTask(remoteFixture('imported'),{source,attachmentID:900,officialURL:'https://publisher.test/paper1'});
+  for(const source of ['local_file','browser_download','existing','openalex']){
+    const task=MODEL.updateTask(remoteFixture('imported'),{source,attachmentID:900,officialURL:'https://publisher.test/paper1',...(source==='openalex'?{discoveryProvider:'openalex',pdfHost:'repository.test'}:{})});
     const env=completionEnvironment({initialTasks:[task]});env.installAttachment();await env.app.start();
     const result=await env.app.verifyAssistCompletion(task.id),current=env.app.getSnapshot().tasks[0];
     assert.equal(result.completed,true,source);assert.equal(current.source,'ablesci');assert.equal(current.attachmentID,900);
+    assert.equal(current.discoveryProvider,'ablesci');assert.equal(current.pdfHost,'');
     assert.equal(current.completedAt,task.completedAt);assert.equal(current.assistReceipt.sha256,sha256(env.pdf));
     assert.equal(current.assistReceipt.messages,'done');assert.equal(env.importCount,0);assert.equal(env.posts.length,1);
     assert.equal(current.accessHint.kind==='browser_success',false,'an assistance-linked import is not publisher-access evidence');
@@ -1777,13 +1778,13 @@ test('startup parse, schema and read failures never overwrite the existing task 
 });
 
 test('new-source unknown PDF is persisted, survives restart and requires explicit identical-file confirmation',async()=>{
-  const env=environment({acquire:async()=>({needsReview:true,reviewBytes:env.pdf,source:'pmc',fulltextVersion:'accepted',sourceURL:'https://repository.test/file.pdf'}),pdfIdentity:{async inspect(){return {status:'unknown'};}}});
+  const env=environment({acquire:async()=>({needsReview:true,reviewBytes:env.pdf,source:'pmc',discoveryProvider:'pmc',pdfHost:'repository.test',fulltextVersion:'accepted',sourceURL:'https://repository.test/file.pdf'}),pdfIdentity:{async inspect(){return {status:'unknown'};}}});
   env.addItem(item(1));await env.app.start();await env.app.captureItems([item(1)],{allowAssist:true});await until(()=>env.app.getSelectedTask()?.state==='manual_review');
   const first=env.app.getSelectedTask();assert.equal(first.sourceReview.source,'pmc');assert.equal(env.importCount,0);assert.equal(env.submissions.length,0);assert.equal(env.accountCalls,0);
   const file=path.win32.join('C:\\isolated','fulltext-assistant','review-'+first.id+'.pdf');assert(env.files.has(file));await env.app.stop();
   const next=environment({initialQueue:JSON.parse(env.files.get(queuePath)),pdfIdentity:{async inspect(){return {status:'unknown'};}}});next.addItem(item(1));next.files.set(file,env.files.get(file));await next.app.start();
   assert.equal(next.app.getSnapshot().tasks[0].state,'manual_review');assert(next.app.getSnapshot().tasks[0].pendingFilename);
-  await next.app.confirmDownloadedPDF(first.id);const done=next.app.getSnapshot().tasks[0];assert.equal(done.state,'imported');assert.equal(done.source,'pmc');assert.equal(done.fulltextVersion,'accepted');assert.equal(done.sourceReview,null);assert.equal(next.submissions.length,0);assert(!next.files.has(file));await next.app.stop();
+  await next.app.confirmDownloadedPDF(first.id);const done=next.app.getSnapshot().tasks[0];assert.equal(done.state,'imported');assert.equal(done.source,'pmc');assert.equal(done.discoveryProvider,'pmc');assert.equal(done.pdfHost,'repository.test');assert.equal(done.fulltextVersion,'accepted');assert.equal(done.sourceReview,null);assert.equal(next.submissions.length,0);assert(!next.files.has(file));await next.app.stop();
 });
 
 test('review files changed after API acquisition cannot be confirmed',async()=>{
@@ -1811,4 +1812,68 @@ test('pause and shutdown during a committed import preserve its source and attac
     const transition=action==='pause'?env.app.pauseTask(id):env.app.stop();gate.resolve();await transition;await until(()=>env.app.getSelectedTask().state==='imported');
     const task=JSON.parse(env.files.get(queuePath)).tasks[0];assert.equal(task.attachmentID,900);assert.equal(task.source,'pmc');assert.equal(task.fulltextVersion,'accepted');assert.equal(env.submissions.length,0);if(action==='pause')await env.app.stop();
   }
+});
+
+
+test('network progress stays visible without rewriting the durable full history on every candidate',async()=>{
+  const gate=deferred(),env=environment({acquire:async()=>gate.promise});env.addItem(item(1));await env.app.start();
+  await env.app.captureItems([item(1)]);await until(()=>env.publisherCalls.length===1);
+  let writes=0;env.setWriteHook(async file=>{if(file===queuePath)writes++;});
+  const progress=env.publisherCalls[0].options.onProgress;
+  for(let i=0;i<100;i++)progress({message:'Candidate '+i});
+  assert.equal(env.app.getSelectedTask().state,'resolving');assert.equal(env.app.getSnapshot().tasks[0].lastError,'Candidate 99');
+  assert.equal(writes,0);
+  gate.resolve({attachmentID:900,source:'openalex',discoveryProvider:'openalex',pdfHost:'repository.test'});
+  await until(()=>env.app.getSelectedTask().state==='imported');
+  const done=env.app.getSnapshot().tasks[0];assert.equal(done.lastError,'');assert.equal(done.discoveryProvider,'openalex');assert.equal(done.pdfHost,'repository.test');
+  assert(writes>0);const persisted=MODEL.deserializeQueue(env.files.get(queuePath)).tasks[0];assert.equal(persisted.pdfHost,'repository.test');
+  await env.app.stop();
+});
+
+test('pause and account logout immediately replace transient progress even while acquisition is pending',async()=>{
+  for(const action of ['pause','logout']){
+    const gate=deferred(),env=environment({acquire:async()=>gate.promise});env.addItem(item(1));await env.app.start();
+    await env.app.captureItems([item(1)],{allowAssist:action==='logout'});await until(()=>env.publisherCalls.length===1);
+    const id=env.app.getSelectedTask().id,progress=env.publisherCalls[0].options.onProgress;
+    progress({message:'Obsolete download progress'});
+    if(action==='pause')await env.app.pauseTask(id);else await env.app.logout();
+    const paused=env.app.getSnapshot().tasks[0];assert.equal(paused.state,'paused');
+    assert.match(paused.lastError,action==='pause'?/本地已暂停/:/账号已退出或切换/);
+    progress({message:'Late cancelled progress'});assert.equal(env.app.getSnapshot().tasks[0].lastError,paused.lastError);
+    // A completed attachment still wins a cancellation race and is durable.
+    gate.resolve({attachmentID:900,source:'pmc',discoveryProvider:'pmc',pdfHost:'repository.test'});
+    await until(()=>env.app.getSelectedTask().state==='imported');
+    const done=env.app.getSnapshot().tasks[0];assert.equal(done.lastError,'');assert.equal(done.source,'pmc');assert.equal(done.pdfHost,'repository.test');
+    assert.equal(MODEL.deserializeQueue(env.files.get(queuePath)).tasks[0].attachmentID,900);await env.app.stop();
+  }
+});
+
+test('missing-PDF repair clears old provenance and a separately added local PDF cannot inherit it',async()=>{
+  const previous=MODEL.createTask({libraryID:1,itemID:1,itemKey:'ITEM1',doi:'10.1234/paper1',state:'imported',attachmentID:99,source:'openalex',discoveryProvider:'openalex',pdfHost:'old.repository.test',fulltextVersion:'accepted'});
+  const gate=deferred(),env=environment({initialTasks:[previous],acquire:async()=>gate.promise}),parent=env.addItem(item(1));
+  await env.app.start();await env.app.captureItems([parent]);await until(()=>env.publisherCalls.length===1);
+  const queued=env.app.getSnapshot().tasks[0];assert.equal(queued.id,previous.id);assert.equal(queued.source,'');assert.equal(queued.discoveryProvider,'');assert.equal(queued.pdfHost,'');assert.equal(queued.fulltextVersion,'unknown');
+  gate.resolve({state:'not_found'});await until(()=>env.app.getSelectedTask().state==='not_found');await settle();
+  parent.getAttachments=()=>[901];const file='C:\\isolated\\replacement.pdf';env.files.set(file,env.pdf);
+  env.addItem({id:901,parentID:1,libraryID:1,attachmentContentType:'application/pdf',async getFilePathAsync(){return file;}});
+  await env.app.importLocalPDF(previous.id);const done=env.app.getSnapshot().tasks[0];
+  assert.equal(done.source,'existing');assert.equal(done.attachmentID,901);assert.equal(done.discoveryProvider,'');assert.equal(done.pdfHost,'');assert.equal(done.fulltextVersion,'unknown');
+  assert.equal(env.importCount,0);await env.app.stop();
+});
+
+test('reselecting the same known assistance attachment preserves its receipt and recorded provenance',async()=>{
+  const initial=importedReceiptFixture(),at=initial.assistReceipt.verifiedAt;
+  const task=MODEL.updateTask(initial,{discoveryProvider:'ablesci',pdfHost:'download.test',assistReceipt:{...initial.assistReceipt,adoption:'accepted',messages:'done',acceptedAt:at,readAt:at}});
+  const env=completionEnvironment({initialTasks:[task]});env.installAttachment();await env.app.start();
+  await env.app.importLocalPDF(task.id);const done=env.app.getSnapshot().tasks[0];
+  assert.equal(done.source,'ablesci');assert.equal(done.discoveryProvider,'ablesci');assert.equal(done.pdfHost,'download.test');assert.deepEqual({...done.assistReceipt},task.assistReceipt);
+  assert.equal(done.completedAt,task.completedAt);assert.equal(env.importCount,0);assert.equal(env.downloadCalls.length,0);assert.equal(env.posts.length,0);
+  assert.equal(MODEL.deserializeQueue(env.files.get(queuePath)).tasks[0].assistReceipt.messages,'done');await env.app.stop();
+});
+
+test('a PDF added during manual import is recorded as existing without attributing the unused candidate',async()=>{
+  const file='C:\\isolated\\selected.pdf',task=localFixture(),env=completionEnvironment({initialTasks:[task],pickPDF:async()=>file});env.files.set(file,env.pdf);
+  const write=env.IOUtils.write;env.IOUtils.write=async(...args)=>{await write(...args);env.installAttachment({id:950});};
+  await env.app.start();await env.app.importLocalPDF(task.id);const done=env.app.getSnapshot().tasks[0];
+  assert.equal(done.source,'existing');assert.equal(done.attachmentID,950);assert.equal(done.discoveryProvider,'');assert.equal(done.pdfHost,'');assert.equal(done.assistReceipt,null);assert.equal(env.importCount,0);await env.app.stop();
 });

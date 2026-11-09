@@ -5,7 +5,7 @@
     let chain = Promise.resolve();
     function reserve({ provider, limit, key }) {
       const operation = chain.catch(() => {}).then(async () => {
-        if (provider !== "openalex" || typeof key !== "string" || !key || !Number.isInteger(limit) || limit < 1 || limit > 1000) return false;
+        if (!["openalex", "core"].includes(provider) || typeof key !== "string" || !key || !Number.isInteger(limit) || limit < 1 || limit > 1000) return false;
         const day = now().toISOString().slice(0, 10), id = await digest(new TextEncoder().encode(provider + ":" + key));
         let state = { schemaVersion: 1, days: {} };
         try {

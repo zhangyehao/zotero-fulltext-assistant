@@ -6,8 +6,10 @@
   function mount(root) {
     if (!root || root.dataset.fulltextMounted === "true") return;
     const app = window.Zotero?.FulltextAssistant || (typeof Zotero !== "undefined" && Zotero.FulltextAssistant);
-    const $ = id => root.querySelector("#" + id);
-    const localize = () => app?.localize?.(root);
+    const staticNodes = new Map([...root.querySelectorAll("[id]")].map(node => [node.id, node]));
+    const $ = id => staticNodes.get(id) || root.querySelector("#" + id);
+    let renderDepth = 0;
+    const localize = () => { if (!renderDepth) app?.localize?.(root); };
     if (!app || typeof app.getSnapshot !== "function") {
       $("fta-pref-status").textContent = "全文助手尚未初始化。请重启 Zotero 后再试。";
       $("fta-pref-status").dataset.error = "true";
@@ -26,6 +28,12 @@
     let activePage = "tasks";
     let seenCaptureStamp = "";
     let taskFilter = "unfinished";
+    let taskQuery = "", messageQuery = "", messageFilter = "all";
+    let taskPage = 0, messagePage = 0, taskPageSize = 25, messagePageSize = 25;
+    let visibleTaskPage = [], visibleTaskMatches = [];
+    const taskRows = new Map(), messageRows = new Map();
+    let requestTargetsKey = "", directoriesKey = "", spendingKey = "";
+    let searchTimer = null;
     let requestTarget = "";
     let bindingState = null;
     let currentBatchIDs = new Set();
@@ -53,7 +61,7 @@
     const sourceLabels = { publisher: "出版社网页", rendered_publisher: "出版社网页", open_access: "开放获取", existing: "已有附件", ablesci: "科研通", local_file: "本地 PDF", edge_browser: "Edge 浏览器", browser_download: "浏览器下载", openalex: "OpenAlex", pmc: "PubMed Central", core: "CORE", semanticScholar: "Semantic Scholar", custom: "自定义来源" };
     const sourceProviderIDs = ["publisher", "openAccess", "openalex", "pmc", "core", "semanticScholar", "custom"];
     const sourceKeyIDs = ["openalex", "core", "semanticScholar"];
-    const sourceSettingIDs = [...sourceProviderIDs.map(id => "fta-pref-source-" + id), "fta-pref-source-version", "fta-pref-source-templates", "fta-pref-openalex-content", "fta-pref-openalex-limit"];
+    const sourceSettingIDs = [...sourceProviderIDs.map(id => "fta-pref-source-" + id), "fta-pref-source-version", "fta-pref-source-templates", "fta-pref-openalex-content", "fta-pref-openalex-limit", "fta-pref-core-content", "fta-pref-core-limit"];
     const browserNotes = {
       manual_waiting: "已开始检查下载文件夹。请在默认浏览器完成验证并点击 PDF 下载，保存到配置文件夹；明确匹配的新 PDF 会自动添加到原文献。",
       manual_review: "无法自动确认所选 PDF 的论文身份。请先预览并核对标题、作者和 DOI，再明确确认。",
@@ -72,6 +80,39 @@
     const isAssistComplete = task => Boolean(task.assistReceipt && task.assistReceipt.adoption === "accepted" && task.assistReceipt.messages === "done" && !task.assistReceipt.needsReconcile);
     const needsAssistCompletion = task => isAcquired(task) && Boolean(task.assistReceipt) && !isAssistComplete(task);
     const currentTasks = () => Array.isArray(snapshot.tasks) ? snapshot.tasks : [];
+    const searchTerms = value => String(value || "").normalize("NFKC").trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+    const includesTerms = (terms, values) => { const text = values.filter(Boolean).join(" ").normalize("NFKC").toLocaleLowerCase();return terms.every(term => text.includes(term)); };
+    const matchesTaskSearch = task => includesTerms(searchTerms(taskQuery), [titleText(task.title), task.doi, task.requestID, task.discoveryProvider, task.pdfHost]);
+    function reconcileRows(list, rows) {
+      // Move only changed rows. Unchanged controls retain focus, selection and
+      // scroll anchoring while background progress updates other records.
+      let next = list.firstChild;
+      for (const row of rows) {
+        if (row === next) next = next.nextSibling;
+        else list.insertBefore(row, next);
+      }
+      while (next) { const unused = next;next = next.nextSibling;unused.remove(); }
+    }
+    function pagination(kind, count, page, size, total = count) {
+      const pages = Math.max(1, Math.ceil(count / size));
+      page = Math.max(0, Math.min(page, pages - 1));
+      $("fta-pref-" + kind + "-previous").disabled = busy || page === 0;
+      $("fta-pref-" + kind + "-next").disabled = busy || page + 1 >= pages;
+      $("fta-pref-" + kind + "-page-size").disabled = busy;
+      $("fta-pref-" + kind + "-pagination").hidden = !count;
+      $("fta-pref-" + kind + "-page-status").textContent = "第 " + (page + 1) + "/" + pages + " 页 · " + (count ? page * size + 1 : 0) + "–" + Math.min(count, (page + 1) * size) + " / " + count + " 项";
+      $("fta-pref-" + kind + "-page-status").title = "匹配 " + count + " 项，共 " + total + " 项；分页不会删除记录。";
+      return page;
+    }
+    function sourceText(task) {
+      const provider = task.discoveryProvider === "open_access" ? "Zotero 开放获取" : task.discoveryProvider === "pmc" ? "PMC / Europe PMC" : sourceLabels[task.discoveryProvider] || sourceLabels[task.source] || "未记录";
+      const result = [(task.discoveryProvider ? "发现来源：" : "来源：") + provider];
+      // pdfHost is supplied only after a real PDF response. Never infer it from
+      // the DOI/landing URL or display URL credentials, paths or query strings.
+      const host = String(task.pdfHost || "").toLowerCase();
+      if (/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(host) || /^\[[0-9a-f:]{2,45}\]$/.test(host)) result.push("PDF：" + host);
+      return result;
+    }
     const currentPoints = () => {
       const value = String($("fta-pref-points").value || "").trim();
       const points = /^[1-9]\d*$/.test(value) ? Number(value) : NaN;
@@ -113,6 +154,7 @@
       if (destroyed || !tab) return;
       activePage = page;
       renderNavigation();
+      renderActivePage();
       if (focus) {
         tab.focus();
         tab.scrollIntoView?.({ block: "nearest", inline: "nearest" });
@@ -206,9 +248,12 @@
         $("fta-pref-source-templates").value = Array.isArray(settings.customTemplates) ? settings.customTemplates.join("\n") : "";
         $("fta-pref-openalex-content").checked = settings.openalexContentEnabled === true;
         $("fta-pref-openalex-limit").value = String(settings.openalexDailyLimit ?? 100);
+        $("fta-pref-core-content").checked = settings.coreContentEnabled === true;
+        $("fta-pref-core-limit").value = String(settings.coreDailyLimit ?? 20);
       }
       for (const id of sourceSettingIDs) $(id).disabled = busy || typeof app.saveSourceSettings !== "function";
       $("fta-pref-openalex-limit").disabled = busy || typeof app.saveSourceSettings !== "function" || !$("fta-pref-openalex-content").checked;
+      $("fta-pref-core-limit").disabled = busy || typeof app.saveSourceSettings !== "function" || !$("fta-pref-core-content").checked;
       $("fta-pref-save-sources").disabled = busy || typeof app.saveSourceSettings !== "function";
       for (const provider of sourceKeyIDs) {
         const saved = snapshot.sourceCredentials?.[provider] === true;
@@ -225,6 +270,8 @@
       const limitText = String($("fta-pref-openalex-limit").value || "").trim();
       const limit = /^[1-9]\d*$/.test(limitText) ? Number(limitText) : NaN;
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new Error("OpenAlex 每日下载上限必须是 1–1000 的整数。");
+      const coreLimit = Number($("fta-pref-core-limit").value);
+      if (!Number.isSafeInteger(coreLimit) || coreLimit < 1 || coreLimit > 1000) throw new Error("CORE 每日直供下载上限必须是 1–1000 的整数。");
       const versionPreference = $("fta-pref-source-version").value;
       if (!["published", "accepted", "any"].includes(versionPreference)) throw new Error("请选择有效的全文版本偏好。");
       const customTemplates = [...new Set(String($("fta-pref-source-templates").value || "").split(/[;\r\n]+/).map(value => value.trim()).filter(Boolean))];
@@ -236,7 +283,7 @@
       const enabled = {};
       for (const provider of sourceProviderIDs) enabled[provider] = $("fta-pref-source-" + provider).checked === true;
       if (enabled.custom && !customTemplates.length) throw new Error("请先填写自定义 DOI 网址模板，或关闭此来源。");
-      return { enabled, versionPreference, customTemplates, openalexContentEnabled: $("fta-pref-openalex-content").checked === true, openalexDailyLimit: limit };
+      return { enabled, versionPreference, customTemplates, openalexContentEnabled: $("fta-pref-openalex-content").checked === true, openalexDailyLimit: limit, coreContentEnabled: $("fta-pref-core-content").checked === true, coreDailyLimit: coreLimit };
     }
     function renderUpdater() {
       const info = snapshot.updateStatus || {}, state = info.state || "idle";
@@ -270,6 +317,7 @@
       const stamp = summary?.id ?? summary?.at ?? "";
       if (stamp && stamp !== seenCaptureStamp) {
         seenCaptureStamp = stamp;
+        taskPage = 0;
         selectPage("tasks");
       }
       const box = $("fta-pref-batch-summary");
@@ -281,6 +329,9 @@
       box.dataset.tone = Number(summary?.failed) > 0 ? "warning" : "";
     }
     function renderDirectories() {
+      const key = JSON.stringify([snapshot.settings?.downloadDirectories, snapshot.settings?.downloadDirectory, busy, typeof app.removeDownloadDirectory, snapshot.settings?.language]);
+      if (directoriesKey === key) return;
+      directoriesKey = key;
       const list = $("fta-pref-download-directories");
       list.replaceChildren();
       const values = Array.isArray(snapshot.settings?.downloadDirectories) ? snapshot.settings.downloadDirectories : snapshot.settings?.downloadDirectory ? [snapshot.settings.downloadDirectory] : [];
@@ -296,14 +347,16 @@
       }
     }
     function renderSelection() {
-      const eligible = currentTasks().filter(task => matchesFilter(task, taskFilter) && canAssist(task));
+      const eligible = visibleTaskMatches.filter(canAssist);
       $("fta-pref-bulk-actions").hidden = !eligible.length;
       $("fta-pref-bulk-note").hidden = !eligible.length;
       const selected = eligible.filter(task => selectedTasks.has(task.id));
       const all = $("fta-pref-select-tasks");
       all.disabled = busy || !eligible.length || typeof app.requestAssist !== "function";
-      all.checked = eligible.length > 0 && selected.length === eligible.length;
-      all.indeterminate = selected.length > 0 && selected.length < eligible.length;
+      const pageEligible = visibleTaskPage.filter(canAssist), pageSelected = pageEligible.filter(task => selectedTasks.has(task.id));
+      all.disabled ||= !pageEligible.length;
+      all.checked = pageEligible.length > 0 && pageSelected.length === pageEligible.length;
+      all.indeterminate = pageSelected.length > 0 && pageSelected.length < pageEligible.length;
       const action = $("fta-pref-bulk-assist");
       const points = currentPoints();
       action.disabled = busy || !selected.length || points === null || typeof app.requestAssist !== "function" || typeof app.saveSettings !== "function";
@@ -313,15 +366,25 @@
       localize();
     }
     function renderRequestTargets() {
+      if (activePage !== "tasks") return;
       const available = currentTasks().filter(task => task.itemID && !task.requestID && !task.requestURL);
       if (requestTarget && !available.some(task => task.id === requestTarget)) requestTarget = "";
+      const terms = searchTerms($("fta-pref-request-search").value);
+      const matching = terms.length ? available.filter(task => includesTerms(terms, [titleText(task.title), task.doi])) : available;
+      const offered = matching.slice(0, 50);
+      const selected = available.find(task => task.id === requestTarget);
+      if (selected && !offered.some(task => task.id === selected.id)) offered.unshift(selected);
+      $("fta-pref-request-search-note").textContent = matching.length > 50 ? "匹配 " + matching.length + " 项，先显示 50 项；请输入标题或 DOI 缩小范围。" : "匹配 " + matching.length + " 项。";
+      const key = JSON.stringify([offered.map(task => [task.id, task.title, task.doi]), requestTarget, snapshot.settings?.language]);
+      if (requestTargetsKey === key) return;
+      requestTargetsKey = key;
       const select = $("fta-pref-request-target");
       select.replaceChildren();
       const unbound = make("option", "", "只跟踪，不关联文献");
       unbound.value = "";
       unbound.selected = !requestTarget;
       select.append(unbound);
-      for (const task of available) {
+      for (const task of offered) {
         const name = titleText(task.title) || task.doi || "未命名文献";
         const option = make("option", "", name + (task.doi && task.doi !== name ? " — " + task.doi : ""));
         option.value = task.id;
@@ -396,10 +459,13 @@
       row.append(panel);
     }
     function renderTasks() {
+      if (activePage !== "tasks") return;
       const tasks = currentTasks();
       const scopeTasks = scopedTasks(taskFilter);
       const queuePositions = new Map(tasks.filter(task => task.state === "queued").map((task, index) => [task.id, index + 1]));
-      const visible = tasks.filter(task => matchesFilter(task, taskFilter));
+      const matching = tasks.filter(task => matchesFilter(task, taskFilter));
+      const terms = searchTerms(taskQuery);
+      const visible = terms.length ? matching.filter(task => includesTerms(terms, [titleText(task.title), task.doi, task.requestID, task.discoveryProvider, task.pdfHost])) : matching;
       if (taskFilter === "success" || taskFilter === "all") visible.sort((a, b) => String(b.completedAt || b.importedAt || b.updatedAt || "").localeCompare(String(a.completedAt || a.importedAt || a.updatedAt || "")));
       if (bindingState && !visible.some(task => task.id === bindingState.taskId && task.state === "available" && !task.itemID)) bindingState = null;
       const eligibleIDs = new Set(visible.filter(canAssist).map(task => task.id));
@@ -434,13 +500,17 @@
       for (const id of expandedDownloadDiagnostics) if (!taskIDs.has(id)) expandedDownloadDiagnostics.delete(id);
       for (const id of expandedDOIChecks) if (!taskIDs.has(id)) expandedDOIChecks.delete(id);
       for (const id of expandedSourceDetails) if (!taskIDs.has(id)) expandedSourceDetails.delete(id);
-      list.replaceChildren();
+      taskPage = pagination("task", visible.length, taskPage, taskPageSize, matching.length);
+      visibleTaskMatches = visible;
+      visibleTaskPage = visible.slice(taskPage * taskPageSize, (taskPage + 1) * taskPageSize);
+      const nextRows = [], nextIDs = new Set(visibleTaskPage.map(task => String(task.id)));
+      for (const id of taskRows.keys()) if (!nextIDs.has(id)) taskRows.delete(id);
       $("fta-pref-task-count").textContent = String(scopeTasks.length);
       $("fta-pref-task-scope").textContent = isBatchFilter(taskFilter)
         ? snapshot.currentBatch?.id ? "当前批次 · " + dateText(snapshot.currentBatch.createdAt, true) + " · 仅统计最近一次批量获取所涉及的任务。" : "尚未记录当前批次。旧任务仍保留在“未完成”和“全部历史”中；从文库再次批量获取后可查看本批次分类。"
         : taskFilter === "all" ? "全部历史 · 跨批次的已获取记录，按完成时间从新到旧排列。" : "未完成 · 跨批次保留所有未完成任务，包括已入库但采纳或对应消息尚未完成的任务。";
       $("fta-pref-task-empty").hidden = visible.length > 0;
-      $("fta-pref-task-empty").textContent = tasks.length ? taskFilter === "unfinished" ? "当前没有未完成任务。跨批次的已获取记录可在“全部历史”中查看。" : isBatchFilter(taskFilter) && !snapshot.currentBatch?.id ? "从文库发起一次批量获取后，这里会显示当前批次的任务。" : "当前筛选没有任务。" : "还没有任务。在文库多选文献，右击“全文助手 → 批量获取全文”开始批量获取。";
+      $("fta-pref-task-empty").textContent = terms.length && !visible.length ? "没有匹配的任务。试试其他标题、DOI 或求助编号。" : tasks.length ? taskFilter === "unfinished" ? "当前没有未完成任务。跨批次的已获取记录可在“全部历史”中查看。" : isBatchFilter(taskFilter) && !snapshot.currentBatch?.id ? "从文库发起一次批量获取后，这里会显示当前批次的任务。" : "当前筛选没有任务。" : "还没有任务。在文库多选文献，右击“全文助手 → 批量获取全文”开始批量获取。";
       list.hidden = !visible.length;
       const summary = ["显示 " + visible.length + "/" + scopeTasks.length + " 项"];
       const acquiring = scopeTasks.filter(task => ["finding", "searching", "resolving", "downloading", "validating"].includes(task.state)).length;
@@ -458,7 +528,14 @@
         node.setAttribute("aria-pressed", String(filter === taskFilter));
         node.disabled = busy;
       }
-      for (const task of visible) {
+      const capabilities = Object.keys(app).filter(key => typeof app[key] === "function").sort().join(",");
+      const common = [busy, currentPoints(), snapshot.settings?.acceptSiteMinimum, snapshot.settings?.language, capabilities];
+      for (const task of visibleTaskPage) {
+        const id = String(task.id);
+        const binding = bindingState?.taskId === task.id ? { taskId: bindingState.taskId, candidates: bindingState.candidates } : null;
+        const key = JSON.stringify([task, common, queuePositions.get(task.id), selectedTasks.has(task.id), binding]);
+        const cached = taskRows.get(id);
+        if (cached?.key === key) { nextRows.push(cached.node);continue; }
         const row = make("article", "fta-row");
         row.dataset.taskId = String(task.id);
         const main = make("div", "fta-row-main");
@@ -499,7 +576,7 @@
         const pointsLabel = hasRequest || task.source === "ablesci" ? knownPoints ? task.assistReceipt?.adoption === "accepted" ? "已支出 " + task.requestedPoints + " 积分" : "悬赏 " + task.requestedPoints + " 积分（待采纳）" : "积分待核实" : "";
         const fulltextVersionLabels = { published: "全文版本：出版版", accepted: "全文版本：作者接受稿", submitted: "全文版本：预印本", unknown: "全文版本：版本未核实" };
         const versionLabel = acquired && (task.fulltextVersion || ["openalex", "pmc", "core", "semanticScholar", "custom"].includes(task.source)) ? fulltextVersionLabels[task.fulltextVersion] || fulltextVersionLabels.unknown : "";
-        const meta = (acquired ? [completedDate ? "完成 " + completedDate : "完成日期未记录", "来源：" + (sourceLabels[task.source] || "未记录"), versionLabel, task.source === "ablesci" ? pointsLabel : "", route, task.doi] : [task.doi, task.requestID ? "求助 " + task.requestID : "", pointsLabel, route ? "来源：科研通" : "", route, task.lastCheckedAt ? "最近检查 " + dateText(task.lastCheckedAt) : ""]).filter(Boolean);
+        const meta = (acquired ? [completedDate ? "完成 " + completedDate : "完成日期未记录", ...sourceText(task), versionLabel, task.source === "ablesci" ? pointsLabel : "", route, task.doi] : [task.doi, task.requestID ? "求助 " + task.requestID : "", pointsLabel, route ? "来源：科研通" : "", route, task.lastCheckedAt ? "最近检查 " + dateText(task.lastCheckedAt) : ""]).filter(Boolean);
         if (meta.length) {
           const metadata = make("div", "fta-row-meta");
           meta.forEach((part, index) => { if (index) metadata.append(document.createTextNode(" · "));metadata.append(part === task.doi ? copyControl(task.doi, "复制 DOI", "fta-doi-copy") : make("span", "", part)); });
@@ -601,8 +678,10 @@
         renderSourceDiagnostics(task, row);
         if (!acquired) renderDownloadDetails(task, row);
         if (unboundAvailable) renderBinding(task, row);
-        list.append(row);
+        taskRows.set(id, { key, node: row });
+        nextRows.push(row);
       }
+      reconcileRows(list, nextRows);
       renderSelection();
     }
     function renderSourceDiagnostics(task, row) {
@@ -611,12 +690,12 @@
       const messages = {
         invalid_doi: "需要有效的 DOI 或 PMCID。", no_result: "此来源未返回可下载候选。", no_pdf: "记录中没有可用 PDF。",
         metadata_only: "此来源的 API 结果仅用于发现链接，仍需实际下载并核验 PDF。", key_required: "此操作需要先配置 API 密钥。", content_disabled: "未启用此来源的内容下载。",
-        daily_limit: "本机缓存下载计数不可用或已达到每日上限。", version_filtered: "候选版本不符合当前偏好，已跳过。", unknown_version: "此来源未说明全文版本，版本待核实。",
+        daily_limit: "本机下载计数不可用或已达到每日上限。", version_filtered: "候选版本不符合当前偏好，已跳过。", unknown_version: "此来源未说明全文版本，版本待核实。",
         doi_mismatch: "来源记录的 DOI 与目标文献不一致。", unsafe_url: "网址不是受支持的公共 HTTPS 地址，已拒绝。", dns_unavailable: "无法核实目标是否为公共网络地址。",
         private_address: "目标指向私有或保留地址，已拒绝。", invalid_template: "模板必须是公共 HTTPS 网址，{doi} 不能位于主机名中。", template_limit: "仅使用前 8 个不同的模板。",
-        human_verification: "此页面需要人工验证，请在浏览器完成。", login_required: "此来源需要网页登录。", response_too_large: "来源响应超过本次检查的大小限制。",
+        human_verification: "此页面需要人工验证，请在浏览器完成。", login_required: "此来源要求身份验证，或当前请求权限不足。", response_too_large: "来源响应超过本次检查的大小限制。",
         invalid_response: "来源响应格式无法识别。", unexpected_redirect: "跳转目标尚未核实，已停止。", rate_limited: "此来源要求稍后重试，本次已暂停查询。",
-        timeout: "此来源查询或下载超时，可稍后重试。", network_error: "此来源网络请求失败，可稍后重试。", disabled: "此来源已关闭。", key_storage: "无法读取已配置的 API 密钥。",
+        timeout: "此来源查询或下载超时，可稍后重试。", network_error: "此来源网络请求失败，可稍后重试。", disabled: "此来源已关闭。", key_storage: "无法读取已配置的 API 密钥。", endpoint_backoff: "此端点因访问限制或限流暂缓重复请求，其他来源仍会继续。",
         source_not_enabled: "此候选的来源已关闭，未继续下载。", untrusted_candidate: "无法确认候选来源，已停止下载。", credentials_in_url: "网址包含凭据，已拒绝。", retracted: "此来源将该版本标记为已撤稿，已跳过。",
         pdf_mismatch: "PDF 的 DOI 或标题与目标论文冲突，已拒绝自动入库。", pdf_unknown: "已取得 PDF，但 DOI 和标题证据不足，需要预览核对。",
         download_restricted: "此来源下载受限，可尝试其他来源或浏览器下载。", download_failed: "此来源下载失败，未取得可用全文。"
@@ -743,9 +822,13 @@
       $("fta-pref-checkin-message").dataset.error = String(Boolean(checkInStartupError) || info.state === "error");
     }
     function renderSpending() {
+      if (activePage !== "account") return;
       const time = value => { const parsed = Date.parse(value || "");return Number.isFinite(parsed) ? parsed : 0; };
       const records = currentTasks().filter(task => isAcquired(task) && task.source === "ablesci" && task.requestID && task.assistReceipt?.adoption === "accepted" && (!task.assistReceipt.requestID || task.assistReceipt.requestID === task.requestID))
         .sort((a, b) => time(b.assistReceipt.acceptedAt) - time(a.assistReceipt.acceptedAt) || time(b.updatedAt) - time(a.updatedAt) || String(a.id).localeCompare(String(b.id)));
+      const key = JSON.stringify([records.map(task => [task.id, task.requestID, task.title, task.doi, task.requestedPoints, task.pointsVerified, task.assistReceipt?.acceptedAt]), snapshot.settings?.language]);
+      if (spendingKey === key) return;
+      spendingKey = key;
       // A website request ID represents one settlement, including when the same
       // request is retained in multiple local item/account histories.
       const requests = new Map();
@@ -771,19 +854,29 @@
       }
     }
     function renderMessages() {
+      if (activePage !== "messages") return;
       const messages = Array.isArray(snapshot.messages) ? snapshot.messages : [];
+      const terms = searchTerms(messageQuery);
+      const matching = messages.filter(message => (messageFilter === "all" || messageFilter === "read" && message.read === true || messageFilter === "unread" && message.read !== true) && includesTerms(terms, [message.title, message.text, message.summary]));
       const info = snapshot.messagesStatus || {};
       const list = $("fta-pref-message-list");
-      list.replaceChildren();
-      $("fta-pref-message-empty").hidden = messages.length > 0;
-      $("fta-pref-message-empty").textContent = info.state === "loaded" ? "暂无消息。" : "尚未读取科研通消息。";
+      messagePage = pagination("message", matching.length, messagePage, messagePageSize, messages.length);
+      const pageMessages = matching.slice(messagePage * messagePageSize, (messagePage + 1) * messagePageSize);
+      const nextRows = [], nextIDs = new Set(pageMessages.map(message => String(message.id)));
+      for (const id of messageRows.keys()) if (!nextIDs.has(id)) messageRows.delete(id);
+      $("fta-pref-message-empty").hidden = matching.length > 0;
+      $("fta-pref-message-empty").textContent = messages.length ? "没有匹配的消息。请调整搜索词或筛选条件。" : info.state === "loaded" ? "暂无消息。" : "尚未读取科研通消息。";
       const lastRefreshed = dateText(info.lastCheckedAt);
       $("fta-pref-messages-refreshed").textContent = lastRefreshed ? "最近刷新 " + lastRefreshed : "尚未刷新";
       $("fta-pref-messages-state").textContent = String(info.message || (info.state === "loading" ? "正在刷新消息…" : info.state === "error" ? "消息刷新未完成，请稍后再试。" : info.state === "loaded" || lastRefreshed ? "" : "登录后可查看科研通应助提醒。"));
       $("fta-pref-messages-state").hidden = !$("fta-pref-messages-state").textContent;
       $("fta-pref-messages-state").dataset.error = String(info.state === "error");
-      for (const message of messages.slice(0, 30)) {
+      for (const message of pageMessages) {
+        const id = String(message.id), key = JSON.stringify([message, busy, snapshot.settings?.language, typeof app.openMessage]);
+        const cached = messageRows.get(id);
+        if (cached?.key === key) { nextRows.push(cached.node);continue; }
         const row = make("article", "fta-row");
+        row.dataset.messageId = id;
         const main = make("div", "fta-row-main");
         main.append(message.title ? raw(make("div", "fta-row-title", message.title)) : make("div", "fta-row-title", "科研通消息"));
         main.append(make("span", "fta-row-meta", dateText(message.createdAt)));
@@ -793,10 +886,18 @@
         const actions = make("div", "fta-row-actions");
         actions.append(button("查看", "openMessage", [message.id]));
         row.append(actions);
-        list.append(row);
+        messageRows.set(id, { key, node: row });nextRows.push(row);
       }
+      reconcileRows(list, nextRows);
+      localize();
     }
-    function render() {
+    function renderActivePage() {
+      if (activePage === "tasks") { renderTasks();renderRequestTargets(); }
+      else if (activePage === "messages") renderMessages();
+      else if (activePage === "account") renderSpending();
+      localize();
+    }
+    function renderSnapshot() {
       if (destroyed) return;
       snapshot = app.getSnapshot() || {};
       currentBatchIDs = new Set(Array.isArray(snapshot.currentBatch?.taskIDs) ? snapshot.currentBatch.taskIDs : []);
@@ -831,18 +932,21 @@
       renderDirectories();
       renderSourceSettings();
       renderUpdater();
-      renderTasks();
       renderCheckIn();
-      renderSpending();
-      renderRequestTargets();
-      renderMessages();
+      renderActivePage();
       const methodButtons = { "fta-pref-save-login": "saveCredentialsAndLogin", "fta-pref-web-login": "openLogin", "fta-pref-logout": "logout", "fta-pref-save-settings": "saveSettings", "fta-pref-add-request": "addExistingRequest", "fta-pref-refresh-messages": "refreshMessages", "fta-pref-choose-directory": "chooseDownloadDirectory", "fta-pref-detect-directories": "detectDownloadDirectories" };
       for (const [id, method] of Object.entries(methodButtons)) $(id).disabled = busy || typeof app[method] !== "function";
-      for (const id of ["fta-pref-username", "fta-pref-password", "fta-pref-points", "fta-pref-poll", "fta-pref-auto-download", "fta-pref-site-minimum", "fta-pref-checkin-reminder", "fta-pref-request-url", "fta-pref-request-target"]) $(id).disabled = busy;
+      for (const id of ["fta-pref-username", "fta-pref-password", "fta-pref-points", "fta-pref-poll", "fta-pref-auto-download", "fta-pref-site-minimum", "fta-pref-checkin-reminder", "fta-pref-request-url", "fta-pref-request-target", "fta-pref-request-search", "fta-pref-message-filter"]) $(id).disabled = busy;
       $("fta-pref-checkin-refresh").disabled = busy || snapshot.checkIn?.state === "checking" || snapshot.checkIn?.state === "signed_out" || !["authenticated", "logged_in"].includes(snapshot.session?.status) || typeof app.refreshCheckIn !== "function";
       $("fta-pref-checkin-open").disabled = busy || typeof app.openCheckIn !== "function";
       $("fta-pref-language").disabled = busy || typeof app.saveSettings !== "function";
       localize();
+    }
+    function render() {
+      if (destroyed) return;
+      renderDepth++;
+      try { renderSnapshot(); }
+      finally { renderDepth--;localize(); }
     }
     async function run(action, message = "", sensitive = false, options = {}) {
       if (busy || destroyed) return;
@@ -1005,25 +1109,51 @@
       run(async () => { await app.addExistingRequest(url, target); $("fta-pref-request-url").value = ""; requestTarget = ""; }, target ? "已将已有求助关联到所选文献，未发布新求助。" : "已添加求助跟踪，未关联文献，也未发布新求助。");
     });
     on($("fta-pref-request-target"), "change", () => { requestTarget = $("fta-pref-request-target").value || ""; });
+    on($("fta-pref-request-search"), "input", () => { renderRequestTargets();localize(); });
     on($("fta-pref-refresh-messages"), "click", () => run(() => app.refreshMessages(), "消息已刷新。"));
+    for (const kind of ["task", "message"]) {
+      on($("fta-pref-" + kind + "-search"), "input", () => {
+        if (kind === "task") { taskQuery = $("fta-pref-task-search").value;taskPage = 0;selectedTasks.clear();bindingState = null; }
+        else { messageQuery = $("fta-pref-message-search").value;messagePage = 0; }
+        if (searchTimer !== null) window.clearTimeout(searchTimer);
+        searchTimer = window.setTimeout(() => { searchTimer = null;if (!destroyed) renderActivePage(); }, 120);
+      });
+      on($("fta-pref-" + kind + "-page-size"), "change", () => {
+        if (busy) return;
+        const size = $("fta-pref-" + kind + "-page-size").value === "50" ? 50 : 25;
+        if (kind === "task") { taskPageSize = size;taskPage = 0; } else { messagePageSize = size;messagePage = 0; }
+        renderActivePage();
+      });
+      for (const [direction, step] of [["previous", -1], ["next", 1]]) on($("fta-pref-" + kind + "-" + direction), "click", () => {
+        if (busy || $("fta-pref-" + kind + "-" + direction).disabled) return;
+        if (kind === "task") { taskPage += step;bindingState = null; } else messagePage += step;
+        renderActivePage();
+      });
+    }
+    on($("fta-pref-message-filter"), "change", () => {
+      if (busy) return;
+      messageFilter = ["all", "read", "unread"].includes($("fta-pref-message-filter").value) ? $("fta-pref-message-filter").value : "all";
+      messagePage = 0;renderActivePage();
+    });
     for (const node of $("fta-pref-task-filters").querySelectorAll("button")) on(node, "click", () => {
       if (busy) return;
       taskFilter = node.dataset.filter;
+      taskPage = 0;
       selectedTasks.clear();
       bindingState = null;
-      renderTasks();
+      selectPage("tasks");
     });
     on($("fta-pref-select-tasks"), "change", () => {
       if (busy || $("fta-pref-select-tasks").disabled) return;
       const checked = $("fta-pref-select-tasks").checked;
-      for (const task of currentTasks().filter(task => matchesFilter(task, taskFilter) && canAssist(task))) {
+      for (const task of visibleTaskPage.filter(canAssist)) {
         if (checked) selectedTasks.add(task.id); else selectedTasks.delete(task.id);
       }
       renderTasks();
     });
     on($("fta-pref-bulk-assist"), "click", () => {
       if (busy || $("fta-pref-bulk-assist").disabled) return;
-      const ids = currentTasks().filter(task => matchesFilter(task, taskFilter) && canAssist(task) && selectedTasks.has(task.id)).map(task => task.id);
+      const ids = currentTasks().filter(task => matchesFilter(task, taskFilter) && matchesTaskSearch(task) && canAssist(task) && selectedTasks.has(task.id)).map(task => task.id);
       if (!ids.length || typeof app.requestAssist !== "function") return;
       const points = $("fta-pref-bulk-assist").dataset.points ? Number($("fta-pref-bulk-assist").dataset.points) : null;
       run(async () => {
@@ -1042,6 +1172,8 @@
       if (typeof unsubscribe === "function") unsubscribe();
       for (const unbind of bindings) unbind();
       for (const timer of copyTimers) window.clearTimeout(timer);copyTimers.clear();
+      if (searchTimer !== null) window.clearTimeout(searchTimer);
+      taskRows.clear();messageRows.clear();
       delete root.dataset.fulltextMounted;
     };
     cleanup = destroy;

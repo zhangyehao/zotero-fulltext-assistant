@@ -3,9 +3,9 @@
     <html:img src="chrome://fulltext-assistant/content/assets/icon-48.png" width="36" height="36" alt=""/>
     <html:div class="fta-intro-copy"><html:p class="fta-product-name">全文助手</html:p><html:p class="fta-secondary">批量获取可访问的全文，科研通作为最后一步求助。</html:p></html:div>
     <html:div id="fta-pref-updater" class="fta-updater" data-state="idle">
-      <html:div class="fta-update-heading"><html:span id="fta-pref-version" class="fta-version"></html:span><html:button id="fta-pref-check-update" class="fta-update-refresh" type="button" title="检查更新" aria-label="检查更新"><html:span aria-hidden="true" data-i18n-skip="true">↻</html:span></html:button></html:div>
-      <html:span id="fta-pref-update-state" class="fta-secondary" role="status" aria-live="polite">尚未检查更新</html:span>
-      <html:details id="fta-pref-update-details" class="fta-update-details"><html:summary>版本与更新</html:summary><html:div class="fta-update-menu">
+      <html:button id="fta-pref-check-update" class="fta-update-refresh" type="button" title="检查更新" aria-label="检查更新"><html:span aria-hidden="true" data-i18n-skip="true">↻</html:span></html:button>
+      <html:span class="fta-update-inline" role="status" aria-live="polite"><html:span id="fta-pref-update-state" class="fta-secondary">尚未检查更新</html:span><html:span id="fta-pref-version" class="fta-version"></html:span></html:span>
+      <html:details id="fta-pref-update-details" class="fta-update-details"><html:summary>更新日志</html:summary><html:div class="fta-update-menu">
         <html:p id="fta-pref-update-version" class="fta-update-version"></html:p>
         <html:p id="fta-pref-update-message" class="fta-note" hidden="hidden"></html:p>
         <html:p id="fta-pref-update-checked" class="fta-note"></html:p>
@@ -38,15 +38,17 @@
       <html:button type="button" data-filter="all" aria-pressed="false">全部历史</html:button>
     </html:div>
     <html:p id="fta-pref-task-scope" class="fta-note" role="status"></html:p>
+    <html:div class="fta-list-toolbar"><html:label class="fta-search"><html:span class="fta-sr-only">搜索当前任务分类</html:span><html:input id="fta-pref-task-search" type="search" placeholder="搜索标题、DOI 或求助编号" autocomplete="off"/></html:label><html:label class="fta-page-size"><html:span>每页</html:span><html:select id="fta-pref-task-page-size" aria-label="每页任务数量"><html:option value="25" selected="selected">25</html:option><html:option value="50">50</html:option></html:select></html:label></html:div>
     <html:div id="fta-pref-bulk-actions" class="fta-bulk-actions">
-      <html:label class="fta-check" for="fta-pref-select-tasks"><html:input id="fta-pref-select-tasks" type="checkbox"/><html:span>选择当前列表可求助项</html:span></html:label>
+      <html:label class="fta-check" for="fta-pref-select-tasks"><html:input id="fta-pref-select-tasks" type="checkbox"/><html:span>选择本页可求助项</html:span></html:label>
       <html:button id="fta-pref-bulk-assist" type="button">为所选文献发起科研通求助</html:button>
       <html:span id="fta-pref-selection-summary" class="fta-secondary" role="status" aria-live="polite">未选择文献</html:span>
     </html:div>
-    <html:p id="fta-pref-bulk-note" class="fta-note">仅选择有 DOI、尚未获取全文且没有关联求助的任务。切换筛选会清除选择；本次求助和未发布任务的重试按按钮所示的当前默认积分，已有求助保持发布时积分。</html:p>
+    <html:p id="fta-pref-bulk-note" class="fta-note">仅选择有 DOI、尚未获取全文且没有关联求助的任务。翻页保留选择，搜索或切换筛选会清除选择；本次求助和未发布任务的重试按按钮所示的当前默认积分，已有求助保持发布时积分。</html:p>
     <html:div id="fta-pref-task-list" class="fta-list" aria-live="polite"></html:div>
+    <html:nav id="fta-pref-task-pagination" class="fta-pagination" aria-label="任务分页"><html:button id="fta-pref-task-previous" type="button">上一页</html:button><html:span id="fta-pref-task-page-status" class="fta-secondary" role="status"></html:span><html:button id="fta-pref-task-next" type="button">下一页</html:button></html:nav>
     <html:p id="fta-pref-task-empty" class="fta-empty">还没有任务。在文库多选文献，右击“全文助手 → 批量获取全文”开始批量获取。</html:p>
-    <html:details class="fta-existing"><html:summary>关联已有求助</html:summary><html:form id="fta-pref-add-form"><html:label for="fta-pref-request-url">自己的科研通求助详情页链接</html:label><html:input id="fta-pref-request-url" type="url" placeholder="https://www.ablesci.com/assist/detail?id=…" required="required"/><html:label for="fta-pref-request-target" class="fta-target-label">关联文献</html:label><html:select id="fta-pref-request-target"><html:option value="">只跟踪，不关联文献</html:option></html:select><html:p class="fta-note">只跟踪不会保存附件到文库；需要入库时，请明确选择对应文献。可选文献来自上方尚未关联求助的任务。</html:p><html:div class="fta-actions"><html:button id="fta-pref-add-request" type="submit">添加</html:button></html:div></html:form></html:details>
+    <html:details class="fta-existing"><html:summary>关联已有求助</html:summary><html:form id="fta-pref-add-form"><html:label for="fta-pref-request-url">自己的科研通求助详情页链接</html:label><html:input id="fta-pref-request-url" type="url" placeholder="https://www.ablesci.com/assist/detail?id=…" required="required"/><html:label for="fta-pref-request-target" class="fta-target-label">关联文献</html:label><html:input id="fta-pref-request-search" type="search" aria-label="搜索可关联文献" placeholder="搜索可关联文献的标题或 DOI" autocomplete="off"/><html:p id="fta-pref-request-search-note" class="fta-note"></html:p><html:select id="fta-pref-request-target"><html:option value="">只跟踪，不关联文献</html:option></html:select><html:p class="fta-note">只跟踪不会保存附件到文库；需要入库时，请明确选择对应文献。可选文献来自上方尚未关联求助的任务。</html:p><html:div class="fta-actions"><html:button id="fta-pref-add-request" type="submit">添加</html:button></html:div></html:form></html:details>
   </html:section>
   <html:section id="fta-pref-panel-settings" class="fta-section fta-panel" role="tabpanel" tabindex="0" hidden="hidden" aria-labelledby="fta-pref-tab-settings">
     <html:div class="fta-section-heading"><html:h2 id="fta-fetch-heading">设置</html:h2><html:span class="fta-secondary">按你的下载习惯设置</html:span></html:div>
@@ -79,6 +81,13 @@
           <html:p class="fta-note">默认只查询开放获取链接。配置密钥后仍需单独开启此项，才会使用 OpenAlex 的内容下载额度。</html:p>
           <html:label class="fta-source-limit" for="fta-pref-openalex-limit"><html:span>本插件每日缓存下载次数上限（本机）</html:span><html:input id="fta-pref-openalex-limit" type="number" min="1" max="1000" step="1" value="100" required="required"/></html:label>
           <html:p class="fta-note">仅统计本插件在本机的 OpenAlex 缓存下载尝试，按 UTC 日期计数，失败也会计入。此上限不代表账户余额；平台免费额度与其他应用共享，启用后仍可能消耗此密钥对应的付费余额。</html:p>
+        </html:div>
+        <html:div class="fta-settings-group">
+          <html:h3>CORE API 直供全文</html:h3>
+          <html:label class="fta-check" for="fta-pref-core-content"><html:input id="fta-pref-core-content" type="checkbox"/><html:span>允许从 CORE API 直接下载 PDF</html:span></html:label>
+          <html:p class="fta-note">默认关闭。关闭时仍会查询 CORE 返回的外部全文链接；开启后仅在配置自己的 CORE API 密钥时尝试直供下载。</html:p>
+          <html:label class="fta-source-limit" for="fta-pref-core-limit"><html:span>本插件每日 CORE 直供下载次数上限（本机）</html:span><html:input id="fta-pref-core-limit" type="number" min="1" max="1000" step="1" value="20" required="required"/></html:label>
+          <html:p class="fta-note">按 UTC 日期和密钥在本机计数，失败也会计入；此上限不代表网站余额或额度。此处不估算每份 PDF 的 token 成本，以你的 CORE 账户规则为准。</html:p>
         </html:div>
         <html:div class="fta-settings-group">
           <html:label for="fta-pref-source-templates" class="fta-source-template-label">自定义 DOI 网址模板</html:label>
@@ -180,7 +189,9 @@
   <html:section id="fta-pref-panel-messages" class="fta-section fta-panel" role="tabpanel" tabindex="0" hidden="hidden" aria-labelledby="fta-pref-tab-messages">
     <html:div class="fta-section-heading fta-message-heading"><html:h2 id="fta-messages-heading">消息</html:h2><html:div class="fta-message-tools"><html:span id="fta-pref-messages-refreshed" class="fta-secondary">尚未刷新</html:span><html:button id="fta-pref-refresh-messages" type="button">刷新消息</html:button></html:div></html:div>
     <html:p id="fta-pref-messages-state" class="fta-secondary">登录后可查看科研通应助提醒。</html:p>
+    <html:div class="fta-list-toolbar"><html:label class="fta-search"><html:span class="fta-sr-only">搜索消息</html:span><html:input id="fta-pref-message-search" type="search" placeholder="搜索消息标题或内容" autocomplete="off"/></html:label><html:select id="fta-pref-message-filter" aria-label="消息筛选"><html:option value="all" selected="selected">全部消息</html:option><html:option value="unread">未读消息</html:option><html:option value="read">已读消息</html:option></html:select><html:label class="fta-page-size"><html:span>每页</html:span><html:select id="fta-pref-message-page-size" aria-label="每页消息数量"><html:option value="25" selected="selected">25</html:option><html:option value="50">50</html:option></html:select></html:label></html:div>
     <html:div id="fta-pref-message-list" class="fta-list" aria-live="polite"></html:div>
+    <html:nav id="fta-pref-message-pagination" class="fta-pagination" aria-label="消息分页"><html:button id="fta-pref-message-previous" type="button">上一页</html:button><html:span id="fta-pref-message-page-status" class="fta-secondary" role="status"></html:span><html:button id="fta-pref-message-next" type="button">下一页</html:button></html:nav>
     <html:p id="fta-pref-message-empty" class="fta-empty">暂无消息。</html:p>
   </html:section>
   <html:p id="fta-pref-status" class="fta-page-status" role="status" aria-live="polite"></html:p>

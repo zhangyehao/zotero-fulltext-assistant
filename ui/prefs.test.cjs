@@ -10,6 +10,8 @@ const i18nContext = {};
 vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../src/i18n-backend-data.js"), "utf8"), i18nContext);
 vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../src/i18n.js"), "utf8"), i18nContext);
 const i18n = i18nContext.FulltextI18n;
+assert.equal(i18n.translate("CORE 本机每日下载上限须为 1 至 1000 的整数。", "en"), "The local daily CORE download limit must be an integer from 1 to 1000.");
+assert.equal(i18n.translate("CORE 本机每日下载上限须为 1 至 1000 的整数。", "zh-TW"), "CORE 本機每日下載上限須為 1 至 1000 的整數。");
 new vm.Script(script);
 const { document, window } = parseHTML("<html><body><div id='preference-container'></div></body></html>");
 let renderListener;
@@ -535,6 +537,7 @@ async function siteControls(mode = "request") {
   for (const invalid of ["3601", "59", "120.5", ""]) { input("fta-pref-poll", invalid); submit("fta-pref-settings-form"); await flush(); }
   assert.equal(calls.filter(c => c[0] === "save").length, validPollCount);
   input("fta-pref-poll", "120");
+  pageTab("tasks").click();
   model.tasks = [
     { id: "queue-done", state: "imported" },
     { id: "queue-first", state: "queued" },
@@ -1000,6 +1003,7 @@ async function siteControls(mode = "request") {
   assert.doesNotMatch(get("fta-pref-status").textContent, /已在默认浏览器打开|请自行下载/);
   assert.equal(calls.some(call => call[0] === "localPDF" && call[1] === "manual-finish-race"), false);
   app.openSystemBrowserTask = openSystemBrowserTask;
+  pageTab("messages").click();
   model.messages = [{ id: "m1", title: "应助提醒", text: "<script>secret</script>", read: false, createdAt: "2026-11-04T12:00:00Z" }];
   renderListener();
   assert.equal(get("fta-messages-heading").textContent, "消息");
@@ -1219,6 +1223,7 @@ async function siteControls(mode = "request") {
   assert.equal(get("fta-pref-spending-empty").hidden, false);
   assert.equal(get("fta-pref-spending-count").textContent, "0 篇");
   assert.equal(get("fta-pref-spending-average").textContent, "—");
+  pageTab("tasks").click();
   model.tasks = [
     { id: "bind-1", title: "明确选择的文献", doi: "10.1234/bind", itemID: 10, state: "not_found" },
     { id: "bind-2", title: "批量最后一篇", doi: "10.1234/other", itemID: 11, state: "not_found" },
@@ -1436,8 +1441,10 @@ async function siteControls(mode = "request") {
   assert.match(get("fta-pref-task-scope").textContent, /All unfinished tasks across batches/);
   assert.match(get("fta-pref-bulk-assist").textContent, /37 points each/);
   assert.equal(taskRow("diagnostic").querySelector(".fta-row-title button span").textContent, "下载设置", "article title matching a UI key must never be translated");
+  pageTab("messages").click();
   assert.equal(get("fta-pref-message-list").querySelector(".fta-row-title").textContent, "下载设置");
   assert.equal(get("fta-pref-message-list").querySelector(".fta-message-summary").textContent, "科研通账号");
+  pageTab("tasks").click();
   assert.equal(taskRow("diagnostic").querySelector(".fta-candidate-name").textContent, "<img src=x onerror=bad>.pdf");
   assert.equal(taskRow("diagnostic").querySelector(".fta-detected-title [data-i18n-skip]").textContent, "科研通账号", "detected titles matching UI translation keys remain raw metadata");
   assert.match(taskRow("diagnostic").textContent, /Checked 23 PDFs: 4 relevant candidates, 18 excluded, 1 with insufficient identity evidence/);
@@ -1539,6 +1546,8 @@ async function siteControls(mode = "request") {
     assert.equal(node("fta-pref-source-version").value, "accepted");
     assert.equal(node("fta-pref-openalex-content").checked, false);
     assert.equal(node("fta-pref-openalex-limit").disabled, true);
+    assert.equal(node("fta-pref-core-content").checked, false, "CORE direct-content consent defaults off for old settings");
+    assert.equal(node("fta-pref-core-limit").value, "20");assert.equal(node("fta-pref-core-limit").disabled, true);
     assert.equal(node("fta-pref-source-custom").checked, false);
     assert.equal(node("fta-pref-version").textContent, "v0.9.0");
     assert.equal(node("fta-pref-install-update").hidden, true);
@@ -1560,6 +1569,8 @@ async function siteControls(mode = "request") {
     type("fta-pref-source-templates", "https://first.example/doi/{doi}; https://second.example/?doi={doi}\nhttps://first.example/doi/{doi}");
     check("fta-pref-openalex-content", true);
     type("fta-pref-openalex-limit", "27");
+    check("fta-pref-core-content", true);type("fta-pref-core-limit", "17");
+    assert.equal(node("fta-pref-core-limit").disabled, false);
     assert.equal(node("fta-pref-tab-settings").dataset.dirty, "true");
     state.sourceSettings = { ...state.sourceSettings, customTemplates: ["https://remote.example/{doi}"], versionPreference: "published", openalexDailyLimit: 100 };
     state.settings.language = "en";emit();node("fta-pref-tab-messages").click();node("fta-pref-tab-settings").click();
@@ -1567,6 +1578,7 @@ async function siteControls(mode = "request") {
     assert.match(node("fta-pref-source-templates").value, /first\.example/);
     assert.equal(node("fta-pref-source-version").value, "any");
     assert.equal(node("fta-pref-openalex-limit").value, "27");
+    assert.equal(node("fta-pref-core-content").checked, true);assert.equal(node("fta-pref-core-limit").value, "17", "CORE consent and limit drafts survive language and snapshot refreshes");
     assert.equal(node("fta-pref-source-pmc").checked, false);
     assert.equal(node("fta-pref-key-core-clear").checked, true);
     assert.equal(node("fta-pref-save-sources").textContent, "Save full-text sources");
@@ -1577,6 +1589,7 @@ async function siteControls(mode = "request") {
     assert.equal(node("fta-pref-key-core-state").textContent, "No saved key");
     assert.equal(node("fta-pref-tab-settings").dataset.dirty, "true", "saving credentials does not discard the independent source draft");
     assert.equal(state.sourceSettings.openalexContentEnabled, false, "saving an OpenAlex key cannot silently enable paid-credit usage");
+    assert.notEqual(state.sourceSettings.coreContentEnabled, true, "saving or clearing keys never enables CORE direct downloads");
     assert.equal(actions.some(action => action[0] === "sources"), false);
     const saveKeys = api.saveSourceCredentials;
     api.saveSourceCredentials = async () => { throw new Error("Internal failure including a-private-secret"); };
@@ -1595,6 +1608,7 @@ async function siteControls(mode = "request") {
     assert.deepEqual(saved[1].customTemplates, ["https://first.example/doi/{doi}", "https://second.example/?doi={doi}"]);
     assert.equal(saved[1].versionPreference, "any");assert.equal(saved[1].enabled.pmc, false);assert.equal(saved[1].enabled.custom, true);
     assert.equal(saved[1].openalexContentEnabled, true);assert.equal(saved[1].openalexDailyLimit, 27);
+    assert.equal(saved[1].coreContentEnabled, true);assert.equal(saved[1].coreDailyLimit, 17, "CORE opt-in can be saved without a key so the backend can explain missing credentials");
     assert.equal(Object.hasOwn(saved[1], "openalex"), false, "secret keys never enter ordinary source settings");
     assert.equal(node("fta-pref-tab-settings").dataset.dirty, "false");
     assert.match(node("fta-pref-source-save-state").textContent, /settings saved/);
@@ -1615,6 +1629,11 @@ async function siteControls(mode = "request") {
       assert.equal(actions.length, count);assert.match(node("fta-pref-source-save-state").textContent, /integer from 1 to 1000/);
     }
     type("fta-pref-openalex-limit", "35");
+    for (const invalid of ["0", "1001", "2.5", "", "bad"]) {
+      type("fta-pref-core-limit", invalid);const count = actions.length;send("fta-pref-source-settings-form");await flush();
+      assert.equal(actions.length, count);assert.match(node("fta-pref-source-save-state").textContent, /direct CORE downloads.*integer from 1 to 1000/);
+    }
+    type("fta-pref-core-limit", "31");
     type("fta-pref-key-openalex", "pending-update-secret");
     let finishUpdateCheck;
     api.checkForUpdates = async () => { actions.push(["checkUpdates"]);state.updateStatus.state = "checking";emit();await new Promise(resolve => { finishUpdateCheck = resolve; });state.updateStatus = { ...state.updateStatus, state: "available", availableVersion: "0.9.1", canInstall: true, checkedAt: "2026-11-09T11:00:00Z" };emit(); };
@@ -1628,6 +1647,7 @@ async function siteControls(mode = "request") {
     assert.equal(node("fta-pref-install-update").hidden, false);assert.equal(node("fta-pref-install-update").disabled, false);
     assert.equal(actions.some(action => action[0] === "installUpdate"), false, "discovering an update never installs it");
     assert.equal(node("fta-pref-openalex-limit").value, "35");
+    assert.equal(node("fta-pref-core-limit").value, "31", "native update checks preserve the CORE budget draft");
     assert.equal(node("fta-pref-key-openalex").value, "pending-update-secret");
     node("fta-pref-release-notes").click();await flush();assert.deepEqual(actions.at(-1), ["releaseNotes"]);
     assert.equal(actions.some(action => action[0] === "installUpdate"), false);
@@ -1704,6 +1724,95 @@ async function siteControls(mode = "request") {
     assert.equal(node("fta-pref-update-message").textContent, "The Zotero automatic update setting could not be saved. Try again.");
     assert.equal(node("fta-pref-key-openalex").value, "pending-update-secret");
     isolated.FulltextPreferences.destroy();assert.equal(node("fta-pref-key-openalex").value, "", "unmount clears secret drafts");
+  }
+  // A complete large history stays searchable while only one bounded page is
+  // mounted. Background notifications must not replace unchanged controls.
+  {
+    const pane = parseHTML("<html><body>" + markup + "</body></html>");
+    const node = id => pane.document.getElementById(id), rows = kind => [...node("fta-pref-" + kind + "-list").children];
+    const baseTime = Date.parse("2026-01-01T00:00:00Z");
+    const state = { version: "1.0.0", settings: { language: "zh-CN", points: 10, pollSeconds: 60 }, session: { status: "authenticated", accountID: "fixture-account" },
+      tasks: Array.from({ length: 10037 }, (_, index) => ({ id: "large-" + index, itemID: index + 1, attachmentID: index + 20000, title: "Article " + index, doi: "10.9999/" + index, state: "imported", completedAt: new Date(baseTime + index * 1000).toISOString(), source: "openalex", discoveryProvider: "openalex", pdfHost: "repository.example.org" })),
+      messages: Array.from({ length: 203 }, (_, index) => ({ id: "message-" + index, title: "Message " + index, text: index === 200 ? "needle beyond the first thirty messages" : "Message body " + index, read: index % 2 === 1 })),
+      messagesStatus: { state: "loaded" }, currentBatch: { id: "large-batch", taskIDs: [], createdAt: "2026-11-09T00:00:00Z" },
+      updateStatus: { state: "current", currentVersion: "1.0.0", canCheck: true, releaseNotesAvailable: true, autoUpdate: true } };
+    state.tasks.at(-1).discoveryProvider = "";state.tasks.at(-1).pdfHost = "";state.tasks.at(-1).source = "publisher";
+    state.tasks.at(-2).pdfHost = "https://user:secret@example.org/file?token=hidden";
+    let emit, articleCreations = 0, elementCreations = 0, subscribers = 0;
+    const create = pane.document.createElementNS.bind(pane.document);
+    pane.document.createElementNS = (...args) => { elementCreations++;if (args[1] === "article") articleCreations++;return create(...args); };
+    const actions = [];
+    const api = { getSnapshot: () => structuredClone(state), subscribe: fn => { emit = fn;subscribers++;return () => subscribers--; }, localize: target => i18n.apply(target, state.settings.language),
+      copyText: async value => actions.push(["copy", value]), openMessage: async id => actions.push(["message", id]),
+      saveSettings: async value => { Object.assign(state.settings, value);emit(); },
+      requestAssist: async ids => { actions.push(["assist", [...ids]]);return { accepted: ids.length, skipped: 0 }; } };
+    pane.window.Zotero = { FulltextAssistant: api };
+    const isolated = { window: pane.window, document: pane.document, Zotero: pane.window.Zotero, URL, Date };
+    vm.runInNewContext(script, isolated);
+    const choose = (id, value) => { const field = node(id);for (const option of field.querySelectorAll("option")) option.selected = false;field.querySelector('option[value="' + value + '"]').selected = true;field.dispatchEvent(new pane.window.Event("change")); };
+    const search = async (kind, value) => { node("fta-pref-" + kind + "-search").value = value;node("fta-pref-" + kind + "-search").dispatchEvent(new pane.window.Event("input"));await new Promise(resolve => setTimeout(resolve, 140)); };
+    const filter = value => node("fta-pref-task-filters").querySelector('[data-filter="' + value + '"]').click();
+    const selectPage = value => node("fta-pref-tab-" + value).click();
+    assert.equal(rows("message").length, 0, "the hidden message tab is not mounted on task updates");
+    filter("all");
+    assert.equal(rows("task").length, 25);
+    assert.equal(node("fta-pref-task-count").textContent, "10037", "history totals are not reduced to the page size");
+    assert.match(node("fta-pref-task-page-status").textContent, /1\/402.*1–25 \/ 10037/);
+    assert.equal(rows("task")[0].dataset.taskId, "large-10036", "completion order applies across the entire history");
+    assert.match(rows("task")[0].textContent, /来源：出版社网页/, "legacy sources remain readable");
+    assert.doesNotMatch(rows("task")[1].textContent, /user:secret|token=hidden|PDF：https/, "a malformed host cannot disclose URL credentials");
+    assert.match(rows("task")[2].textContent, /发现来源：OpenAlex.*PDF：repository\.example\.org/);
+    assert.ok(node("fta-pref-request-target").querySelectorAll("option").length <= 51, "the association picker is also bounded");
+    const unchanged = rows("task")[2], association = node("fta-pref-request-target").firstChild;
+    node("fta-preferences").scrollTop = 420;node("fta-pref-username").value = "draft-account";node("fta-pref-username").dispatchEvent(new pane.window.Event("input"));
+    articleCreations = 0;elementCreations = 0;
+    for (let index = 0; index < 5; index++) { state.updateStatus.progress = { percent: index };emit(); }
+    assert.equal(articleCreations, 0);assert.equal(elementCreations, 0, "unchanged snapshots do not rebuild list rows or option lists");
+    assert.equal(rows("task")[2], unchanged);assert.equal(node("fta-pref-request-target").firstChild, association);
+    assert.equal(node("fta-preferences").scrollTop, 420);assert.equal(node("fta-pref-username").value, "draft-account");
+    state.tasks.at(-1).title = "Changed visible article";articleCreations = 0;emit();
+    assert.equal(articleCreations, 1, "one changed task rebuilds only its own visible row");assert.equal(rows("task")[2], unchanged);
+    node("fta-pref-task-next").click();assert.match(node("fta-pref-task-page-status").textContent, /2\/402.*26–50/);
+    assert.equal(rows("task")[0].dataset.taskId, "large-10011");
+    choose("fta-pref-task-page-size", "50");assert.equal(rows("task").length, 50);assert.match(node("fta-pref-task-page-status").textContent, /1\/201/);
+    await search("task", "10.9999/9999");assert.equal(rows("task").length, 1);assert.equal(rows("task")[0].dataset.taskId, "large-9999", "search includes off-page history");
+    assert.equal(state.tasks.length, 10037);
+    await search("task", "no-such-article");assert.equal(rows("task").length, 0);assert.match(node("fta-pref-task-empty").textContent, /没有匹配/);
+    await search("task", "");
+    selectPage("messages");assert.equal(rows("message").length, 25);assert.match(node("fta-pref-message-page-status").textContent, /1\/9.*203/);
+    const messageRow = rows("message")[0], hiddenTaskRow = rows("task")[0];articleCreations = 0;
+    state.tasks.at(-1).title = "Changed while tasks hidden";emit();
+    assert.equal(rows("task")[0], hiddenTaskRow);assert.equal(rows("message")[0], messageRow);assert.equal(articleCreations, 0, "hidden task changes do not rebuild either list");
+    for (let index = 0; index < 8; index++) node("fta-pref-message-next").click();
+    assert.equal(rows("message").length, 3);assert.equal(rows("message")[0].dataset.messageId, "message-200", "messages beyond the old 30-item cutoff remain reachable");
+    await search("message", "needle");assert.equal(rows("message").length, 1);assert.equal(rows("message")[0].dataset.messageId, "message-200");
+    rows("message")[0].querySelector("button").click();await flush();assert.deepEqual(actions.at(-1), ["message", "message-200"]);
+    await search("message", "");choose("fta-pref-message-filter", "unread");assert.match(node("fta-pref-message-page-status").textContent, /102/);
+    choose("fta-pref-message-page-size", "50");assert.equal(rows("message").length, 50);
+    choose("fta-pref-message-filter", "read");assert.match(node("fta-pref-message-page-status").textContent, /101/);
+    state.settings.language = "en";emit();assert.match(node("fta-pref-message-page-status").textContent, /Page 1\/3.*1–50 of 101/);
+    assert.equal(node("fta-pref-update-details").querySelector("summary").textContent, "Release notes");
+    assert.equal(node("fta-pref-version").parentElement, node("fta-pref-update-state").parentElement, "status and version share one inline group");
+    state.settings.language = "zh-TW";emit();assert.equal(node("fta-pref-message-search").placeholder, "搜尋訊息標題或內容");
+    assert.match(node("fta-pref-message-page-status").textContent, /第 1\/3 頁/);
+    state.settings.language = "zh-CN";emit();selectPage("tasks");assert.match(rows("task")[0].textContent, /Changed while tasks hidden/);
+    const retainedMessages = rows("message")[0];articleCreations = 0;state.messages[1].title = "Hidden message update";emit();
+    assert.equal(rows("message")[0], retainedMessages);assert.equal(articleCreations, 0, "hidden message changes do not rebuild the task list");
+    node("fta-pref-request-search").value = "10.9999/8000";node("fta-pref-request-search").dispatchEvent(new pane.window.Event("input"));
+    assert.equal(node("fta-pref-request-target").querySelectorAll("option").length, 2, "the bounded association picker can find a distant item");
+    assert.ok(node("fta-pref-request-target").querySelector('option[value="large-8000"]'));
+    state.tasks = Array.from({ length: 62 }, (_, index) => ({ id: "pending-" + index, itemID: index + 1, state: "not_found", title: "Pending " + index, doi: "10.9998/" + index }));emit();filter("unfinished");choose("fta-pref-task-page-size", "25");
+    const selectCurrent = () => { node("fta-pref-select-tasks").checked = true;node("fta-pref-select-tasks").dispatchEvent(new pane.window.Event("change")); };
+    selectCurrent();assert.match(node("fta-pref-selection-summary").textContent, /已选 25 篇/);
+    node("fta-pref-task-next").click();assert.equal(node("fta-pref-select-tasks").checked, false);selectCurrent();assert.match(node("fta-pref-selection-summary").textContent, /已选 50 篇/);
+    node("fta-pref-bulk-assist").click();await flush();assert.equal(actions.at(-1)[1].length, 50);assert.equal(new Set(actions.at(-1)[1]).size, 50, "the action submits only explicit selections, including prior pages");
+    selectCurrent();await search("task", "Pending 61");assert.match(node("fta-pref-selection-summary").textContent, /未选择文献/, "searching clears paid-action selection");
+    assert.equal(rows("task").length, 1);
+    await search("task", "");node("fta-pref-task-next").click();node("fta-pref-task-next").click();assert.equal(rows("task").length, 12);
+    state.tasks = state.tasks.slice(0, 3);emit();assert.equal(rows("task").length, 3);assert.match(node("fta-pref-task-page-status").textContent, /1\/1/, "shrinking results clamp to an available page");
+    selectPage("messages");assert.match(rows("message")[0].textContent, /Hidden message update/);
+    node("fta-pref-message-search").value = "pending timer";node("fta-pref-message-search").dispatchEvent(new pane.window.Event("input"));
+    isolated.FulltextPreferences.destroy();assert.equal(subscribers, 0);articleCreations = 0;await new Promise(resolve => setTimeout(resolve, 140));assert.equal(articleCreations, 0, "unmount cancels a pending search refresh");
   }
   // Rejected asynchronous opening checks are caught inside a separate pane.
   {

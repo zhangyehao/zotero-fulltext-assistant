@@ -1,12 +1,12 @@
 # 文档索引
 
-日常使用从 [项目首页](../README.md) 开始。首次公开发行版本为 0.8.0；各版本的验收报告仅代表该版本，不把历史测试数量或网站下载记录作为新版重跑结果。
+日常使用从 [简体中文首页](../README.md)、[繁體中文首頁](../README.zh-TW.md) 或 [English README](../README.en.md) 开始。首次公开发行版本为 0.8.0；各版本的验收报告仅代表该版本，不把历史测试数量或网站下载记录作为新版重跑结果。
 
 ## 当前说明
 
 - [浏览器下载、目录配置与 PDF 核对](browser-downloads.md)
 - [全文来源、API 和配置说明](fulltext-sources.md)
-- [0.9.0 更新说明](release-v0.9.0.md) · [本版验收记录](verification-v0.9.0.md)
+- [1.0.0 更新说明](release-v1.0.0.md) · [最终候选验收记录](verification-v1.0.0.md)
 - [维护者发布与更新指南](PUBLISHING.md)
 - [后续更新注意事项与踩坑记录](UPDATING.md)
 - [隐私与本地数据](../PRIVACY.md)
@@ -16,6 +16,7 @@
 
 | 版本 | 记录 |
 | --- | --- |
+| 0.9.0 | [更新说明](release-v0.9.0.md) · [验收记录](verification-v0.9.0.md) |
 | 0.8.0 | [更新说明](release-v0.8.0.md) · [验收记录](verification-v0.8.0.md) |
 | 0.7.2 | [更新说明](release-v0.7.2.md) · [验收记录](verification-v0.7.2.md) |
 | 0.7.1 | [更新说明](release-v0.7.1.md) · [验收记录](verification-v0.7.1.md) |

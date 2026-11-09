@@ -5,7 +5,7 @@ function create({Zotero,Services,IOUtils,PathUtils,rootURI,pluginID,version,pick
   let tasks=[],intents={},messages=[],settings={points:10,pollSeconds:60,autoDownload:true,acceptSiteMinimum:false,checkInReminder:true,downloadDirectories:[],language:"zh-CN"};
   let sourceSettings={},sourceCredentials={openalex:false,core:false,semanticScholar:false},sources,updater,sourceUsage,queueLoaded=false;
   let currentBatch=null,accessHistory={schemaVersion:1,entries:[]},accessSaveChain=Promise.resolve();
-  const downloadCandidates=new Map();
+  const downloadCandidates=new Map(),progressMessages=new Map();
   let captureSummary=null,captureSequence=0,captureChain=Promise.resolve();
   let account={status:"signed_out",message:"绑定科研通后可以求助、接收消息和下载应助文件。",username:"",hasSavedPassword:false};
   let messagesStatus={state:"idle",message:"登录后显示站内消息",lastCheckedAt:null};
@@ -47,7 +47,7 @@ function create({Zotero,Services,IOUtils,PathUtils,rootURI,pluginID,version,pick
     if(!watching&&current?.day===localDay()&&current.state==="loaded")return;
     await api.refreshCheckIn();
   }
-  function accessHint(task){const module=scope.FulltextAccessHistory;if(!module)return{scope:"none",confidence:"none",institutionalConfirmed:false};const primary=module.lookup(accessHistory,{url:task.publisherURL||task.officialURL,doi:task.doi}),original=module.lookup(accessHistory,{url:task.officialURL,doi:task.doi});return primary.scope==="article"?primary:original.scope==="article"?original:primary.scope!=="none"?primary:original;}
+  function accessHint(task,preparedLookup){const module=scope.FulltextAccessHistory;if(!module)return{scope:"none",confidence:"none",institutionalConfirmed:false};const lookup=preparedLookup||(query=>module.lookup(accessHistory,query)),primary=lookup({url:task.publisherURL||task.officialURL,doi:task.doi}),original=lookup({url:task.officialURL,doi:task.doi});return primary.scope==="article"?primary:original.scope==="article"?original:primary.scope!=="none"?primary:original;}
   async function rememberAccess(task,kind,source,confirmedByUser=false){
     if(!scope.FulltextAccessHistory||!task.doi||!(task.publisherURL||task.officialURL))return;
     const operation=accessSaveChain.catch(()=>{}).then(async()=>{
@@ -59,6 +59,13 @@ function create({Zotero,Services,IOUtils,PathUtils,rootURI,pluginID,version,pick
   const discoverFolders=()=>discoverDownloadDirectories?discoverDownloadDirectories():scope.FulltextDownloadFolders.discover({Services,IOUtils,PathUtils});
   const filename=path=>PathUtils.filename?PathUtils.filename(path):path.split(/[\\/]/).pop();
   function validatePaper(expected,current){if(!current||itemDOI(current)!==expected.doi||(!expected.doi&&current.getField("title")!==expected.title))throw new Error("核对期间原文献的 DOI 或标题已改变，请重新选择 PDF。");}
+  function existingPDFProvenance(task,attachmentID){
+    // Finding the same recorded attachment is not a new acquisition. Preserve
+    // its known source so a verified assistance receipt is not discarded.
+    return task.state==="imported"&&task.attachmentID===attachmentID&&task.source
+      ? {source:task.source,discoveryProvider:task.discoveryProvider,pdfHost:task.pdfHost,fulltextVersion:task.fulltextVersion}
+      : {source:"existing",discoveryProvider:"",pdfHost:"",fulltextVersion:"unknown"};
+  }
   async function digest(bytes){
     const subtle=Zotero.getMainWindow()?.crypto?.subtle||scope.crypto?.subtle;
     if(subtle)return Array.from(new Uint8Array(await subtle.digest("SHA-256",bytes))).map(v=>v.toString(16).padStart(2,"0")).join("");
@@ -81,7 +88,7 @@ function create({Zotero,Services,IOUtils,PathUtils,rootURI,pluginID,version,pick
       const existing=await scope.FulltextPublisher.findExistingPDF(item,{Zotero,IOUtils});check();
       if(existing){
         check();validatePaper(paper,await linkedItem(task,task.doi));check();pendingPDFs.delete(id);
-        await update(id,{state:"imported",attachmentID:existing,source:"existing",attempts:0,lastError:"",nextCheckAt:null});
+        await update(id,{state:"imported",attachmentID:existing,...existingPDFProvenance(task,existing),attempts:0,lastError:"",nextCheckAt:null});
         return{cancelled:false,attachmentID:existing};
       }
       if(!file){
@@ -135,7 +142,8 @@ function create({Zotero,Services,IOUtils,PathUtils,rootURI,pluginID,version,pick
       const attachment=await persistPDF({...task,doi:paper.doi,title:paper.title},bytes,ticket,current=>validatePaper(paper,current),()=>{reused=true;});
       pendingPDFs.delete(id);
       const receipt=assistReview&&!reused?makeAssistReceipt(assistReview,attachment,paper,"manual"):null;
-      await update(id,{state:"imported",source:receipt?"ablesci":sourceReview&&!reused?sourceReview.source:automatic?"browser_download":"local_file",fulltextVersion:sourceReview&&!reused?sourceReview.fulltextVersion:"unknown",sourceReview:null,attachmentID:attachment.id,attempts:0,nextCheckAt:null,lastError:"",assistReview:null,assistReceipt:receipt,acquisitionMode:""});
+      const provenance=reused?existingPDFProvenance(taskById(id),attachment.id):{source:receipt?"ablesci":sourceReview?sourceReview.source:automatic?"browser_download":"local_file",discoveryProvider:receipt?"ablesci":sourceReview?sourceReview.discoveryProvider:"",pdfHost:sourceReview?sourceReview.pdfHost:"",fulltextVersion:sourceReview?sourceReview.fulltextVersion:"unknown"};
+      await update(id,{state:"imported",...provenance,sourceReview:null,attachmentID:attachment.id,attempts:0,nextCheckAt:null,lastError:"",assistReview:null,assistReceipt:receipt,acquisitionMode:""});
       downloadCandidates.delete(id);
       if(sourceReview)await IOUtils.remove(reviewPath(id),{ignoreAbsent:true}).catch(()=>{});
       if(!assistReview&&!sourceReview&&!reused&&!task.requestID)await rememberAccess(taskById(id),"browser_success",automatic?"browser_download":"browser_import").catch(error=>Zotero.logError(new Error(safeError(error))));
@@ -178,7 +186,7 @@ function create({Zotero,Services,IOUtils,PathUtils,rootURI,pluginID,version,pick
   function accountCurrent(epoch){if(epoch!==accountEpoch||stopped){const e=new Error("账号会话已改变，请重新操作。");e.name="AbortError";throw e;}}
   async function pauseAccountTasks(){
     const affected=tasks.filter(t=>!["browser","manual"].includes(t.acquisitionMode)&&(t.allowAssist||t.requestID)&&!["imported","closed"].includes(t.state));
-    for(const t of affected)cancellations.set(t.id,(cancellations.get(t.id)||0)+1);
+    for(const t of affected){cancellations.set(t.id,(cancellations.get(t.id)||0)+1);progressMessages.delete(t.id);}
     for(const t of affected)await update(t.id,{state:["submitting","submission_unknown"].includes(t.state)?"submission_unknown":"paused",nextCheckAt:null,lastError:"账号已退出或切换；确认账号后可重试此任务。"});
   }
   const intentStore={
@@ -377,7 +385,7 @@ function create({Zotero,Services,IOUtils,PathUtils,rootURI,pluginID,version,pick
           imported=await importResponse({...task,doi:result.doi||task.doi},download,ticket);
         }
         if(imported.needsReview)return;
-        await update(id,{state:"imported",source:imported.existing?"existing":"ablesci",downloadRoute:download.route||"normal",attachmentID:imported.attachment.id,attempts:0,nextCheckAt:null,lastError:"",assistReview:null,assistReceipt:imported.receipt||null});
+        await update(id,{state:"imported",source:imported.existing?"existing":"ablesci",discoveryProvider:imported.existing?"":"ablesci",pdfHost:"",downloadRoute:download.route||"normal",attachmentID:imported.attachment.id,attempts:0,nextCheckAt:null,lastError:"",assistReview:null,assistReceipt:imported.receipt||null});
         if(imported.receipt)await finishAssist(id).catch(error=>Zotero.logError(new Error(safeError(error))));return;
       }catch(e){if(e.name==="AbortError")throw e;lastError=e;}
     }
@@ -396,14 +404,18 @@ function create({Zotero,Services,IOUtils,PathUtils,rootURI,pluginID,version,pick
       let currentDOI="";try{currentDOI=MODEL.normalizeDOI(item.getField("DOI")||item.getExtraField?.("DOI"));}catch(_){}
       await update(id,{doi:currentDOI,title:item.getField("title"),officialURL:item.getField("url")});abortIf(id,ticket);
       await update(id,{state:"resolving",lastError:"正在优先查找开放全文与配置来源…"});abortIf(id,ticket);
-      const acquired=await publisher.acquire(item,{isCancelled:()=>stopped||cancellations.get(id)!==ticket,onProgress(info){if(!stopped&&cancellations.get(id)===ticket)update(id,{lastError:info.message}).catch(()=>{});}});
+      // Transient network progress must not serialize and rewrite every historical
+      // task. Durable state/receipts still use update() before external effects.
+      let progressNoticeAt=0;
+      const acquired=await publisher.acquire(item,{isCancelled:()=>stopped||cancellations.get(id)!==ticket,onProgress(info){if(!stopped&&cancellations.get(id)===ticket){progressMessages.set(id,safeError(info.message));if(Date.now()-progressNoticeAt>=150){progressNoticeAt=Date.now();emit();}}}});
+      progressMessages.delete(id);
       // A committed attachment is real even if pause/shutdown raced its final write.
-      if(acquired.attachmentID){await update(id,{state:"imported",attachmentID:acquired.attachmentID,source:acquired.source,fulltextVersion:acquired.fulltextVersion||"unknown",sourceReview:null,sourceDiagnostics:acquired.sourceDiagnostics||[],...(acquired.publisherURL?{publisherURL:acquired.publisherURL}:{}),nextCheckAt:null,lastError:""});return;}
+      if(acquired.attachmentID){const provenance=acquired.source==="existing"?existingPDFProvenance(taskById(id),acquired.attachmentID):{source:acquired.source,discoveryProvider:acquired.discoveryProvider||"",pdfHost:acquired.pdfHost||"",fulltextVersion:acquired.fulltextVersion||"unknown"};await update(id,{state:"imported",attachmentID:acquired.attachmentID,...provenance,sourceReview:null,sourceDiagnostics:acquired.sourceDiagnostics||[],...(acquired.publisherURL?{publisherURL:acquired.publisherURL}:{}),nextCheckAt:null,lastError:""});return;}
       abortIf(id,ticket);
       await update(id,{...(acquired.publisherURL?{publisherURL:acquired.publisherURL}:{}),accessEvidence:acquired.accessEvidence||null,sourceDiagnostics:acquired.sourceDiagnostics||[]});abortIf(id,ticket);
       if(acquired.needsReview&&acquired.reviewBytes){
         const paper=acquired.paper||{doi:currentDOI,title:item.getField("title")};validatePaper(paper,item);const sha256=await digest(acquired.reviewBytes),file=reviewPath(id);abortIf(id,ticket);
-        const review=MODEL.updateTask(taskById(id),{state:"manual_review",sourceReview:{...paper,sha256,source:acquired.source,sourceURL:acquired.sourceURL||"",fulltextVersion:acquired.fulltextVersion||"unknown"}}).sourceReview;
+        const review=MODEL.updateTask(taskById(id),{state:"manual_review",sourceReview:{...paper,sha256,source:acquired.source,discoveryProvider:acquired.discoveryProvider||"",pdfHost:acquired.pdfHost||"",sourceURL:acquired.sourceURL||"",fulltextVersion:acquired.fulltextVersion||"unknown"}}).sourceReview;
         await IOUtils.makeDirectory(dataDir,{ignoreExisting:true});await IOUtils.write(file,acquired.reviewBytes);abortIf(id,ticket);
         pendingPDFs.set(id,{path:file,digest:sha256,paper,filename:"全文候选.pdf",summary:"已取得 PDF，但不能充分确认论文身份。请预览 DOI 和标题后确认。",sourceReview:review});
         await update(id,{state:"manual_review",sourceReview:review,acquisitionMode:"",nextCheckAt:null,lastError:"已取得 PDF，但论文身份仍待核对；尚未入库，也未转为科研通求助。"});return;
@@ -419,7 +431,7 @@ function create({Zotero,Services,IOUtils,PathUtils,rootURI,pluginID,version,pick
       // Preserve the remote identity even when paused while a submission was in flight.
       await bindRequest(id,posted,{state:cancellations.get(id)===ticket?"waiting":"paused",nextCheckAt:new Date(Date.now()+settings.pollSeconds*1000).toISOString(),lastError:""});abortIf(id,ticket);await checkRemote(id,ticket);
     }catch(e){if(e.name!=="AbortError"&&!stopped){const task=taskById(id),auth=/AUTH|LOGIN/.test(e.code||""),uncertain=e.reconcileRequired===true||/UNKNOWN|UNCERTAIN|DUPLICATE_INTENT|SUBMISSION_MISMATCH/.test(e.code||"");if(cancellations.get(id)!==ticket&&!uncertain)return;const transient=!!task.requestID&&e.retryable===true&&!auth&&!uncertain,attempts=task.attempts+1,retrySeconds=Math.min(3600,settings.pollSeconds*2**Math.min(attempts-1,6));await update(id,{state:auth?"pending_login":uncertain?"submission_unknown":transient?"waiting":"error",submissionReview:e.submissionReview||task.submissionReview,lastError:(transient?"检查暂时失败，将在 "+retrySeconds+" 秒后重试。":"")+safeError(e),attempts,nextCheckAt:transient?new Date(Date.now()+retrySeconds*1000).toISOString():null});}}
-    finally{active.delete(id);emit();}
+    finally{progressMessages.delete(id);active.delete(id);emit();}
   }
   async function poll(){if(stopped||polling)return;polling=true;try{for(const t of tasks.filter(t=>t.requestID&&["waiting","available","ready_to_check"].includes(t.state)&&(!t.nextCheckAt||Date.parse(t.nextCheckAt)<=Date.now()))){if(stopped)break;const current=taskById(t.id);if(!["waiting","available","ready_to_check"].includes(current.state)||(current.nextCheckAt&&Date.parse(current.nextCheckAt)>Date.now()))continue;await runTask(t.id);await Zotero.Promise.delay(1200);}if(account.status==="authenticated")for(const t of tasks.filter(t=>t.state==="imported"&&t.assistReceipt&&t.assistReceipt.messages!=="done"&&(!t.assistReceipt.nextCheckAt||Date.parse(t.assistReceipt.nextCheckAt)<=Date.now()))){if(stopped)break;await finishAssist(t.id).catch(error=>Zotero.logError(new Error(safeError(error))));}if(account.status==="authenticated"){const costTask=tasks.find(t=>t.state==="imported"&&t.source==="ablesci"&&t.requestID&&!t.pointsVerified&&(!t.lastCheckedAt||Date.now()-Date.parse(t.lastCheckedAt)>=settings.pollSeconds*1000));if(costTask)await api.refreshAssistPoints(costTask.id);}if(account.status==="authenticated"&&(!messagesStatus.lastAttemptAt||Date.now()-Date.parse(messagesStatus.lastAttemptAt)>=settings.pollSeconds*1000))await api.refreshMessages().catch(()=>{});}finally{polling=false;}}
   async function runBrowserTask(id,ticket){
@@ -429,7 +441,7 @@ function create({Zotero,Services,IOUtils,PathUtils,rootURI,pluginID,version,pick
       abortIf(id,ticket);
       const existing=await scope.FulltextPublisher.findExistingPDF(item,{Zotero,IOUtils});
       if(existing){
-        abortIf(id,ticket);await update(id,{state:"imported",source:"existing",attachmentID:existing,lastError:"",nextCheckAt:null});return;
+        abortIf(id,ticket);await update(id,{state:"imported",...existingPDFProvenance(task,existing),attachmentID:existing,lastError:"",nextCheckAt:null});return;
       }
       const result=await edgeAcquire.acquire({...task,officialURL:item.getField("url")||task.officialURL,title:item.getField("title")||task.title},{
         isCancelled:()=>stopped||cancellations.get(id)!==ticket,
@@ -440,7 +452,7 @@ function create({Zotero,Services,IOUtils,PathUtils,rootURI,pluginID,version,pick
       await update(id,{state:"browser_downloading",lastError:"正在将 PDF 保存到原文献…"});
       const identity=current=>{if(!current||itemDOI(current)!==task.doi||(!task.doi&&current.getField("title")!==task.title))throw new Error("浏览器获取期间原文献身份已改变，请核对 DOI 或标题后重试。");};
       const attachment=await persistPDF(task,result.bytes,ticket,identity);
-      await update(id,{state:"imported",source:"edge_browser",downloadRoute:"",attachmentID:attachment.id,attempts:0,lastError:"",nextCheckAt:null});
+      await update(id,{state:"imported",source:"edge_browser",discoveryProvider:"",pdfHost:"",fulltextVersion:"unknown",downloadRoute:"",attachmentID:attachment.id,attempts:0,lastError:"",nextCheckAt:null});
     }catch(error){
       if(error.name!=="AbortError"&&!stopped&&cancellations.get(id)===ticket)await update(id,{state:"error",lastError:safeError(error),nextCheckAt:null});
     }finally{active.delete(id);browserRuns.delete(id);emit();}
@@ -529,10 +541,11 @@ function create({Zotero,Services,IOUtils,PathUtils,rootURI,pluginID,version,pick
       checkInTimer=setInterval(()=>checkInTick().catch(e=>Zotero.logError(new Error(safeError(e)))),60000);
       if(session.getStatus().hasCookies)api.refreshAccount().then(()=>Promise.allSettled([poll(),checkInTick()])).catch(()=>{});schedulePump();
     },
-    getSnapshot(){return{version,sourceSettings:JSON.parse(JSON.stringify(sourceSettings)),sourceCredentials:{...sourceCredentials},updateStatus:updater?.getSnapshot()||{state:"idle",currentVersion:version,autoUpdate:false},checkIn:checkInSnapshot(),tasks:tasks.map(t=>({...t,sourceDiagnostics:t.sourceDiagnostics.map(value=>({...value})),sourceReview:t.sourceReview?{...t.sourceReview}:null,doiCheck:t.doiCheck?{...t.doiCheck}:null,submissionReview:t.submissionReview?{...t.submissionReview}:null,assistReceipt:t.assistReceipt?{...t.assistReceipt}:null,assistReview:t.assistReview?{...t.assistReview}:null,accessEvidence:t.accessEvidence?{...t.accessEvidence}:null,accessHint:accessHint(t),downloadStatus:downloadWatch?.getStatus?.(t.id)||null,downloadDiagnostics:downloadWatch?.getDiagnostics?.(t.id)||[],downloadCandidates:(downloadCandidates.get(t.id)||[]).map(c=>({id:c.id,filename:c.filename,message:c.message,reason:c.reason,related:c.related,candidateScore:c.candidateScore,titleSimilarity:c.titleSimilarity,detectedTitle:c.detectedTitle,detectedDOIs:[...c.detectedDOIs],evidence:c.evidence?JSON.parse(JSON.stringify(c.evidence)):null})),...(pendingPDFs.has(t.id)?{pendingFilename:pendingPDFs.get(t.id).filename,pendingSummary:pendingPDFs.get(t.id).summary,pendingTitle:pendingPDFs.get(t.id).paper.title}:{})})),settings:{...settings,downloadDirectories:[...settings.downloadDirectories],downloadDirectory:settings.downloadDirectories[0]||""},session:{...account,persistent:true,storageError:session?.getStatus().error},publisherSession:publisherSession?.getStatus()||{},messages:messages.map(m=>({...m})),messagesStatus:{...messagesStatus},selectedTaskId,captureSummary:copyCaptureSummary(captureSummary),currentBatch:currentBatch?JSON.parse(JSON.stringify(currentBatch)):null};},
+    getSnapshot(){const lookup=scope.FulltextAccessHistory?.createLookup?.(accessHistory,{now:Date.now()});return{version,sourceSettings:JSON.parse(JSON.stringify(sourceSettings)),sourceCredentials:{...sourceCredentials},updateStatus:updater?.getSnapshot()||{state:"idle",currentVersion:version,autoUpdate:false},checkIn:checkInSnapshot(),tasks:tasks.map(t=>({...t,...(progressMessages.has(t.id)?{lastError:progressMessages.get(t.id)}:{}),sourceDiagnostics:t.sourceDiagnostics.map(value=>({...value})),sourceReview:t.sourceReview?{...t.sourceReview}:null,doiCheck:t.doiCheck?{...t.doiCheck}:null,submissionReview:t.submissionReview?{...t.submissionReview}:null,assistReceipt:t.assistReceipt?{...t.assistReceipt}:null,assistReview:t.assistReview?{...t.assistReview}:null,accessEvidence:t.accessEvidence?{...t.accessEvidence}:null,accessHint:accessHint(t,lookup),downloadStatus:downloadWatch?.getStatus?.(t.id)||null,downloadDiagnostics:downloadWatch?.getDiagnostics?.(t.id)||[],downloadCandidates:(downloadCandidates.get(t.id)||[]).map(c=>({id:c.id,filename:c.filename,message:c.message,reason:c.reason,related:c.related,candidateScore:c.candidateScore,titleSimilarity:c.titleSimilarity,detectedTitle:c.detectedTitle,detectedDOIs:[...c.detectedDOIs],evidence:c.evidence?JSON.parse(JSON.stringify(c.evidence)):null})),...(pendingPDFs.has(t.id)?{pendingFilename:pendingPDFs.get(t.id).filename,pendingSummary:pendingPDFs.get(t.id).summary,pendingTitle:pendingPDFs.get(t.id).paper.title}:{})})),settings:{...settings,downloadDirectories:[...settings.downloadDirectories],downloadDirectory:settings.downloadDirectories[0]||""},session:{...account,persistent:true,storageError:session?.getStatus().error},publisherSession:publisherSession?.getStatus()||{},messages:messages.map(m=>({...m})),messagesStatus:{...messagesStatus},selectedTaskId,captureSummary:copyCaptureSummary(captureSummary),currentBatch:currentBatch?JSON.parse(JSON.stringify(currentBatch)):null};},
     async saveSourceSettings(value){
       if(!scope.FulltextSources)throw new Error("全文来源模块尚未就绪。");
       if(!value||typeof value!=="object"||!Number.isInteger(value.openalexDailyLimit)||value.openalexDailyLimit<1||value.openalexDailyLimit>1000)throw new Error("OpenAlex 本机每日下载上限须为 1 至 1000 的整数。");
+      if(value.coreDailyLimit!==undefined&&(!Number.isInteger(value.coreDailyLimit)||value.coreDailyLimit<1||value.coreDailyLimit>1000))throw new Error("CORE 本机每日下载上限须为 1 至 1000 的整数。");
       if(scope.FulltextSources.parseTemplates(value.customTemplates).diagnostics.length)throw new Error("请检查自定义来源：最多 8 个公开 HTTPS 地址，每个地址须包含 {doi}，不能含凭据或本地地址。");
       const next=scope.FulltextSources.normalizeSettings(value);
       Services.prefs.setStringPref(PREF+"sourceSettings",JSON.stringify(next));sourceSettings=next;emit();return{saved:true};
@@ -634,7 +647,7 @@ function create({Zotero,Services,IOUtils,PathUtils,rootURI,pluginID,version,pick
             if(!repair&&!retry&&!fallback){summary.retained++;continue;}
             downloadWatch?.cancel(existing.id);pendingPDFs.delete(existing.id);cancellations.set(existing.id,(cancellations.get(existing.id)||0)+1);
             const patch={state:"queued",acquisitionMode:"",lastError:"",nextCheckAt:null};
-            if(repair){patch.attachmentID=null;patch.completedAt=null;patch.source="";patch.downloadRoute="";}
+            if(repair){patch.attachmentID=null;patch.completedAt=null;patch.source="";patch.discoveryProvider="";patch.pdfHost="";patch.fulltextVersion="unknown";patch.downloadRoute="";}
             // An old successful public download must not silently authorize a new
             // paid request. Remote repairs retain their original request/budget.
             if(!existing.requestID){patch.allowAssist=allowAssist&&!hasProtectedIntent(existing);if(patch.allowAssist){patch.requestedPoints=settings.points;patch.acceptSiteMinimum=settings.acceptSiteMinimum;}}
@@ -740,7 +753,7 @@ function create({Zotero,Services,IOUtils,PathUtils,rootURI,pluginID,version,pick
             const verified=await importResponse(original,download,ticket,{verifyExisting:true,localConfirmation});check();
             if(!verified.receipt)throw new Error("缺少已核实的应助文件和账号标识，未补采纳。");
             const current=taskById(id);if(current.state!=="imported"||current.attachmentID!==original.attachmentID||current.requestID!==original.requestID)throw new Error("任务关联已改变，未补采纳。");
-            await update(id,{source:"ablesci",assistReceipt:verified.receipt,...verifiedPoints(result),lastCheckedAt:now(),lastError:""});check();return await finishAssist(id);
+            await update(id,{source:"ablesci",discoveryProvider:"ablesci",pdfHost:"",assistReceipt:verified.receipt,...verifiedPoints(result),lastCheckedAt:now(),lastError:""});check();return await finishAssist(id);
           }catch(error){if(error.name==="AbortError")throw error;lastError=error;}
         }
         throw lastError||new Error("当前没有能与已保存 PDF 核对的应助文件，请打开原求助网页处理。");
@@ -751,6 +764,7 @@ function create({Zotero,Services,IOUtils,PathUtils,rootURI,pluginID,version,pick
     async pauseTask(id){
       const task=taskById(id);if(task.state==="imported")return;
       cancellations.set(id,(cancellations.get(id)||0)+1);
+      progressMessages.delete(id);
       downloadWatch?.cancel(id);pendingPDFs.delete(id);
       const operation=browserRuns.get(id);if(operation)edgeAcquire?.cancel?.(id);
       await update(id,{state:"paused",nextCheckAt:null,lastError:task.acquisitionMode==="manual"?"下载文件夹检查已暂停。任务保留，可重新在浏览器下载，或使用科研通兜底。":task.acquisitionMode==="browser"?"专用 Edge 自动获取已暂停，可使用默认浏览器下载。":"本地已暂停，网站上的求助保持原状态。"});
@@ -1023,6 +1037,7 @@ function create({Zotero,Services,IOUtils,PathUtils,rootURI,pluginID,version,pick
       tasks=tasks.map(t=>!t.assistReview&&!t.sourceReview&&(browserStates.has(t.state)||["manual_waiting","manual_review"].includes(t.state))?MODEL.updateTask(t,{state:"paused",nextCheckAt:null,lastError:"下载检查已暂停；重启后可点击浏览器下载重新开始。"}):t);
       pendingPDFs.clear();
       downloadCandidates.clear();
+      progressMessages.clear();
       for(const id of menuIDs)Zotero.MenuManager.unregisterMenu(id);
       if(siteWindow&&!siteWindow.closed)siteWindow.close();publisherWindow?.destroy();
       try{await save();await intentChain;}

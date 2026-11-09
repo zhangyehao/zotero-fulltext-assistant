@@ -110,7 +110,7 @@ class BuildTests(unittest.TestCase):
 
     def test_stable_versions_existing_id_and_tested_compatibility(self):
         manifest, version = build.configuration(self.fixture)
-        self.assertEqual(version, "0.9.0")
+        self.assertEqual(version, "1.0.0")
         self.assertEqual(manifest["applications"]["zotero"], {"id": "fulltext-assistant@local.invalid", "update_url": build.UPDATE_URL, "strict_min_version": "10.0.7", "strict_max_version": "10.0.*"})
 
     def test_xpi_preserves_runtime_files_and_excludes_development(self):
@@ -123,7 +123,7 @@ class BuildTests(unittest.TestCase):
     def test_source_archive_includes_release_tooling_and_documents(self):
         with zipfile.ZipFile(self.result["source"]) as archive:
             names = set(archive.namelist())
-            self.assertTrue({"fulltext-plugin/scripts/release.py", "fulltext-plugin/tests/test_release.py", "fulltext-plugin/.github/workflows/publish.yml", "fulltext-plugin/package-lock.json"} <= names)
+            self.assertTrue({"fulltext-plugin/scripts/release.py", "fulltext-plugin/tests/test_release.py", "fulltext-plugin/.github/workflows/publish.yml", "fulltext-plugin/package-lock.json", "fulltext-plugin/README.md", "fulltext-plugin/README.en.md", "fulltext-plugin/README.zh-TW.md"} <= names)
             self.assertFalse(any("node_modules/" in name or "__pycache__/" in name or name.endswith((".xpi", ".zip", ".pdf", ".log")) for name in names))
         for name in ("PRIVACY.md", "SUPPORT.md", "docs/images/task-panel.png", "docs/images/settings.png"):
             path = self.fixture / name
@@ -138,7 +138,7 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(len(bundle["assets"]), 5)
         self.assertEqual(bundle["xpi_sha256"], self.result["sha256"])
         update = json.loads((self.output / "updates.json").read_text())["addons"][build.ADDON_ID]["updates"][0]
-        self.assertEqual(update["update_link"], "https://github.com/zhangyehao/zotero-fulltext-assistant/releases/download/v0.9.0/zotero-fulltext-assistant-0.9.0.xpi")
+        self.assertEqual(update["update_link"], "https://github.com/zhangyehao/zotero-fulltext-assistant/releases/download/v1.0.0/zotero-fulltext-assistant-1.0.0.xpi")
         self.assertEqual(update["update_hash"], "sha256:" + self.result["sha256"])
         self.assertEqual(update["applications"]["zotero"], {"strict_min_version": "10.0.7", "strict_max_version": "10.0.*"})
         release.verify_checkout(bundle, self.fixture)

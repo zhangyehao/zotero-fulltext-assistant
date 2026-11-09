@@ -77,27 +77,38 @@
     else result.entries[key] = preferred(result.entries[key], entry);
     return normalize(result, { now });
   }
-  function lookup(state, { url, doi, now = Date.now() } = {}) {
+  function createLookup(state, { now = Date.now() } = {}) {
     now = clock(now);
-    const host = publisherHost(url), expectedDOI = normalizeDOI(doi);
-    const base = { scope: "none", kind: null, confidence: "none", source: null, at: null,
-      host, doi: expectedDOI, stale: false, institutionalConfirmed: false, message: "" };
-    if (!host) return base;
-    const entries = normalize(state, { now }).entries;
-    const article = expectedDOI && entries.find(entry => entry.host === host && entry.doi === expectedDOI);
-    const entry = article || entries.find(value => value.host === host);
-    if (!entry) return base;
-    const stale = now - Date.parse(entry.at) > STALE_AFTER_MS;
-    const scope = article ? "article" : "host_hint";
-    const confirmed = !!article && !stale && entry.kind === "institutional_confirmed";
-    const message = article
-      ? entry.kind === "institutional_confirmed"
-        ? "你曾明确确认这篇论文通过机构下载。可优先在日常浏览器重试；历史记录不保证当前订阅仍有效。"
-        : "这篇论文曾通过浏览器成功获取，访问方式未确认。可在日常浏览器重试。"
-      : "这个网站的其他论文曾通过浏览器成功获取，仅作尝试提示；未确认本篇论文的机构权限。";
-    return { ...base, scope, kind: entry.kind, confidence: scope === "host_hint" || stale ? "hint" : confirmed ? "confirmed" : "observed",
-      source: entry.source, at: entry.at, stale, institutionalConfirmed: confirmed,
-      message: (stale ? "这条访问经验已超过 180 天。" : "") + message };
+    const articles = new Map(), hosts = new Map();
+    // Normalize once per snapshot. Entries are detached from the mutable input
+    // and already sorted newest first, preserving the existing host-hint rule.
+    for (const entry of normalize(state, { now }).entries) {
+      articles.set(entry.host + "\n" + entry.doi, entry);
+      if (!hosts.has(entry.host)) hosts.set(entry.host, entry);
+    }
+    return function lookupPrepared({ url, doi } = {}) {
+      const host = publisherHost(url), expectedDOI = normalizeDOI(doi);
+      const base = { scope: "none", kind: null, confidence: "none", source: null, at: null,
+        host, doi: expectedDOI, stale: false, institutionalConfirmed: false, message: "" };
+      if (!host) return base;
+      const article = expectedDOI && articles.get(host + "\n" + expectedDOI);
+      const entry = article || hosts.get(host);
+      if (!entry) return base;
+      const stale = now - Date.parse(entry.at) > STALE_AFTER_MS;
+      const scope = article ? "article" : "host_hint";
+      const confirmed = !!article && !stale && entry.kind === "institutional_confirmed";
+      const message = article
+        ? entry.kind === "institutional_confirmed"
+          ? "你曾明确确认这篇论文通过机构下载。可优先在日常浏览器重试；历史记录不保证当前订阅仍有效。"
+          : "这篇论文曾通过浏览器成功获取，访问方式未确认。可在日常浏览器重试。"
+        : "这个网站的其他论文曾通过浏览器成功获取，仅作尝试提示；未确认本篇论文的机构权限。";
+      return { ...base, scope, kind: entry.kind, confidence: scope === "host_hint" || stale ? "hint" : confirmed ? "confirmed" : "observed",
+        source: entry.source, at: entry.at, stale, institutionalConfirmed: confirmed,
+        message: (stale ? "这条访问经验已超过 180 天。" : "") + message };
+    };
+  }
+  function lookup(state, { url, doi, now = Date.now() } = {}) {
+    return createLookup(state, { now })({ url, doi });
   }
   function forget(state, { url, doi, now = Date.now() } = {}) {
     const host = publisherHost(url), expectedDOI = normalizeDOI(doi);
@@ -105,7 +116,7 @@
     result.entries = result.entries.filter(entry => entry.host !== host || entry.doi !== expectedDOI);
     return result;
   }
-  const api = Object.freeze({ SCHEMA_VERSION, MAX_ENTRIES, STALE_AFTER_MS, empty, normalize, record, lookup, forget, publisherHost, normalizeDOI });
+  const api = Object.freeze({ SCHEMA_VERSION, MAX_ENTRIES, STALE_AFTER_MS, empty, normalize, record, lookup, createLookup, forget, publisherHost, normalizeDOI });
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   global.FulltextAccessHistory = api;
 })(globalThis);
