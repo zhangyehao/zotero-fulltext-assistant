@@ -1,7 +1,21 @@
 <vbox id="fta-preferences" class="main-section" xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul" xmlns:html="http://www.w3.org/1999/xhtml">
   <html:div class="fta-intro">
     <html:img src="chrome://fulltext-assistant/content/assets/icon-48.png" width="36" height="36" alt=""/>
-    <html:div><html:p class="fta-product-name">全文助手<html:span id="fta-pref-version" class="fta-version"></html:span></html:p><html:p class="fta-secondary">批量获取可访问的全文，科研通作为最后一步求助。</html:p></html:div>
+    <html:div class="fta-intro-copy"><html:p class="fta-product-name">全文助手</html:p><html:p class="fta-secondary">批量获取可访问的全文，科研通作为最后一步求助。</html:p></html:div>
+    <html:div id="fta-pref-updater" class="fta-updater" data-state="idle">
+      <html:div class="fta-update-heading"><html:span id="fta-pref-version" class="fta-version"></html:span><html:button id="fta-pref-check-update" class="fta-update-refresh" type="button" title="检查更新" aria-label="检查更新"><html:span aria-hidden="true" data-i18n-skip="true">↻</html:span></html:button></html:div>
+      <html:span id="fta-pref-update-state" class="fta-secondary" role="status" aria-live="polite">尚未检查更新</html:span>
+      <html:details id="fta-pref-update-details" class="fta-update-details"><html:summary>版本与更新</html:summary><html:div class="fta-update-menu">
+        <html:p id="fta-pref-update-version" class="fta-update-version"></html:p>
+        <html:p id="fta-pref-update-message" class="fta-note" hidden="hidden"></html:p>
+        <html:p id="fta-pref-update-checked" class="fta-note"></html:p>
+        <html:label class="fta-check" for="fta-pref-auto-update"><html:input id="fta-pref-auto-update" type="checkbox"/><html:span>自动更新此插件</html:span></html:label>
+        <html:p class="fta-note">由 Zotero 原生更新机制管理；检查更新不会立即安装。</html:p>
+        <html:p id="fta-pref-update-global-note" class="fta-note" hidden="hidden">Zotero 的全局自动更新已关闭，此插件的自动更新也不会运行。</html:p>
+        <html:div class="fta-actions"><html:button id="fta-pref-release-notes" type="button">查看更新日志</html:button><html:button id="fta-pref-install-update" type="button" class="fta-primary" hidden="hidden">立即更新</html:button></html:div>
+        <html:p id="fta-pref-update-action-status" class="fta-note" role="status" aria-live="polite"></html:p>
+      </html:div></html:details>
+    </html:div>
   </html:div>
   <html:div id="fta-pref-tabs" class="fta-tabs" role="tablist" aria-label="全文助手页面" aria-orientation="horizontal">
     <html:button id="fta-pref-tab-tasks" type="button" role="tab" data-page="tasks" aria-controls="fta-pref-panel-tasks" aria-selected="true" tabindex="0">任务</html:button>
@@ -41,6 +55,59 @@
         <html:select id="fta-pref-language" aria-describedby="fta-pref-language-note"><html:option value="zh-CN" data-i18n-skip="true">简体中文</html:option><html:option value="zh-TW" data-i18n-skip="true">繁體中文</html:option><html:option value="en" data-i18n-skip="true">English</html:option></html:select>
         <html:p id="fta-pref-language-note" class="fta-note">切换后立即保存并生效；其他未保存的设置、账号和链接输入会保留。</html:p>
       </html:div>
+      <html:form id="fta-pref-source-settings-form" class="fta-source-settings">
+        <html:div class="fta-settings-group">
+          <html:h3>全文来源</html:h3>
+          <html:p class="fta-secondary">选择批量获取时尝试的来源；更改只在保存后生效。</html:p>
+          <html:div class="fta-source-options">
+            <html:label class="fta-check" for="fta-pref-source-publisher"><html:input id="fta-pref-source-publisher" type="checkbox"/><html:span>出版社网页</html:span></html:label>
+            <html:label class="fta-check" for="fta-pref-source-openAccess"><html:input id="fta-pref-source-openAccess" type="checkbox"/><html:span>Zotero 开放获取</html:span></html:label>
+            <html:label class="fta-check" for="fta-pref-source-openalex"><html:input id="fta-pref-source-openalex" type="checkbox"/><html:span data-i18n-skip="true">OpenAlex</html:span></html:label>
+            <html:label class="fta-check" for="fta-pref-source-pmc"><html:input id="fta-pref-source-pmc" type="checkbox"/><html:span data-i18n-skip="true">PubMed Central</html:span></html:label>
+            <html:label class="fta-check" for="fta-pref-source-core"><html:input id="fta-pref-source-core" type="checkbox"/><html:span data-i18n-skip="true">CORE</html:span></html:label>
+            <html:label class="fta-check" for="fta-pref-source-semanticScholar"><html:input id="fta-pref-source-semanticScholar" type="checkbox"/><html:span data-i18n-skip="true">Semantic Scholar</html:span></html:label>
+            <html:label class="fta-check" for="fta-pref-source-custom"><html:input id="fta-pref-source-custom" type="checkbox"/><html:span>自定义 DOI 网址</html:span></html:label>
+          </html:div>
+          <html:p class="fta-note">CORE 和 Semantic Scholar 可先尝试匿名查询；受限时可配置自己的 API 密钥。API 返回链接不代表已取得全文。</html:p>
+          <html:label class="fta-source-version-label" for="fta-pref-source-version">全文版本偏好</html:label>
+          <html:select id="fta-pref-source-version" aria-describedby="fta-pref-source-version-note"><html:option value="published">优先出版版</html:option><html:option value="accepted">允许作者接受稿</html:option><html:option value="any">允许预印本</html:option></html:select>
+          <html:p id="fta-pref-source-version-note" class="fta-note">按此设置筛选来源已说明的全文版本；未说明版本的候选仍会尝试，并标注为“版本未核实”。</html:p>
+        </html:div>
+        <html:div class="fta-settings-group">
+          <html:h3>OpenAlex 内容下载</html:h3>
+          <html:label class="fta-check" for="fta-pref-openalex-content"><html:input id="fta-pref-openalex-content" type="checkbox"/><html:span>允许使用 OpenAlex 内容下载额度</html:span></html:label>
+          <html:p class="fta-note">默认只查询开放获取链接。配置密钥后仍需单独开启此项，才会使用 OpenAlex 的内容下载额度。</html:p>
+          <html:label class="fta-source-limit" for="fta-pref-openalex-limit"><html:span>本插件每日缓存下载次数上限（本机）</html:span><html:input id="fta-pref-openalex-limit" type="number" min="1" max="1000" step="1" value="100" required="required"/></html:label>
+          <html:p class="fta-note">仅统计本插件在本机的 OpenAlex 缓存下载尝试，按 UTC 日期计数，失败也会计入。此上限不代表账户余额；平台免费额度与其他应用共享，启用后仍可能消耗此密钥对应的付费余额。</html:p>
+        </html:div>
+        <html:div class="fta-settings-group">
+          <html:label for="fta-pref-source-templates" class="fta-source-template-label">自定义 DOI 网址模板</html:label>
+          <html:textarea id="fta-pref-source-templates" rows="3" spellcheck="false" autocomplete="off" placeholder="https://example.org/doi/{doi}" data-i18n-skip="true" aria-describedby="fta-pref-source-templates-note"></html:textarea>
+          <html:p id="fta-pref-source-templates-note" class="fta-note">每行一个，或用英文分号分隔，最多 8 个。仅接受含 {doi} 的公共 HTTPS 网址；保存后还需启用“自定义 DOI 网址”。</html:p>
+          <html:p class="fta-note">查询时会把文献 DOI 发送给你配置的网站。请只添加你信任且有权访问的来源，不在模板中填写密码或 API 密钥。</html:p>
+        </html:div>
+        <html:div class="fta-actions fta-save-actions"><html:button id="fta-pref-save-sources" type="submit" class="fta-primary">保存全文来源</html:button><html:span id="fta-pref-source-save-state" class="fta-secondary" role="status" aria-live="polite"></html:span></html:div>
+      </html:form>
+      <html:form id="fta-pref-source-credentials-form" class="fta-source-credentials" autocomplete="off">
+        <html:h3>全文来源 API 密钥</html:h3>
+        <html:p class="fta-secondary">密钥保存在 Zotero 登录管理器，已保存的密钥不会显示回来。留空保留原值，勾选清除才会删除。</html:p>
+        <html:div class="fta-source-credential">
+          <html:label for="fta-pref-key-openalex" >OpenAlex API 密钥</html:label><html:span id="fta-pref-key-openalex-state" class="fta-secondary" role="status"></html:span>
+          <html:input id="fta-pref-key-openalex" type="password" autocomplete="new-password" spellcheck="false" aria-describedby="fta-pref-key-openalex-state"/>
+          <html:label class="fta-check" for="fta-pref-key-openalex-clear"><html:input id="fta-pref-key-openalex-clear" type="checkbox"/><html:span>清除已保存密钥</html:span></html:label>
+        </html:div>
+        <html:div class="fta-source-credential">
+          <html:label for="fta-pref-key-core" >CORE API 密钥</html:label><html:span id="fta-pref-key-core-state" class="fta-secondary" role="status"></html:span>
+          <html:input id="fta-pref-key-core" type="password" autocomplete="new-password" spellcheck="false" aria-describedby="fta-pref-key-core-state"/>
+          <html:label class="fta-check" for="fta-pref-key-core-clear"><html:input id="fta-pref-key-core-clear" type="checkbox"/><html:span>清除已保存密钥</html:span></html:label>
+        </html:div>
+        <html:div class="fta-source-credential">
+          <html:label for="fta-pref-key-semanticScholar" >Semantic Scholar API 密钥</html:label><html:span id="fta-pref-key-semanticScholar-state" class="fta-secondary" role="status"></html:span>
+          <html:input id="fta-pref-key-semanticScholar" type="password" autocomplete="new-password" spellcheck="false" aria-describedby="fta-pref-key-semanticScholar-state"/>
+          <html:label class="fta-check" for="fta-pref-key-semanticScholar-clear"><html:input id="fta-pref-key-semanticScholar-clear" type="checkbox"/><html:span>清除已保存密钥</html:span></html:label>
+        </html:div>
+        <html:div class="fta-actions"><html:button id="fta-pref-save-source-keys" type="submit">保存 API 密钥</html:button><html:span id="fta-pref-source-key-state" class="fta-secondary" role="status" aria-live="polite"></html:span></html:div>
+      </html:form>
       <html:div class="fta-settings-group">
         <html:h3 id="fta-pref-download-directories-label">浏览器下载文件夹</html:h3>
         <html:p class="fta-secondary">在默认浏览器下载 PDF 并保存到这些文件夹，明确匹配的全文会自动入库。</html:p>

@@ -115,6 +115,25 @@
     }
     return { matched: false, detectedTitle, reliable, similarity: similarity(detectedTitle, expected) };
   }
+  function datedPublicationBlock(text) {
+    // A Nature first-page side column can be extracted after the body text.
+    // Only the exact adjacent Received/Accepted/Published-online date block is
+    // evidence here: prose, missing fields and arbitrary dates are not enough.
+    const months = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
+    const date = "([0-3]?\\d) +(" + months.join("|") + ") +((?:19|20)\\d{2})";
+    const pattern = new RegExp("^[ \\t]*\\n[ \\t]*Received:[ \\t]*" + date + "[ \\t]*\\n[ \\t]*Accepted:[ \\t]*" + date
+      + "[ \\t]*\\n[ \\t]*Published online:[ \\t]*" + date + "[ \\t]*(?:\\n|$)", "i");
+    const match = pattern.exec(text);
+    if (!match) return false;
+    const dates = [];
+    for (const offset of [1, 4, 7]) {
+      const day = Number(match[offset]), month = months.indexOf(match[offset + 1].toLowerCase()), year = Number(match[offset + 2]);
+      const timestamp = Date.UTC(year, month, day), parsed = new Date(timestamp);
+      if (parsed.getUTCFullYear() !== year || parsed.getUTCMonth() !== month || parsed.getUTCDate() !== day) return false;
+      dates.push(timestamp);
+    }
+    return dates[0] <= dates[1] && dates[1] <= dates[2];
+  }
   function articleDOIs(text) {
     const found = [];
     const frontEnd = Math.min(bodyStart(text), MAX_TITLE_REGION);
@@ -162,6 +181,13 @@
         && /^\d{1,6}$/.test(suffix) && Number(suffix) === Number(pageRange[1]);
       const standalone = /^(?:(?:digital object identifier|doi)[ \t]*:[ \t]*|(?:https?:\/\/)?(?:dx\.)?doi\.org\/)?$/i.test(prefix)
         && /^[\s.,;:()\[\]{}]*$/.test(suffix);
+      // The DOI must be its own doi.org URL line, followed immediately by all
+      // three valid chronological publication dates. referenceStart already
+      // truncates reference sections. A correction/retraction heading still
+      // prevents treating the linked original article as the current article.
+      const dateMetadata = standalone && /^(?:https?:\/\/)?(?:dx\.)?doi\.org\/$/i.test(prefix) && !suffix && lineEnd >= 0
+        && !/(?:^|\n)[ \t]*(?:(?:publisher|author)[ \t]+)?(?:correction to|erratum to|corrigendum to|retraction of)\b/i.test(text.slice(0, frontEnd))
+        && datedPublicationBlock(text.slice(lineEnd, Math.min(text.length, lineEnd + 240)));
       // Geometry-preserving extraction keeps a publisher's citation, copyright
       // and standalone DOI on separate lines. A preceding author "et al." is
       // then harmless only when the immediate line carries copyright evidence.
@@ -173,7 +199,7 @@
       if ((!journalFooter && citationLike(prefix)) || (!numberedFooter && !publisherFooter && citationLike(preceding))) continue;
       const header = match.index < frontEnd && prefix.length < 220
         && /(?:^|\s)doi[ \t]*:[ \t]*$/i.test(prefix) && suffix.length < 100;
-      if (((standalone && (match.index < frontEnd || footer)) || header || journalFooter || publicationFooter || numberedFooter || publisherFooter) && !found.includes(doi)) found.push(doi);
+      if (((standalone && (match.index < frontEnd || footer)) || header || journalFooter || publicationFooter || numberedFooter || publisherFooter || dateMetadata) && !found.includes(doi)) found.push(doi);
       if (found.length === 8) break;
     }
     return found;

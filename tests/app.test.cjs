@@ -18,7 +18,7 @@ const settle = () => new Promise(resolve=>setImmediate(resolve));
 async function until(condition) {const end=Date.now()+2000;while(!condition()){if(Date.now()>end)throw new Error('Fixture condition timed out');await settle();}}
 function item(id) {return {id,key:'ITEM'+id,libraryID:1,deleted:false,isRegularItem:()=>true,getAttachments:()=>[],async getBestAttachment(){return null;},getField(name){return {DOI:'10.1234/paper'+id,title:'Fixture paper '+id,url:'https://publisher.test/paper'+id}[name]||'';}};}
 
-function environment({acquire,initialTasks,initialQueue,initialAccessHistory,initialPrefs,initialIntents,realPublisher=false,writePDFError=false,pickPDF,pickDirectory,pdfIdentity,discoverDirectories,watchNow,appTime,edgeAcquire,edgeHost}={}) {
+function environment({acquire,initialTasks,initialQueue,initialAccessHistory,initialPrefs,initialIntents,realPublisher=false,writePDFError=false,pickPDF,pickDirectory,pdfIdentity,discoverDirectories,watchNow,appTime,edgeAcquire,edgeHost,sourceModule,updateModule}={}) {
   const files=new Map(),prefs=new Map(),items=new Map(),menus=new Map(),publisherCalls=[],submissions=[],remoteRequests=[],errors=[],httpCalls=[],imports=[];
   const directories=new Set([downloadDirectory]),fileMetadata=new Map(),openedURLs=[],openedFiles=[],identityCalls=[],timers=[];
   let clock=Date.now(),fileRevision=1;
@@ -33,13 +33,14 @@ function environment({acquire,initialTasks,initialQueue,initialAccessHistory,ini
   const account={authenticated:true,accountID:'FixtureAccount',username:'Display Name'};
   const session={destroyed:false,cleared:0,async initialize(){},getStatus(){return {hasCookies:false,persistent:true};},async flush(){},async destroy(){this.destroyed=true;},async clearSession(){this.cleared++;},async request(){throw new Error('No real request permitted in app fixture');}};
   const credentials={saved:false,username:'',async getSummary(){return {saved:this.saved,username:this.username};},async save(value){this.saved=true;this.username=value.username;},async remove(){this.saved=false;this.username='';}};
+  const apiKeys={};credentials.getAPIKey=async provider=>apiKeys[provider]||'';credentials.getAPIKeySummary=async()=>Object.fromEntries(['openalex','core','semanticScholar'].map(provider=>[provider,!!apiKeys[provider]]));credentials.saveAPIKeys=async values=>{for(const [provider,value] of Object.entries(values)){if(value===null)delete apiKeys[provider];else if(value)apiKeys[provider]=value;}return credentials.getAPIKeySummary();};
   const adapter={async getAccount(){accountCalls++;return account;},async findExistingRequest(){return null;},async submitRequest(value){submissions.push(value);return {requestID:'Request'+submissions.length,requestURL:'https://www.ablesci.com/assist/detail?id=Request'+submissions.length};},async getRequest(id){remoteRequests.push(id);return {requestID:id,doi:submissions[Number(id.replace('Request',''))-1]?.doi||'',state:'waiting',files:[]};},async listMessages(){return [];}};
   adapter.getCheckInStatus=async()=>{const date=new AppDate(),day=[date.getFullYear(),String(date.getMonth()+1).padStart(2,'0'),String(date.getDate()).padStart(2,'0')].join('-');return{accountID:account.accountID,day,signed:true,balance:88,reward:5,rewardVerified:true,checkedAt:date.toISOString()};};
   const IOUtils={async exists(file){return files.has(file);},async readUTF8(file){return files.get(file);},async makeDirectory(){},async writeUTF8(file,value){if(writeHook)await writeHook(file,value);files.set(file,value);},async write(file,value){if(writePDFError)throw new Error('fixture disk full');files.set(file,value);},async remove(file){files.delete(file);}};
   const Services={prefs:{getIntPref(key,fallback){return prefs.get(key)??fallback;},getBoolPref(key,fallback){return prefs.get(key)??fallback;},getStringPref(key,fallback){return prefs.get(key)??fallback;},setIntPref(key,value){prefs.set(key,value);},setBoolPref(key,value){prefs.set(key,value);},setStringPref(key,value){prefs.set(key,value);}},prompt:{alert(){}}};
   const pdf=new TextEncoder().encode('%PDF-1.7\n'+'0'.repeat(1200)+'\n%%EOF\n');
   const Zotero={DataDirectory:{dir:'C:\\isolated'},Items:{async getAsync(id){return items.get(id);}},Libraries:{get(){return {editable:true,filesEditable:true};}},MenuManager:{registerMenu(value){menus.set(value.menuID,value);return value.menuID;},unregisterMenu(id){menus.delete(id);}},PreferencePanes:{async register(value){return value.id;}},Utilities:{Internal:{openPreferences(){}}},getMainWindow(){return {openDialog(){return {closed:false,close(){this.closed=true;},focus(){}};}};},logError(error){errors.push(error);},Promise:{delay(ms){return new Promise(resolve=>setTimeout(resolve,Math.min(ms,5)));}},HTTP:{async request(method,url){httpCalls.push({method,url});return {status:200,response:pdf.buffer,responseURL:url,getResponseHeader(){return 'application/pdf';}};}},Attachments:{async createTemporaryStorageDirectory(){return {path:'C:\\isolated\\publisher-temp'};},async importFromFile(options){importCount++;imports.push(options);return {id:900,setField(){},async saveTx(){}};},getFileBaseNameFromItem(){return 'fixture-paper';},getFileResolvers(){oaCalls++;return [];}}};
-  const scope={URL,URLSearchParams,Promise,Date:AppDate,JSON,Set,Map,Uint8Array,ArrayBuffer,TextDecoder,crypto:webcrypto,FulltextTaskModel:MODEL,FulltextPublisherWindow:{create(){return {open(){},destroy(){}};}},setInterval(callback,ms){timers.push({callback,ms});return timers.length;},clearInterval(){},FulltextCredentials:{create(){return credentials;}},FulltextSession:{create(){return session;}},FulltextAbleSci:{create(){return adapter;}}};
+  const scope={URL,URLSearchParams,Promise,Date:AppDate,JSON,Set,Map,Uint8Array,ArrayBuffer,TextDecoder,TextEncoder,crypto:webcrypto,FulltextSources:sourceModule,FulltextUpdate:updateModule,FulltextSourceUsage:require("../src/source-usage.js"),FulltextTaskModel:MODEL,FulltextPublisherWindow:{create(){return {open(){},destroy(){}};}},setInterval(callback,ms){timers.push({callback,ms});return timers.length;},clearInterval(){},FulltextCredentials:{create(){return credentials;}},FulltextSession:{create(){return session;}},FulltextAbleSci:{create(){return adapter;}}};
   vm.runInNewContext(publisherSource,scope);
   vm.runInNewContext(publisherWindowSource,scope);
   vm.runInNewContext(downloadWatchSource,scope);
@@ -134,7 +135,7 @@ test('real publisher storage failure is surfaced as an error and never starts pa
   const env=environment({realPublisher:true,writePDFError:true});await env.app.start();await env.app.captureItems([env.addItem(item(1))],{allowAssist:true});
   await until(()=>['error','not_found','submission_unknown','waiting'].includes(env.app.getSelectedTask().state));
   assert.equal(env.app.getSelectedTask().state,'error');assert.match(env.app.getSelectedTask().lastError,/写入或导入 Zotero 失败/);
-  assert.equal(env.httpCalls.length,1);assert.equal(env.importCount,0);assert.equal(env.oaCalls,0);assert.equal(env.accountCalls,0);assert.equal(env.submissions.length,0);await env.app.stop();
+  assert.equal(env.httpCalls.length,1);assert.equal(env.importCount,0);assert.equal(env.oaCalls,1);assert.equal(env.accountCalls,0);assert.equal(env.submissions.length,0);await env.app.stop();
 });
 
 test('mixed capture counts local PDFs, child selections, duplicates, unsupported entries and retained history',async()=>{
@@ -246,7 +247,7 @@ test('pause while publisher is active blocks a later fallback POST',async()=>{
 test('stopping the plugin during acquisition prevents all later POSTs',async()=>{
   const gate=deferred();const env=environment({acquire:async()=>{await gate.promise;return {state:'not_found',message:'fixture unavailable'};}});
   await env.app.start();await env.app.captureItems([env.addItem(item(1))],{allowAssist:true});await until(()=>env.publisherCalls.length===1);
-  await env.app.stop();gate.resolve();await settle();await settle();assert.equal(env.submissions.length,0);assert.equal(env.session.destroyed,true);assert.equal(env.menus.size,0);
+  const stopping=env.app.stop();gate.resolve();await stopping;await settle();await settle();assert.equal(env.submissions.length,0);assert.equal(env.session.destroyed,true);assert.equal(env.menus.size,0);
 });
 
 test('pause while submitting state is being saved prevents the submission call',async()=>{
@@ -1764,4 +1765,50 @@ test('check-in replies from another account or day cannot claim a reward and mal
   }
   const env=environment({appTime:time});env.adapter.getCheckInStatus=async()=>checkInStatus(time,{signed:true,balance:93,reward:-1,rewardVerified:true});await env.app.start();await env.app.refreshAccount();await env.app.refreshCheckIn();
   assert.equal(env.app.getSnapshot().checkIn.balance,93);assert.equal(env.app.getSnapshot().checkIn.reward,null);assert.equal(env.app.getSnapshot().checkIn.rewardVerified,false);await env.app.stop();
+});
+
+
+test('startup parse, schema and read failures never overwrite the existing task file during shutdown',async()=>{
+  for(const value of ['{broken','{"schemaVersion":99,"tasks":[]}','{"schemaVersion":1,"tasks":false}']){
+    const env=environment();env.files.set(queuePath,value);await assert.rejects(env.app.start());await env.app.stop();assert.equal(env.files.get(queuePath),value);
+  }
+  const env=environment(),value='unreadable original';env.files.set(queuePath,value);const read=env.IOUtils.readUTF8;env.IOUtils.readUTF8=async file=>{if(file===queuePath)throw Error('read denied');return read(file);};
+  await assert.rejects(env.app.start());await env.app.stop();assert.equal(env.files.get(queuePath),value);
+});
+
+test('new-source unknown PDF is persisted, survives restart and requires explicit identical-file confirmation',async()=>{
+  const env=environment({acquire:async()=>({needsReview:true,reviewBytes:env.pdf,source:'pmc',fulltextVersion:'accepted',sourceURL:'https://repository.test/file.pdf'}),pdfIdentity:{async inspect(){return {status:'unknown'};}}});
+  env.addItem(item(1));await env.app.start();await env.app.captureItems([item(1)],{allowAssist:true});await until(()=>env.app.getSelectedTask()?.state==='manual_review');
+  const first=env.app.getSelectedTask();assert.equal(first.sourceReview.source,'pmc');assert.equal(env.importCount,0);assert.equal(env.submissions.length,0);assert.equal(env.accountCalls,0);
+  const file=path.win32.join('C:\\isolated','fulltext-assistant','review-'+first.id+'.pdf');assert(env.files.has(file));await env.app.stop();
+  const next=environment({initialQueue:JSON.parse(env.files.get(queuePath)),pdfIdentity:{async inspect(){return {status:'unknown'};}}});next.addItem(item(1));next.files.set(file,env.files.get(file));await next.app.start();
+  assert.equal(next.app.getSnapshot().tasks[0].state,'manual_review');assert(next.app.getSnapshot().tasks[0].pendingFilename);
+  await next.app.confirmDownloadedPDF(first.id);const done=next.app.getSnapshot().tasks[0];assert.equal(done.state,'imported');assert.equal(done.source,'pmc');assert.equal(done.fulltextVersion,'accepted');assert.equal(done.sourceReview,null);assert.equal(next.submissions.length,0);assert(!next.files.has(file));await next.app.stop();
+});
+
+test('review files changed after API acquisition cannot be confirmed',async()=>{
+  const env=environment({acquire:async()=>({needsReview:true,reviewBytes:env.pdf,source:'openalex',fulltextVersion:'unknown'}),pdfIdentity:{async inspect(){return {status:'unknown'};}}});env.addItem(item(1));await env.app.start();await env.app.captureItems([item(1)]);await until(()=>env.app.getSelectedTask()?.state==='manual_review');
+  const task=env.app.getSelectedTask(),file=path.win32.join('C:\\isolated','fulltext-assistant','review-'+task.id+'.pdf');env.files.set(file,new TextEncoder().encode('%PDF-1.7\n'+'changed'.repeat(300)+'\n%%EOF\n'));
+  await assert.rejects(env.app.confirmDownloadedPDF(task.id),/已改变/);assert.equal(env.importCount,0);await env.app.stop();
+});
+
+test('source settings and credentials stay separate and updater actions use its state machine',async()=>{
+  const context={URL,URLSearchParams,TextEncoder,TextDecoder};vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../src/fulltext-sources.js'),'utf8'),context);
+  const sourceModule={...context.FulltextSources,create:()=>({})};let updates={state:'idle',currentVersion:'0.9.0',autoUpdate:false},actions=[];
+  const updateModule={create(options){return{async initialize(){},getSnapshot(){return updates;},check(){actions.push('check');return updates={...updates,state:'available'};},install(){actions.push('install');},setAutoUpdate(value){updates={...updates,autoUpdate:value};options.emit();},openReleaseNotes(){actions.push('notes');},destroy(){actions.push('destroy');}};}};
+  const env=environment({sourceModule,updateModule});await env.app.start();const config=env.app.getSnapshot().sourceSettings;assert.equal(config.openalexContentEnabled,false);assert.equal(config.enabled.custom,false);
+  await env.app.saveSourceCredentials({openalex:'fictional-secret'});assert.equal(env.app.getSnapshot().sourceCredentials.openalex,true);assert(!JSON.stringify(env.app.getSnapshot()).includes('fictional-secret'));assert(!JSON.stringify([...env.prefs.values()]).includes('fictional-secret'));
+  await env.app.saveSourceSettings({...config,customTemplates:['https://repository.test/{doi}'],enabled:{...config.enabled,custom:true}});
+  const saved=env.prefs.get('extensions.fulltext-assistant.sourceSettings');await assert.rejects(env.app.saveSourceSettings({...config,customTemplates:['https://127.0.0.1/{doi}']}));assert.equal(env.prefs.get('extensions.fulltext-assistant.sourceSettings'),saved);
+  await assert.rejects(env.app.saveSourceSettings({...config,openalexDailyLimit:0}));await env.app.checkForUpdates();assert.deepEqual(actions,['check']);await env.app.installUpdate();await env.app.setAutoUpdate(true);assert.equal(env.app.getSnapshot().updateStatus.autoUpdate,true);await env.app.openReleaseNotes();await env.app.stop();assert.deepEqual(actions,['check','install','notes','destroy']);
+});
+
+
+test('pause and shutdown during a committed import preserve its source and attachment exactly once',async()=>{
+  for(const action of ['pause','stop']){
+    const gate=deferred(),env=environment({acquire:async()=>{await gate.promise;return{attachmentID:900,source:'pmc',fulltextVersion:'accepted',sourceDiagnostics:[{source:'pmc',code:'verified',message:'Fixture'}]};}});
+    await env.app.start();await env.app.captureItems([env.addItem(item(1))],{allowAssist:true});await until(()=>env.publisherCalls.length===1);const id=env.app.getSelectedTask().id;
+    const transition=action==='pause'?env.app.pauseTask(id):env.app.stop();gate.resolve();await transition;await until(()=>env.app.getSelectedTask().state==='imported');
+    const task=JSON.parse(env.files.get(queuePath)).tasks[0];assert.equal(task.attachmentID,900);assert.equal(task.source,'pmc');assert.equal(task.fulltextVersion,'accepted');assert.equal(env.submissions.length,0);if(action==='pause')await env.app.stop();
+  }
 });

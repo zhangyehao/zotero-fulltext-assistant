@@ -5,7 +5,8 @@
 ## 当前说明
 
 - [浏览器下载、目录配置与 PDF 核对](browser-downloads.md)
-- [0.8.0 更新说明](release-v0.8.0.md) · [本版验收记录](verification-v0.8.0.md)
+- [全文来源、API 和配置说明](fulltext-sources.md)
+- [0.9.0 更新说明](release-v0.9.0.md) · [本版验收记录](verification-v0.9.0.md)
 - [维护者发布与更新指南](PUBLISHING.md)
 - [后续更新注意事项与踩坑记录](UPDATING.md)
 - [隐私与本地数据](../PRIVACY.md)
@@ -15,6 +16,7 @@
 
 | 版本 | 记录 |
 | --- | --- |
+| 0.8.0 | [更新说明](release-v0.8.0.md) · [验收记录](verification-v0.8.0.md) |
 | 0.7.2 | [更新说明](release-v0.7.2.md) · [验收记录](verification-v0.7.2.md) |
 | 0.7.1 | [更新说明](release-v0.7.1.md) · [验收记录](verification-v0.7.1.md) |
 | 0.7.0 | [验收记录](verification-v0.7.0.md) |

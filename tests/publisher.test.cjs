@@ -8,7 +8,7 @@ const source = fs.readFileSync(path.join(__dirname,'../src/publisher.js'),'utf8'
 const pdf = () => new TextEncoder().encode('%PDF-1.7\n' + '0'.repeat(1200) + '\n%%EOF\n');
 const html = body => '<!doctype html><html><head></head><body>' + body + '</body></html>';
 
-function setup({url='https://publisher.test/article/one',doi='',pages={},rendered={},oa=[]}={}) {
+function setup({url='https://publisher.test/article/one',doi='',pages={},rendered={},oa=[],sources,pdfIdentity,sourceSettings={}}={}) {
   const files=new Map(),attachments=[],requests=[],imports=[],progress=[],hidden=[];
   let nextID=100,tempID=0,renderedOnce=false,active=0,maxActive=0;
   const item={id:1,libraryID:1,isRegularItem:()=>true,getField(name){return {url,DOI:doi}[name]||'';},getAttachments(){return attachments.map(value=>value.id);}};
@@ -31,7 +31,7 @@ function setup({url='https://publisher.test/article/one',doi='',pages={},rendere
   }
   const scope={URL,Promise,Date,JSON,Set,Map,Uint8Array,ArrayBuffer,TextDecoder,TextEncoder};
   vm.runInNewContext(source,scope);
-  const publisher=scope.FulltextPublisher.create({Zotero,Services:{},IOUtils,PathUtils:path.posix,parseHTML,HiddenBrowser});
+  const publisher=scope.FulltextPublisher.create({Zotero,Services:{},IOUtils,PathUtils:path.posix,parseHTML,HiddenBrowser,sources,pdfIdentity,getSourceSettings:()=>sourceSettings});
   return {publisher,api:scope.FulltextPublisher,item,Zotero,IOUtils,files,attachments,requests,imports,hidden,progress,onProgress:info=>progress.push(info),maxActive:()=>maxActive};
 }
 
@@ -59,11 +59,11 @@ test('a publisher URL rejected before JS cookie initialization is retried after 
   assert.equal(result.source,'rendered_publisher');assert.equal(env.requests.filter(value=>value.url.endsWith('/download.pdf')).length,2);assert.equal(env.imports.length,1);
 });
 
-test('HTML pretending to be a PDF is rejected and OA resolver remains a later fallback',async()=>{
+test('OA resolver succeeds before any publisher webpage or challenge is requested',async()=>{
   const env=setup({doi:'10.1234/one',pages:{'https://publisher.test/article/one':html('<a href="/bad.pdf">PDF</a>'),'https://publisher.test/bad.pdf':{body:html('Sign in to download'),type:'application/pdf'},'https://doi.org/10.1234/one':html('Paywall'),'https://repository.test/one.pdf':{bytes:pdf(),type:'application/pdf'}},oa:[{url:'https://repository.test/one.pdf'}]});
   const result=await env.publisher.acquire(env.item);
   assert.equal(result.source,'open_access');assert.equal(env.imports.length,1);assert.equal(result.sourceURL,'https://repository.test/one.pdf');
-  assert(env.requests.findIndex(value=>value.url==='https://repository.test/one.pdf')>env.requests.findIndex(value=>value.url==='https://publisher.test/bad.pdf'));
+  assert.deepEqual(env.requests.map(value=>value.url),['https://repository.test/one.pdf']);assert.equal(env.hidden.length,0);
 });
 
 test('existing local PDF skips requests and concurrent acquisition calls coalesce',async()=>{
@@ -303,4 +303,48 @@ test('cancelling a queued same-site item returns promptly and never sends its la
   await new Promise(resolve=>setTimeout(resolve,10));cancelled=true;
   await assert.rejects(two,error=>error.name==='AbortError');assert.equal(env.requests.length,1);release();await one;
   await new Promise(resolve=>setTimeout(resolve,10));assert.equal(env.requests.length,1);
+});
+
+
+function sourceFixture(candidates,extra={}){
+  const validated=[],prepared=[];
+  return{validated,prepared,async discover(input){this.input=input;return{candidates,diagnostics:[{source:'pmc',code:'fixture',message:'Public dataset fixture'}]};},async validateURL(value){validated.push(value);const url=new URL(value);if(url.protocol!=='https:'||['127.0.0.1','localhost'].includes(url.hostname))throw Error('not public');return url.href;},async prepareRequest(candidate){prepared.push(candidate);return{url:candidate.url,headers:{Accept:'application/pdf',...(candidate.credentialScope?{Authorization:'Bearer fixture-secret'}:{})},timeout:1000};},parsePage(){return{candidates:[]};},...extra};
+}
+test('API PDF identity is checked before import and publisher fallback is not contacted',async()=>{
+  const url='https://dataset.test/file.pdf',sources=sourceFixture([{url,source:'pmc',version:'published',kind:'pdf'}]),checks=[];
+  const env=setup({doi:'10.1234/one',sources,pages:{[url]:{bytes:pdf(),type:'application/pdf'}},pdfIdentity:{async inspect(file,paper,{bytes}){checks.push({file,paper,bytes});return{status:'match'};}}});
+  const result=await env.publisher.acquire(env.item);assert.equal(result.source,'pmc');assert.equal(result.fulltextVersion,'published');assert.equal(checks.length,1);assert.deepEqual(env.requests.map(value=>value.url),[url]);assert.equal(env.hidden.length,0);assert(env.requests[0].options.anon);assert.equal(env.requests[0].options.followRedirects,false);
+});
+test('API redirects are validated and credentials never cross download origins or change endpoints',async()=>{
+  for(const target of ['https://files.test/article.pdf','https://api.test/other.pdf']){
+    const url='https://api.test/download.pdf',sources=sourceFixture([{url,source:'openalex',credentialScope:'openalex',kind:'pdf'}]);
+    const env=setup({doi:'10.1234/one',sources,pages:{[url]:{status:302,headers:{Location:target}},[target]:{bytes:pdf(),type:'application/pdf'}},pdfIdentity:{async inspect(){return{status:'match'};}}});
+    const result=await env.publisher.acquire(env.item);assert(result.attachmentID);assert.equal(env.requests[0].options.headers.Authorization,'Bearer fixture-secret');assert.equal(env.requests[1].options.headers.Authorization,undefined);assert(sources.validated.includes(target));assert.equal(sources.prepared.length,1,'One allowance reservation for a redirected download');
+  }
+});
+test('unsafe API redirects and wrong article PDFs never enter Zotero',async()=>{
+  for(const mode of ['redirect','mismatch']){
+    const url='https://dataset.test/file.pdf',sources=sourceFixture([{url,source:'pmc',kind:'pdf'}]);
+    const env=setup({doi:'10.1234/one',sources,sourceSettings:{enabled:{publisher:false}},pages:{[url]:mode==='redirect'?{status:302,headers:{Location:'https://127.0.0.1/private.pdf'}}:{bytes:pdf(),type:'application/pdf'}},pdfIdentity:{async inspect(){return{status:'mismatch'};}}});
+    const result=await env.publisher.acquire(env.item);assert.equal(result.state,'not_found');assert.equal(env.imports.length,0);assert.equal(env.hidden.length,0);assert.equal(env.requests.length,1);assert(result.sourceDiagnostics.some(value=>value.code===(mode==='redirect'?'download_failed':'pdf_mismatch')));
+  }
+});
+test('unknown API identity becomes a single review candidate and does not import silently',async()=>{
+  const url='https://dataset.test/file.pdf',sources=sourceFixture([{url,source:'pmc',version:'accepted',kind:'pdf'}]);
+  const env=setup({doi:'10.1234/one',sources,sourceSettings:{enabled:{publisher:false}},pages:{[url]:{bytes:pdf(),type:'application/pdf'}},pdfIdentity:{async inspect(){return{status:'unknown'};}}});
+  const result=await env.publisher.acquire(env.item);assert.equal(result.needsReview,true);assert.equal(result.fulltextVersion,'accepted');assert.equal(result.paper.doi,'10.1234/one');assert.equal(result.reviewBytes.length,pdf().length);assert.equal(env.imports.length,0);assert.equal([...env.files.keys()].some(value=>value.startsWith('/tmp/')),false);
+});
+test('Extra DOI and PMCID are passed to sources and existing files skip all APIs',async()=>{
+  const sources=sourceFixture([]),env=setup({sources,sourceSettings:{enabled:{publisher:false}}});env.item.getExtraField=name=>({DOI:'10.1234/from-extra',PMCID:'PMC12345'})[name]||'';
+  await env.publisher.acquire(env.item);assert.equal(sources.input.doi,'10.1234/from-extra');assert.equal(sources.input.pmcid,'PMC12345');
+  env.files.set('/existing.pdf',pdf());env.attachments.push({id:9,attachmentContentType:'application/pdf',async getFilePathAsync(){return '/existing.pdf';}});sources.discover=async()=>{throw Error('must not discover');};assert.equal((await env.publisher.acquire(env.item)).source,'existing');
+});
+test('pause during anonymous transfer aborts it and does not import or visit another source',async()=>{
+  const url='https://dataset.test/file.pdf';let cancelled=false,aborted=false;
+  const sources=sourceFixture([{url,source:'pmc',kind:'pdf'}]),env=setup({doi:'10.1234/one',sources,pages:{[url]:({options})=>{options.cancellerReceiver(()=>{aborted=true;});cancelled=true;return new Promise(()=>{});}}});
+  await assert.rejects(env.publisher.acquire(env.item,{isCancelled:()=>cancelled}),{name:'AbortError'});assert(aborted);assert.equal(env.requests.length,1);assert.equal(env.imports.length,0);
+});
+test('publisher PDFs also require identity verification before automatic import',async()=>{
+  const url='https://publisher.test/article/one',env=setup({pages:{[url]:{bytes:pdf(),type:'application/pdf'}},pdfIdentity:{async inspect(){return{status:'mismatch'};}}});
+  const result=await env.publisher.acquire(env.item);assert.equal(result.state,'not_found');assert.equal(env.imports.length,0);assert(result.sourceDiagnostics.some(value=>value.code==='pdf_mismatch'));
 });

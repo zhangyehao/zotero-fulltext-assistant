@@ -7,7 +7,7 @@ async function startup(data) {
   chromeHandle = aom.registerChrome(Services.io.newURI(data.rootURI + "manifest.json"), [
     ["content", "fulltext-assistant", "./"]
   ]);
-  for (const file of ["src/i18n-backend-data.js", "src/i18n.js", "src/task-model.js", "src/access-history.js", "src/credentials.js", "src/session.js", "src/ablesci.js", "src/publisher-session.js", "src/publisher.js", "src/publisher-window.js", "src/edge-host.js", "src/edge-acquire.js", "src/pdf-identity.js", "src/download-folders.js", "src/download-watch.js", "src/app.js"]) {
+  for (const file of ["src/i18n-backend-data.js", "src/i18n.js", "src/task-model.js", "src/access-history.js", "src/credentials.js", "src/session.js", "src/ablesci.js", "src/publisher-session.js", "src/source-usage.js", "src/fulltext-sources.js", "src/update.js", "src/publisher.js", "src/publisher-window.js", "src/edge-host.js", "src/edge-acquire.js", "src/pdf-identity.js", "src/download-folders.js", "src/download-watch.js", "src/app.js"]) {
     Services.scriptloader.loadSubScript(data.rootURI + file, globalThis);
   }
   try {

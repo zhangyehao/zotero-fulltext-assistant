@@ -1510,6 +1510,201 @@ async function siteControls(mode = "request") {
   assert.equal(subscriptions, 0);
   pageTab("settings").click();
   assert.equal(root.dataset.activePage, "messages", "destroy removes page navigation handlers");
+  // Source credentials and native update controls use only app APIs, preserve
+  // concurrent edits, and never infer a successful download from a source URL.
+  {
+    const pane = parseHTML("<html><body>" + markup + "</body></html>");
+    const node = id => pane.document.getElementById(id);
+    const state = { version: "0.9.0", settings: { language: "zh-CN" }, session: { status: "signed_out" }, tasks: [], messages: [],
+      sourceCredentials: { openalex: true, core: true, semanticScholar: false },
+      sourceSettings: { enabled: { publisher: true, openAccess: true, openalex: true, pmc: true, core: true, semanticScholar: true, custom: false }, versionPreference: "accepted", customTemplates: [], openalexContentEnabled: false, openalexDailyLimit: 100 },
+      updateStatus: { state: "idle", currentVersion: "0.9.0", availableVersion: null, checkedAt: null, autoUpdate: true, canInstall: false, canCheck: true, releaseNotesAvailable: true } };
+    const actions = [];let emit;
+    const api = { getSnapshot: () => structuredClone(state), subscribe: fn => { emit = fn;return () => {}; }, localize: node => i18n.apply(node, state.settings.language),
+      saveSourceSettings: async value => { actions.push(["sources", JSON.parse(JSON.stringify(value))]);state.sourceSettings = JSON.parse(JSON.stringify(value));emit(); },
+      saveSourceCredentials: async value => { actions.push(["keys", JSON.parse(JSON.stringify(value))]);for (const key of Object.keys(value)) state.sourceCredentials[key] = value[key] !== null;emit(); },
+      checkForUpdates: async () => { actions.push(["checkUpdates"]);state.updateStatus = { ...state.updateStatus, state: "current", checkedAt: "2026-11-09T10:00:00Z" };emit(); },
+      installUpdate: async () => { actions.push(["installUpdate"]);state.updateStatus = { ...state.updateStatus, state: "installed", canInstall: false, currentVersion: "0.9.1" };emit(); },
+      setAutoUpdate: async value => { actions.push(["autoUpdate", value]);state.updateStatus.autoUpdate = value;emit(); },
+      openReleaseNotes: async () => { actions.push(["releaseNotes"]); }
+    };
+    pane.window.Zotero = { FulltextAssistant: api };
+    const isolated = { window: pane.window, document: pane.document, Zotero: pane.window.Zotero, URL, Date };
+    vm.runInNewContext(script, isolated);await flush();
+    const type = (id, value) => { node(id).value = value;node(id).dispatchEvent(new pane.window.Event("input")); };
+    const check = (id, checked) => { node(id).checked = checked;node(id).dispatchEvent(new pane.window.Event("change")); };
+    const send = id => node(id).dispatchEvent(new pane.window.Event("submit", { cancelable: true }));
+    const select = (id, value) => { for (const option of node(id).querySelectorAll("option")) option.selected = option.value === value;node(id).dispatchEvent(new pane.window.Event("change")); };
+    assert.deepEqual(actions, [], "opening or rendering preferences never checks or installs an update");
+    assert.equal(node("fta-pref-source-version").value, "accepted");
+    assert.equal(node("fta-pref-openalex-content").checked, false);
+    assert.equal(node("fta-pref-openalex-limit").disabled, true);
+    assert.equal(node("fta-pref-source-custom").checked, false);
+    assert.equal(node("fta-pref-version").textContent, "v0.9.0");
+    assert.equal(node("fta-pref-install-update").hidden, true);
+    assert.equal(node("fta-pref-check-update").getAttribute("aria-label"), "检查更新");
+    for (const key of ["openalex", "core", "semanticScholar"]) {
+      assert.equal(node("fta-pref-key-" + key).type, "password");
+      assert.equal(node("fta-pref-key-" + key).value, "");
+      assert.equal(node("fta-pref-key-" + key).getAttribute("autocomplete"), "new-password");
+    }
+    assert.equal(node("fta-pref-key-openalex-state").textContent, "已保存密钥");
+    assert.equal(node("fta-pref-key-semanticScholar-state").textContent, "未保存密钥");
+    assert.ok(node("fta-pref-panel-settings").contains(node("fta-pref-source-settings-form")));
+    assert.ok(node("fta-pref-panel-settings").contains(node("fta-pref-source-credentials-form")));
+    type("fta-pref-key-openalex", "new-key-fixture");
+    check("fta-pref-key-core-clear", true);
+    check("fta-pref-source-pmc", false);
+    check("fta-pref-source-custom", true);
+    select("fta-pref-source-version", "any");
+    type("fta-pref-source-templates", "https://first.example/doi/{doi}; https://second.example/?doi={doi}\nhttps://first.example/doi/{doi}");
+    check("fta-pref-openalex-content", true);
+    type("fta-pref-openalex-limit", "27");
+    assert.equal(node("fta-pref-tab-settings").dataset.dirty, "true");
+    state.sourceSettings = { ...state.sourceSettings, customTemplates: ["https://remote.example/{doi}"], versionPreference: "published", openalexDailyLimit: 100 };
+    state.settings.language = "en";emit();node("fta-pref-tab-messages").click();node("fta-pref-tab-settings").click();
+    assert.equal(node("fta-pref-key-openalex").value, "new-key-fixture", "snapshot refresh and navigation keep the secret draft");
+    assert.match(node("fta-pref-source-templates").value, /first\.example/);
+    assert.equal(node("fta-pref-source-version").value, "any");
+    assert.equal(node("fta-pref-openalex-limit").value, "27");
+    assert.equal(node("fta-pref-source-pmc").checked, false);
+    assert.equal(node("fta-pref-key-core-clear").checked, true);
+    assert.equal(node("fta-pref-save-sources").textContent, "Save full-text sources");
+    send("fta-pref-source-credentials-form");await flush();
+    assert.deepEqual(actions.at(-1), ["keys", { openalex: "new-key-fixture", core: null }], "omitted keys are kept, explicit null removes only the selected saved key");
+    assert.equal(node("fta-pref-key-openalex").value, "", "only a successful save clears the password draft");
+    assert.equal(node("fta-pref-key-core-clear").checked, false);
+    assert.equal(node("fta-pref-key-core-state").textContent, "No saved key");
+    assert.equal(node("fta-pref-tab-settings").dataset.dirty, "true", "saving credentials does not discard the independent source draft");
+    assert.equal(state.sourceSettings.openalexContentEnabled, false, "saving an OpenAlex key cannot silently enable paid-credit usage");
+    assert.equal(actions.some(action => action[0] === "sources"), false);
+    const saveKeys = api.saveSourceCredentials;
+    api.saveSourceCredentials = async () => { throw new Error("Internal failure including a-private-secret"); };
+    type("fta-pref-key-semanticScholar", "retry-secret-fixture");send("fta-pref-source-credentials-form");await flush();
+    assert.equal(node("fta-pref-key-semanticScholar").value, "retry-secret-fixture");
+    assert.equal(node("fta-pref-source-key-state").dataset.error, "true");
+    assert.match(node("fta-pref-source-key-state").textContent, /did not finish.*input was kept/i);
+    assert.doesNotMatch(pane.document.body.textContent, /a-private-secret|retry-secret-fixture/);
+    api.saveSourceCredentials = saveKeys;
+    type("fta-pref-key-semanticScholar", " ");const unchangedKeyCalls = actions.length;
+    send("fta-pref-source-credentials-form");await flush();assert.equal(actions.length, unchangedKeyCalls, "blank fields do not delete saved keys or call the credentials API");
+    assert.equal(state.sourceCredentials.openalex, true);
+    send("fta-pref-source-settings-form");await flush();
+    const saved = actions.at(-1);
+    assert.equal(saved[0], "sources");
+    assert.deepEqual(saved[1].customTemplates, ["https://first.example/doi/{doi}", "https://second.example/?doi={doi}"]);
+    assert.equal(saved[1].versionPreference, "any");assert.equal(saved[1].enabled.pmc, false);assert.equal(saved[1].enabled.custom, true);
+    assert.equal(saved[1].openalexContentEnabled, true);assert.equal(saved[1].openalexDailyLimit, 27);
+    assert.equal(Object.hasOwn(saved[1], "openalex"), false, "secret keys never enter ordinary source settings");
+    assert.equal(node("fta-pref-tab-settings").dataset.dirty, "false");
+    assert.match(node("fta-pref-source-save-state").textContent, /settings saved/);
+    const sourceSave = api.saveSourceSettings;
+    api.saveSourceSettings = async () => { throw new Error("Source settings could not be saved."); };
+    type("fta-pref-source-templates", "https://retained.example/{doi}");send("fta-pref-source-settings-form");await flush();
+    assert.equal(node("fta-pref-source-templates").value, "https://retained.example/{doi}");
+    assert.equal(node("fta-pref-source-save-state").dataset.error, "true");
+    assert.match(node("fta-pref-source-save-state").textContent, /could not be saved/);
+    api.saveSourceSettings = sourceSave;
+    for (const invalid of ["http://insecure.example/{doi}", "https://example.org/no-placeholder", "https://user:pass@example.org/{doi}"]) {
+      type("fta-pref-source-templates", invalid);const count = actions.length;send("fta-pref-source-settings-form");await flush();
+      assert.equal(actions.length, count);assert.equal(node("fta-pref-source-save-state").dataset.error, "true");
+    }
+    type("fta-pref-source-templates", "https://retained.example/{doi}");
+    for (const invalid of ["0", "1001", "1.5", "bad"]) {
+      type("fta-pref-openalex-limit", invalid);const count = actions.length;send("fta-pref-source-settings-form");await flush();
+      assert.equal(actions.length, count);assert.match(node("fta-pref-source-save-state").textContent, /integer from 1 to 1000/);
+    }
+    type("fta-pref-openalex-limit", "35");
+    type("fta-pref-key-openalex", "pending-update-secret");
+    let finishUpdateCheck;
+    api.checkForUpdates = async () => { actions.push(["checkUpdates"]);state.updateStatus.state = "checking";emit();await new Promise(resolve => { finishUpdateCheck = resolve; });state.updateStatus = { ...state.updateStatus, state: "available", availableVersion: "0.9.1", canInstall: true, checkedAt: "2026-11-09T11:00:00Z" };emit(); };
+    node("fta-pref-check-update").click();await flush();
+    assert.equal(node("fta-pref-check-update").disabled, true);
+    assert.equal(node("fta-pref-check-update").getAttribute("aria-busy"), "true");
+    assert.equal(node("fta-pref-update-state").textContent, "Checking for updates…");
+    assert.equal(node("fta-pref-key-openalex").value, "pending-update-secret");
+    finishUpdateCheck();await flush();
+    assert.equal(node("fta-pref-update-state").textContent, "Update available: v0.9.1");
+    assert.equal(node("fta-pref-install-update").hidden, false);assert.equal(node("fta-pref-install-update").disabled, false);
+    assert.equal(actions.some(action => action[0] === "installUpdate"), false, "discovering an update never installs it");
+    assert.equal(node("fta-pref-openalex-limit").value, "35");
+    assert.equal(node("fta-pref-key-openalex").value, "pending-update-secret");
+    node("fta-pref-release-notes").click();await flush();assert.deepEqual(actions.at(-1), ["releaseNotes"]);
+    assert.equal(actions.some(action => action[0] === "installUpdate"), false);
+    check("fta-pref-auto-update", false);await flush();assert.deepEqual(actions.at(-1), ["autoUpdate", false]);
+    const autoUpdate = api.setAutoUpdate;api.setAutoUpdate = async () => { throw new Error("Automatic update preference could not be saved."); };
+    check("fta-pref-auto-update", true);await flush();
+    assert.equal(node("fta-pref-auto-update").checked, false, "failed native preference writes restore the actual persisted setting");
+    assert.equal(node("fta-pref-update-action-status").dataset.error, "true");
+    api.setAutoUpdate = autoUpdate;
+    state.updateStatus.globalUpdatesEnabled = false;emit();assert.equal(node("fta-pref-update-global-note").hidden, false);
+    state.settings.language = "zh-TW";emit();
+    assert.equal(node("fta-pref-save-sources").textContent, "儲存全文來源");
+    assert.equal(node("fta-pref-update-state").textContent, "可更新至 v0.9.1");
+    assert.equal(node("fta-pref-check-update").getAttribute("aria-label"), "檢查更新");
+    assert.equal(node("fta-pref-key-openalex").value, "pending-update-secret");
+    state.updateStatus.state = "downloading";state.updateStatus.progress = { percent: 42 };emit();
+    assert.equal(node("fta-pref-update-state").textContent, "正在下載更新 · 42%");
+    assert.equal(node("fta-pref-install-update").disabled, true);
+    state.updateStatus.state = "available";state.updateStatus.progress = null;emit();
+    node("fta-pref-install-update").click();await flush();assert.deepEqual(actions.at(-1), ["installUpdate"]);
+    assert.equal(node("fta-pref-version").textContent, "v0.9.1");assert.equal(node("fta-pref-update-state").textContent, "更新已安裝");
+    state.updateStatus.restartRequired = true;emit();assert.match(node("fta-pref-update-message").textContent, /需要重新啟動/);
+    state.updateStatus = { ...state.updateStatus, state: "error", restartRequired: false, message: "更新失败，可重试", canCheck: false, canInstall: false };emit();
+    assert.equal(node("fta-pref-check-update").disabled, true, "native installation reconciliation can block repeated checks");
+    assert.equal(node("fta-pref-update-state").dataset.error, "true");
+    assert.equal(node("fta-pref-update-message").textContent, "更新失敗，可重試");
+    state.updateStatus.message = "<img src=x onerror=bad>";emit();assert.equal(node("fta-pref-update-message").querySelector("img"), null);
+    state.settings.language = "en";
+    state.tasks = ["published", "accepted", "submitted", "unknown"].map((version, index) => ({ id: "source-version-" + index, title: "Version fixture " + index, doi: "10.1234/" + index, state: "imported", source: ["openalex", "pmc", "core", "semanticScholar"][index], fulltextVersion: version, completedAt: "2026-11-09T10:00:00Z" }));emit();
+    node("fta-pref-task-filters").querySelector('[data-filter="all"]').click();
+    const history = node("fta-pref-task-list").textContent;
+    assert.match(history, /Full-text version: Published/);assert.match(history, /Full-text version: Accepted manuscript/);
+    assert.match(history, /Full-text version: Preprint/);assert.match(history, /Full-text version: Unverified/);
+    assert.match(history, /Source: OpenAlex/);assert.match(history, /Source: PubMed Central/);assert.match(history, /Source: CORE/);assert.match(history, /Source: Semantic Scholar/);
+    state.tasks[0].sourceDiagnostics = [
+      { source: "openalex", code: "timeout", message: "The source lookup reached its time limit." },
+      { source: "core", code: "download_failed", message: "此来源未完成下载，已继续其他获取方式。" },
+      { source: "semanticScholar", code: "metadata_only", message: "This source reports links, not a verified hosted PDF." },
+      { source: "custom", code: "human_verification", message: "The page requires human verification." },
+      { source: "unknown", code: "future_code", message: "<img src=x onerror=bad>" }
+    ];emit();
+    let sourceDetail = node("fta-pref-task-list").querySelector('[data-task-id="source-version-0"] .fta-source-diagnostics');
+    assert.equal(sourceDetail.querySelector("summary").textContent, "Source check details");
+    assert.equal(sourceDetail.hasAttribute("open"), false, "source diagnostics start collapsed");
+    assert.match(sourceDetail.textContent, /lookup or download timed out/);
+    assert.match(sourceDetail.textContent, /download from this source failed/);
+    assert.match(sourceDetail.textContent, /API results from this source are used only to discover links/);
+    assert.doesNotMatch(sourceDetail.textContent, /candidate link was found/, "metadata diagnostics do not claim a candidate exists");
+    assert.match(sourceDetail.textContent, /requires human verification/);
+    assert.equal(sourceDetail.querySelector("img"), null, "unknown backend messages are safe text");
+    sourceDetail.setAttribute("open", "");emit();
+    node("fta-pref-task-filters").querySelector('[data-filter="unfinished"]').click();
+    node("fta-pref-task-filters").querySelector('[data-filter="all"]').click();
+    sourceDetail = node("fta-pref-task-list").querySelector('[data-task-id="source-version-0"] .fta-source-diagnostics');
+    assert.equal(sourceDetail.hasAttribute("open"), true, "source details retain expansion across refresh and filtering");
+    state.settings.language = "zh-CN";emit();
+    assert.match(node("fta-pref-task-list").textContent, /来源检查详情/);
+    assert.match(node("fta-pref-task-list").textContent, /此来源查询或下载超时/);
+    assert.match(node("fta-pref-task-list").textContent, /此来源下载失败，未取得可用全文/);
+    assert.doesNotMatch(node("fta-pref-task-list").textContent, /The source lookup reached/);
+    state.tasks[0].sourceDiagnostics = Array.from({ length: 30 }, () => ({ source: "openalex", code: "timeout" }));emit();
+    assert.equal(node("fta-pref-task-list").querySelectorAll(".fta-source-diagnostic-row").length, 24);
+    state.updateStatus = { ...state.updateStatus, state: "idle", canCheck: true, message: "", autoUpdate: false };
+    api.checkForUpdates = async () => { state.updateStatus = { ...state.updateStatus, state: "error", errorCode: "CHECK_TIMEOUT", message: "检查更新超时，可以重新检查。" };emit();return { ...state.updateStatus }; };emit();
+    node("fta-pref-check-update").click();await flush();
+    assert.equal(node("fta-pref-update-action-status").dataset.error, "true", "resolved native failure snapshots are not reported as successful checks");
+    assert.match(node("fta-pref-update-action-status").textContent, /检查更新超时/);
+    api.setAutoUpdate = async () => { state.updateStatus = { ...state.updateStatus, state: "error", errorCode: "SETTINGS_FAILED", message: "无法保存 Zotero 自动更新设置，请重试。", autoUpdate: false };emit();return { ...state.updateStatus }; };
+    check("fta-pref-auto-update", true);await flush();
+    assert.equal(node("fta-pref-auto-update").checked, false);
+    assert.equal(node("fta-pref-update-action-status").dataset.error, "true", "resolved native preference errors retain a visible failure");
+    assert.match(node("fta-pref-update-action-status").textContent, /无法保存/);
+    state.settings.language = "en";emit();
+    assert.equal(node("fta-pref-update-message").textContent, "The Zotero automatic update setting could not be saved. Try again.");
+    assert.equal(node("fta-pref-key-openalex").value, "pending-update-secret");
+    isolated.FulltextPreferences.destroy();assert.equal(node("fta-pref-key-openalex").value, "", "unmount clears secret drafts");
+  }
   // Rejected asynchronous opening checks are caught inside a separate pane.
   {
     const failedPane = parseHTML("<html><body>" + markup + "</body></html>");let failedOpens = 0;
@@ -1593,5 +1788,5 @@ async function siteControls(mode = "request") {
   assert.match(checkInSite.get("ft-status").textContent, /View the balance and reward in AbleSci settings/);
   checkInSite.setLanguage("zh-TW");await flush();assert.equal(checkInSite.get("ft-read").textContent, "刷新簽到狀態");
   checkInSite.close();assert.equal(checkInSite.languageSubscriptions(), 0);
-  console.log("Preferences tests passed: batch scopes and exclusive filters, completed history, three-language UI and browser chrome, preserved drafts and metadata, title/DOI copy, download diagnosis and explicit review, institutional confirmation/undo, existing task workflows and cleanup.");
+  console.log("Preferences tests passed: batch scopes and exclusive filters, completed history, three-language UI and browser chrome, preserved drafts and metadata, title/DOI copy, download diagnosis and explicit review, institutional confirmation/undo, source credentials and quota consent, template validation, native update controls, existing task workflows and cleanup.");
 })().catch(error => { console.error(error); process.exitCode = 1; });

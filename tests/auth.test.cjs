@@ -163,3 +163,15 @@ test('logout during encrypted backup cannot return an already received old-accou
   await assert.rejects(request,/会话已切换/);await clearing;
   await session.destroy();
 });
+
+
+test('API keys use separate provider realms and never overwrite AbleSci password or session',async()=>{
+  const env=environment();await env.credentials.save({username:'fixture',password:'account-secret'});await env.credentials.writeSession({version:1,cookies:[{value:'session-secret'}]});
+  await env.credentials.saveAPIKeys({openalex:' oa-fixture ',core:'core-fixture',semanticScholar:'s2-fixture'});
+  assert.equal(await env.credentials.getAPIKey('openalex'),'oa-fixture');assert.equal(env.logins.length,5);assert.equal((await env.credentials.getForLogin()).password,'account-secret');
+  assert(!JSON.stringify(await env.credentials.getAPIKeySummary()).includes('fixture'));
+  await env.credentials.saveAPIKeys({openalex:'',core:null});assert.equal(await env.credentials.getAPIKey('openalex'),'oa-fixture');assert.equal(await env.credentials.getAPIKey('core'),'');assert.equal((await env.credentials.readSession()).cookies[0].value,'session-secret');
+  await assert.rejects(env.credentials.saveAPIKeys({openalex:'must-not-save',unknown:'bad'}));assert.equal(await env.credentials.getAPIKey('openalex'),'oa-fixture');
+  await assert.rejects(env.credentials.saveAPIKeys({openalex:'header\ninjection'}));
+  await env.credentials.remove();assert.equal(await env.credentials.getAPIKey('semanticScholar'),'s2-fixture');
+});

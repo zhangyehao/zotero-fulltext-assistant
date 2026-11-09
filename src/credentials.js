@@ -5,6 +5,11 @@
   const ACCOUNT_REALM = "AbleSci account";
   const SESSION_REALM = "AbleSci session cookies";
   const SESSION_USER = "plugin-session-v1";
+  const PROVIDERS = ["openalex", "core", "semanticScholar"];
+  function keyRealm(provider) {
+    if (!PROVIDERS.includes(provider)) throw new Error("不支持的全文 API 来源。");
+    return "Fulltext API key: " + provider;
+  }
 
   function create({ Services }) {
     if (!Services?.logins) throw new Error("当前 Zotero 的安全凭据存储不可用。");
@@ -39,6 +44,28 @@
     }
     const removeRealm = realm => change(() => { for (const value of find(realm)) Services.logins.removeLogin(value); });
     return {
+      async getAPIKey(provider) {
+        const values = await read(keyRealm(provider));
+        return values[0]?.password || "";
+      },
+      async getAPIKeySummary() {
+        const result = {};
+        for (const provider of PROVIDERS) result[provider] = (await read(keyRealm(provider))).length > 0;
+        return result;
+      },
+      async saveAPIKeys(values) {
+        if (!values || typeof values !== "object" || Array.isArray(values)) throw new Error("API key 配置格式无效。");
+        // Validate every field before changing any realm. Blank inputs retain a saved key.
+        for (const [provider, value] of Object.entries(values)) {
+          keyRealm(provider);
+          if (value !== null && (typeof value !== "string" || value.length > 4096 || /[\r\n\u0000]/.test(value))) throw new Error("API key 格式无效。");
+        }
+        for (const [provider, value] of Object.entries(values)) {
+          if (value === null) await removeRealm(keyRealm(provider));
+          else if (value.trim()) await put(keyRealm(provider), provider, value.trim());
+        }
+        return this.getAPIKeySummary();
+      },
       async getSummary() {
         const values = await read(ACCOUNT_REALM);
         return { saved: values.length > 0, username: values[0]?.username || "" };

@@ -168,7 +168,7 @@
       challenge: challenge ? (cloudflare ? "cloudflare" : "verification") : null, mismatch: false };
   }
 
-  function create({ Zotero, Services, IOUtils, PathUtils, parseHTML, HiddenBrowser: BrowserClass, publisherSession }) {
+  function create({ Zotero, Services, IOUtils, PathUtils, parseHTML, HiddenBrowser: BrowserClass, publisherSession, pdfIdentity, sources, getSourceSettings = () => ({}) }) {
     if (!Zotero || !Services || !IOUtils || !PathUtils || typeof parseHTML !== "function") throw new Error("出版社获取模块缺少运行依赖。");
     const inFlight = new Map();
     const siteQueues = new Map();
@@ -207,7 +207,7 @@
       const check = () => { if (isCancelled()) throw abort(); };
       const progress = (stage, message, url) => { check(); onProgress({ stage, message, url: url || null }); };
       async function cancellable(operation, cancel = () => {}) {
-        check();
+        if (isCancelled()) { try { cancel(); } catch (_) {} throw abort(); }
         let done = false;
         const monitor = (async () => {
           while (!done) {
@@ -223,7 +223,12 @@
       check();
       if (oldID) return { attachmentID: oldID, source: "existing", sourceURL: null };
       if (publisherSession) await publisherSession.initialize().catch(() => {});
-      const expectedDOI = doi(item.getField("DOI"));
+      const expectedDOI = doi(item.getField("DOI") || item.getExtraField?.("DOI"));
+      const expectedTitle = item.getField("title");
+      const pmcid = String(item.getExtraField?.("PMCID") || item.getField("extra") || "").match(/\bPMC[1-9]\d{0,11}\b/i)?.[0]?.toUpperCase() || "";
+      const sourceDiagnostics = [];
+      let pendingReview = null;
+      const config = () => getSourceSettings() || {};
       const articleURL = httpURL(item.getField("url"));
       const starts = [...new Set([articleURL, expectedDOI ? "https://doi.org/" + expectedDOI : null].filter(Boolean))];
       const triedDownloads = new Set();
@@ -280,7 +285,7 @@
         }
         return result;
       }
-      async function importPDF(bytes, sourceURL, source) {
+      async function importPDF(bytes, sourceURL, source, fulltextVersion = "unknown") {
         check();
         if (!validPDF(bytes)) return null;
         try {
@@ -294,13 +299,30 @@
         try {
           await IOUtils.write(file, bytes);
           check();
+          if (pdfIdentity) {
+            let identity;
+            try { identity = await pdfIdentity.inspect(file, { doi: expectedDOI, title: expectedTitle }, { bytes }); }
+            catch (_) { identity = { status: "unknown" }; }
+            check();
+            if (identity.status === "mismatch") {
+              sourceDiagnostics.push({ source, code: "pdf_mismatch", message: "PDF 的 DOI 或标题与目标论文冲突，已拒绝自动入库。" });
+              return null;
+            }
+            if (identity.status !== "match") {
+              pendingReview ||= { needsReview: true, paper: {doi:expectedDOI,title:expectedTitle}, reviewBytes: bytes, source, sourceURL, fulltextVersion, publisherURL };
+              sourceDiagnostics.push({ source, code: "pdf_unknown", message: "已取得 PDF，但 DOI 和标题证据不足，需要预览核对。" });
+              return null;
+            }
+          }
+          // The item may have been edited while the request or PDF extraction was in flight.
+          if (doi(item.getField("DOI") || item.getExtraField?.("DOI")) !== expectedDOI || item.getField("title") !== expectedTitle || item.deleted) throw abort();
           const lateDuplicate = await existingPDF(item);
           check();
           if (lateDuplicate) return { attachmentID: lateDuplicate, source: "existing", sourceURL: null };
           const attachment = await Zotero.Attachments.importFromFile({ file, parentItemID: item.id, libraryID: item.libraryID, title: "全文", contentType: "application/pdf" });
           // The import has committed. Cancellation now must not misreport it as absent.
           try { attachment.setField("url", sourceURL); await attachment.saveTx(); } catch (_) {}
-          return { attachmentID: attachment.id, source, sourceURL, publisherURL };
+          return { attachmentID: attachment.id, source, sourceURL, publisherURL, fulltextVersion, sourceDiagnostics };
         }
         finally {
           await IOUtils.remove(file, { ignoreAbsent: true }).catch(() => {});
@@ -313,6 +335,74 @@
           error.name = "AttachmentImportError";
           throw error;
         }
+      }
+      async function sourceRequest(candidate) {
+        check();
+        const prepared = candidate.source === "open_access"
+          ? { url: await sources.validateURL(candidate.url, { isCancelled }), headers: { Accept: "application/pdf,text/html;q=0.9" }, timeout: 20000 }
+          : await sources.prepareRequest(candidate, { isCancelled });
+        let url = prepared.url, headers = { ...prepared.headers };
+        const seen = new Set();
+        for (let hop = 0; hop < 6; hop++) {
+          check();
+          url = await sources.validateURL(url, { isCancelled });
+          if (seen.has(url)) throw new Error("下载重定向循环。");
+          seen.add(url);
+          let cancel = () => {}, exceeded = false;
+          const operation = Zotero.HTTP.request("GET", url, {
+            responseType: "arraybuffer", successCodes: false, anon: true, followRedirects: false,
+            timeout: prepared.timeout || 20000, headers, debug: false, logBodyLength: 0, errorDelayMax: 0, noRetryOnThrottle: true,
+            cancellerReceiver(value) { cancel = value; },
+            requestObserver(xhr) { xhr.addEventListener?.("progress", event => { if (event.loaded > MAX_PDF_BYTES) { exceeded = true; xhr.abort(); } }); },
+          });
+          const response = await cancellable(operation, () => cancel());
+          if (exceeded) throw new Error("下载文件超过上限。");
+          const status = Number(response.status);
+          if (status >= 300 && status < 400) {
+            const location = response.getResponseHeader?.("Location");
+            if (!location) throw new Error("下载重定向缺少地址。");
+            const next = await sources.validateURL(new URL(location, url).href, { isCancelled });
+            if (new URL(next).origin !== new URL(url).origin) headers = { Accept: headers.Accept };
+            // Even a same-origin redirect cannot move an API credential to another endpoint.
+            else if (new URL(next).pathname !== new URL(url).pathname || new URL(next).search !== new URL(url).search) headers = { Accept: headers.Accept };
+            url = next; continue;
+          }
+          const actual = response.responseURL || url;
+          if (new URL(actual).href !== new URL(url).href) throw new Error("下载器返回了未经核验的重定向。");
+          const bytes = asBytes(response.response);
+          if (bytes.length > MAX_PDF_BYTES) throw new Error("下载文件超过上限。");
+          return { bytes, url, status, type: response.getResponseHeader?.("Content-Type") || "", challenge: response.getResponseHeader?.("cf-mitigated") === "challenge" };
+        }
+        throw new Error("下载重定向次数超过上限。");
+      }
+      async function trySource(candidate, depth = 0) {
+        check();
+        if (triedDownloads.size >= 24 || triedDownloads.has("api:" + candidate.url)) return null;
+        triedDownloads.add("api:" + candidate.url);
+        progress("open_access", "正在下载并核对开放全文候选…", candidate.url);
+        try {
+          const result = await sourceRequest(candidate);
+          check();
+          if (result.challenge || [401,403,429].includes(result.status)) {
+            sourceDiagnostics.push({ source: candidate.source, code: result.challenge ? "human_verification" : "download_restricted", message: "此来源下载受限；继续尝试其他来源或浏览器下载。" });
+            return null;
+          }
+          if (result.status < 200 || result.status >= 300) return null;
+          const imported = await importPDF(result.bytes, result.url, candidate.source, candidate.version || "unknown");
+          if (imported) return imported;
+          if (depth < 1 && !validPDF(result.bytes) && result.bytes.length <= 4 * 1024 * 1024 && !/application\/pdf/i.test(result.type)) {
+            const parsed = sources.parsePage(decode(result.bytes, result.type), result.url, expectedDOI);
+            if (parsed.code) sourceDiagnostics.push({ source: candidate.source, code: parsed.code, message: parsed.code === "human_verification" ? "此页面需要人工验证，已停止自动请求。" : "此页面未提供可核验的 PDF 入口。" });
+            for (const nested of parsed.candidates.slice(0, MAX_CANDIDATES)) {
+              const found = await trySource({ ...nested, source: candidate.source, version: candidate.version || "unknown" }, depth + 1);
+              if (found) return found;
+            }
+          }
+        } catch (error) {
+          if (["AbortError", "AttachmentImportError"].includes(error.name)) throw error;
+          sourceDiagnostics.push({ source: candidate.source, code: /^[a-z_]{1,60}$/.test(error.code || "") ? error.code : "download_failed", message: "此来源未完成下载，已继续其他获取方式。" });
+        }
+        return null;
       }
       function noteGate(result, url) {
         if (result.needsLogin) { needsLogin = true; loginURL ||= url; }
@@ -443,13 +533,8 @@
         return renderedPage(renderURL, source === "open_access" ? source : "rendered_publisher");
       }
 
-      for (const url of starts) {
-        if (challengeKind && new URL(url).hostname === "doi.org") continue;
-        const found = await visitPage(url);
-        if (found) return found;
-      }
       check();
-      if (expectedDOI && typeof Zotero.Attachments.getFileResolvers === "function") {
+      if (config().enabled?.openAccess !== false && expectedDOI && typeof Zotero.Attachments.getFileResolvers === "function") {
         progress("open_access", "正在尝试 Zotero 开放获取来源…", null);
         const resolvers = Zotero.Attachments.getFileResolvers(item, ["oa"]);
         for (const resolver of resolvers) {
@@ -459,22 +544,40 @@
           catch (error) { if (error.name === "AbortError") throw error; continue; }
           for (const entry of (Array.isArray(entries) ? entries : [entries]).slice(0, MAX_CANDIDATES)) {
             check();
+            if (global.FulltextSources && !global.FulltextSources.acceptsVersion(entry?.version, config().versionPreference)) continue;
             const url = httpURL(typeof entry === "string" ? entry : entry?.url);
             const pageURL = httpURL(entry?.pageURL);
             if (url) {
-              const found = await tryCandidates([{ url, referrer: pageURL }], "open_access");
+              const found = sources ? await trySource({url,source:"open_access",version:entry?.version || "unknown",kind:"pdf"}) : await tryCandidates([{ url, referrer: pageURL }], "open_access");
               if (found) return found;
             }
             if (pageURL) {
-              const found = await visitPage(pageURL, "open_access");
+              const found = sources ? await trySource({url:pageURL,source:"open_access",version:entry?.version || "unknown",kind:"page"}) : await visitPage(pageURL, "open_access");
               if (found) return found;
             }
           }
         }
       }
       check();
+      if (sources && (expectedDOI || pmcid)) {
+        const found = await sources.discover({ doi: expectedDOI, pmcid }, { isCancelled, onProgress });
+        sourceDiagnostics.push(...found.diagnostics);
+        for (const candidate of found.candidates) {
+          const imported = await trySource(candidate);
+          if (imported) return imported;
+        }
+      }
+      if (config().enabled?.publisher !== false) {
+      for (const url of starts) {
+        if (challengeKind && new URL(url).hostname === "doi.org") continue;
+        const found = await visitPage(url);
+        if (found) return found;
+      }
+      }
+      check();
+      if (pendingReview) return { ...pendingReview, sourceDiagnostics: sourceDiagnostics.slice(0, 24) };
       return needsLogin
-        ? { state: "needs_login", challenge: challengeKind, accessReason, accessEvidence, publisherURL, message: challengeKind === "cloudflare"
+        ? { state: "needs_login", sourceDiagnostics: sourceDiagnostics.slice(0, 24), challenge: challengeKind, accessReason, accessEvidence, publisherURL, message: challengeKind === "cloudflare"
           ? "该网站返回 Cloudflare 真人验证，同一站点已暂缓重复请求。请点击“浏览器下载并自动入库”，在日常使用的默认浏览器完成验证并点击 PDF 下载；保存到配置文件夹且确认匹配的新 PDF 会自动入库，也可使用科研通兜底。"
           : challengeKind ? "该网站要求人工验证，同一站点已暂缓重复请求。请点击“浏览器下载并自动入库”，在日常使用的默认浏览器完成验证并点击 PDF 下载；保存到配置文件夹且确认匹配的新 PDF 会自动入库，也可使用科研通兜底。"
           : accessReason === "institutional_access" ? "出版社页面提供机构访问入口，当前 Zotero 会话尚未取得全文。请点击“浏览器下载并自动入库”，在默认浏览器完成机构登录、确认本篇论文的订阅权限并点击 PDF 下载；保存到配置文件夹且确认匹配的新 PDF 会自动入库，也可使用科研通兜底。"
@@ -482,7 +585,7 @@
           : accessReason === "purchase" ? "出版社页面显示购买或订阅入口，当前会话尚未取得全文。如有机构访问权限，请点击“浏览器下载并自动入库”，在默认浏览器完成机构登录、检查订阅并点击 PDF 下载；保存到配置文件夹且确认匹配的新 PDF 会自动入库，也可使用科研通兜底。"
           : accessReason === "preview" ? "当前仅取得 ScienceDirect 论文预览或摘要页，尚未取得全文。请点击“浏览器下载并自动入库”，在默认浏览器完成机构登录、确认全文访问权限并点击 PDF 下载；保存到配置文件夹且确认匹配的新 PDF 会自动入库，也可使用科研通兜底。"
           : "网页提示登录、访问验证或请求限制。请点击“浏览器下载并自动入库”，在默认浏览器完成出版社或机构登录、检查访问权限并点击 PDF 下载；保存到配置文件夹且确认匹配的新 PDF 会自动入库，也可使用科研通兜底。", url: loginURL || lastURL }
-        : { state: "not_found", accessReason: "automatic_not_found", accessEvidence: evidence("automatic_not_found", "unknown", publisherURL || lastURL), publisherURL,
+        : { state: "not_found", sourceDiagnostics: sourceDiagnostics.slice(0, 24), accessReason: "automatic_not_found", accessEvidence: evidence("automatic_not_found", "unknown", publisherURL || lastURL), publisherURL,
           message: "自动查找暂未取得有效 PDF；这不能判断你是否拥有机构访问权限。可先点击“浏览器下载并自动入库”，在日常浏览器查看这篇论文并尝试下载；仍无法获取时可使用科研通兜底。", url: publisherURL || lastURL };
     }
     return {

@@ -138,3 +138,44 @@
 .fta-diagnostic-name { min-width: 0; overflow-wrap: anywhere; }
 .fta-diagnostic-category { flex-shrink: 0; color: light-dark(#59697c, #b2c0d3); }
 #fta-pref-language { display: block; margin-top: 7px; min-width: 180px; }
+
+/* Source settings and the native add-on update controls stay inside this pane. */
+#fta-preferences textarea{font:inherit;min-width:0;width:100%;padding:8px 10px;border:1px solid light-dark(#bcc6d2,#637184);border-radius:5px;color:inherit;background:light-dark(#fff,#232c38);resize:vertical;line-height:1.5}
+#fta-preferences textarea:focus-visible{outline:2px solid light-dark(#3d7eb2,#a3d2f1);outline-offset:3px}
+#fta-preferences .fta-intro>.fta-intro-copy{flex:1;min-width:0}
+#fta-preferences .fta-intro>.fta-updater{position:relative;flex:0 0 auto;max-width:50%;display:flex;flex-direction:column;align-items:flex-end;gap:3px;margin-inline-start:auto;text-align:end}
+#fta-preferences .fta-update-heading{display:flex;align-items:center;gap:6px}
+#fta-preferences button.fta-update-refresh{min-width:28px;min-height:28px;padding:0 5px;font-size:22px;line-height:1;border-color:transparent;background:transparent;color:var(--fta-accent)}
+#fta-preferences .fta-update-refresh>span{display:inline-block}
+#fta-preferences .fta-updater[data-state=checking] .fta-update-refresh>span{animation:fta-refresh-spin 1.1s linear infinite}
+#fta-preferences #fta-pref-update-state{font-size:.83em}
+#fta-preferences .fta-update-details{font-size:.88em;text-align:start}
+#fta-preferences .fta-update-details>summary{cursor:pointer;color:var(--fta-accent);text-align:end}
+#fta-preferences .fta-update-menu{position:absolute;right:0;top:100%;z-index:10;width:min(350px,calc(100vw - 60px));max-width:100vw;margin-top:7px;padding:16px;border:1px solid var(--fta-border);border-radius:9px;background:light-dark(#fff,#26313f);box-shadow:0 6px 22px #0003;font-size:1.05em;line-height:1.5;text-align:start}
+#fta-preferences .fta-update-version{font-weight:600}
+#fta-preferences .fta-update-menu .fta-actions{margin-bottom:0}
+#fta-preferences .fta-update-menu .fta-check{margin-bottom:4px}
+#fta-preferences .fta-source-settings{padding-top:22px}
+#fta-preferences .fta-source-options{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:3px 18px;margin-top:12px}
+#fta-preferences .fta-source-options .fta-check{margin:4px 0;min-width:0}
+#fta-preferences .fta-source-version-label{display:block;margin:18px 0 7px;font-weight:500}
+#fta-preferences .fta-source-limit{display:flex;align-items:center;gap:14px;max-width:380px;margin-top:14px}
+#fta-preferences .fta-source-limit input{width:96px;flex:none;text-align:center;font-variant-numeric:tabular-nums}
+#fta-preferences .fta-source-template-label{display:block;font-weight:600;margin-bottom:10px}
+#fta-preferences #fta-pref-source-templates{margin-top:0;font-family:ui-monospace,Consolas,monospace;font-size:.92em}
+#fta-preferences .fta-source-credentials{margin-top:22px;padding:22px 0;border-top:1px solid var(--fta-border);border-bottom:1px solid var(--fta-border)}
+#fta-preferences .fta-source-credential{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:7px 14px;margin-top:18px}
+#fta-preferences .fta-source-credential>input,#fta-preferences .fta-source-credential>.fta-check{grid-column:1/-1}
+#fta-preferences .fta-source-credential>.fta-check{margin:2px 0;font-size:.9em;color:var(--fta-muted)}
+#fta-preferences .fta-source-credentials+.fta-settings-group{padding-top:22px}
+@keyframes fta-refresh-spin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){#fta-preferences .fta-updater[data-state=checking] .fta-update-refresh>span{animation:none}}
+@media(max-width:550px){#fta-preferences .fta-intro{flex-wrap:wrap;align-items:flex-start}#fta-preferences .fta-intro>.fta-updater{max-width:100%;margin-inline-start:auto}#fta-preferences .fta-source-options{grid-template-columns:1fr}#fta-preferences .fta-source-limit{flex-wrap:wrap;gap:7px 12px}}
+
+#fta-preferences .fta-source-diagnostics{margin-top:12px;font-size:.92em}
+#fta-preferences .fta-source-diagnostics>summary{cursor:pointer;color:var(--fta-accent)}
+#fta-preferences .fta-source-diagnostic-list{margin:8px 0 0}
+#fta-preferences .fta-source-diagnostic-row{display:grid;grid-template-columns:minmax(90px,140px) minmax(0,1fr);gap:8px;padding:8px 0;border-top:1px solid var(--fta-border)}
+#fta-preferences .fta-source-diagnostic-row dt{font-weight:500;overflow-wrap:anywhere}
+#fta-preferences .fta-source-diagnostic-row dd{margin:0;color:var(--fta-muted);overflow-wrap:anywhere}
+@media(max-width:480px){#fta-preferences .fta-source-diagnostic-row{grid-template-columns:1fr;gap:3px}}

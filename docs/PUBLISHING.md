@@ -10,7 +10,7 @@
 | --- | --- |
 | 仓库 | `zhangyehao/zotero-fulltext-assistant` |
 | 插件 ID | `fulltext-assistant@local.invalid`，沿用旧版本，不能改成另一个插件 |
-| 当前版本 | `0.8.0`；后续版本必须同步 manifest、package 和锁文件 |
+| 当前版本 | `0.9.0`；后续版本必须同步 manifest、package 和锁文件 |
 | Zotero 安装范围 | `10.0.7`–`10.0.*` |
 | 原生实测环境 | Windows / Zotero 10.0.7 |
 | 更新地址 | `https://github.com/zhangyehao/zotero-fulltext-assistant/releases/latest/download/updates.json` |
@@ -52,8 +52,8 @@ python scripts/release.py verify-local --directory dist
 4. 推送标签会触发 **Prepare release candidate**，重新测试和构建，再创建或补齐草稿。也可从同一干净提交手动执行：
 
 ```sh
-python scripts/release.py prepare --tag v0.8.0 --directory dist
-python scripts/release.py verify --tag v0.8.0 --directory dist
+python scripts/release.py prepare --tag v0.9.0 --directory dist
+python scripts/release.py verify --tag v0.9.0 --directory dist
 ```
 
 `prepare` 只处理草稿并逐字节核对远端资产。相同资产可重复核实；内容不同会拒绝覆盖。确有需要且仍是未发布草稿时，才显式使用 `--replace-draft-assets`。不要对已公开版本更换文件来掩盖版本内容变化。
@@ -70,12 +70,12 @@ python scripts/release.py verify --tag v0.8.0 --directory dist
 核对草稿、版本说明和用户可见文件后，以实际 Zotero 验收过的 XPI 哈希执行：
 
 ```sh
-python scripts/release.py publish --tag v0.8.0 --directory dist --expected-sha256 <64位已验收XPI的SHA256>
+python scripts/release.py publish --tag v0.9.0 --directory dist --expected-sha256 <64位已验收XPI的SHA256>
 ```
 
 `publish` 再次核对本地与远端资产，拒绝私有仓库，把已核对草稿发布为稳定版并设为 latest。Actions 中的 **Publish reviewed stable release** 是独立手动入口，同样需要标签与明确的验收哈希；推送标签本身只准备草稿。
 
-发行说明可依据 [0.8.0 说明](release-v0.8.0.md) 编写，附上当前版本的实际验证结果。不要把测试中拦截的提交写成真实科研通发布，也不要把人工下载、合成 PDF、免费下载线路测试写成验证码兼容或收费结算实测。
+发行说明可依据 [0.9.0 说明](release-v0.9.0.md) 编写，附上当前版本的实际验证结果。不要把测试中拦截的提交写成真实科研通发布，也不要把人工下载、合成 PDF、免费下载线路测试写成验证码兼容或收费结算实测。
 
 ## 发布后核实更新
 

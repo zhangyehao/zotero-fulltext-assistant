@@ -82,6 +82,76 @@ test('a copyright journal footer may print the verified opening page after its D
   }
 });
 
+// Structure observed with Zotero's real PDFWorker on the public PMC dataset's
+// published NumPy paper, DOI 10.1038/s41586-020-2649-2, PMC7759461 (2026-11-09).
+// The short title remains deliberately insufficient on its own. The first-page
+// DOI side column is emitted after long body text, beyond the title region.
+const NUMPY_DOI='10.1038/s41586-020-2649-2';
+const NUMPY_TARGET={doi:NUMPY_DOI,title:'Array programming with NumPy'};
+const NUMPY_DATES='Received: 21 February 2020\nAccepted: 17 June 2020\nPublished online: 16 September 2020\nOpen access\nCheck for updates';
+const numpyPage=(tail='https://doi.org/'+NUMPY_DOI+'\n'+NUMPY_DATES)=>'Nature | Vol 585 | 17 September 2020 | 357\nReview\nArray programming with NumPy\nCharles R. Harris, K. Jarrod Millman and colleagues\n'+
+  'Array operations and the scientific programming environment are described in this paragraph.\n'.repeat(38)+tail+'\n1Independent researcher, Logan, UT, USA';
+
+test('a real Nature-style DOI followed by Received Accepted Published dates identifies a late first-page side column',async()=>{
+  const text=numpyPage();assert(text.indexOf(NUMPY_DOI)>2500);
+  const result=await inspect(text,NUMPY_TARGET);
+  assert.equal(result.status,'match');assert.equal(result.reason,'doi_match');assert.deepEqual(result.detectedDOIs,[NUMPY_DOI]);
+  assert.equal(result.evidence.doiReliable,true);assert.equal(result.evidence.titleReliable,false);
+  const titleOnly=await inspect(numpyPage('No DOI publication metadata'),NUMPY_TARGET);
+  assert.equal(titleOnly.status,'unknown');assert.deepEqual(titleOnly.detectedDOIs,[]);
+});
+
+test('different DOI in the dated side column remains mismatch or conflicts with reliable title evidence',async()=>{
+  const wrong='10.1038/s41586-020-9999-9', text=numpyPage('https://doi.org/'+wrong+'\n'+NUMPY_DATES);
+  const result=await inspect(text,NUMPY_TARGET);
+  assert.equal(result.status,'mismatch');assert.equal(result.reason,'doi_mismatch');assert.deepEqual(result.detectedDOIs,[wrong]);
+  const sameTitle=await inspect(text.replace('Array programming with NumPy',TITLE),target);
+  assert.equal(sameTitle.status,'unknown');assert.equal(sameTitle.reason,'conflicting_identity');assert.equal(sameTitle.evidence.identityConflict,true);
+});
+
+test('late body DOI without the complete adjacent valid chronological date block stays unknown',async()=>{
+  const variants=[
+    '',NUMPY_DATES.replace('Received: 21 February 2020\n',''),NUMPY_DATES.replace('Accepted: 17 June 2020\n',''),
+    NUMPY_DATES.replace('Published online: 16 September 2020\n',''),
+    NUMPY_DATES.replace('21 February','31 February'),NUMPY_DATES.replace('17 June 2020','17 June 2019'),
+    NUMPY_DATES.replace('16 September 2020','16 September 2019'),
+    NUMPY_DATES.replace('Accepted:','We accepted:'),NUMPY_DATES.replace('Received:','Received information:'),
+    NUMPY_DATES.replace('\nAccepted:','\nAn intervening paragraph.\nAccepted:'),NUMPY_DATES.replaceAll('\n','; '),
+  ];
+  for(const dates of variants){
+    const result=await inspect(numpyPage('https://doi.org/'+NUMPY_DOI+'\n'+dates),NUMPY_TARGET);
+    assert.equal(result.status,'unknown',dates);assert.deepEqual(result.detectedDOIs,[],dates);
+  }
+  assert.deepEqual((await inspect(numpyPage('DOI: '+NUMPY_DOI+'\n'+NUMPY_DATES),NUMPY_TARGET)).detectedDOIs,[]);
+});
+
+test('a reference section cannot acquire article identity by copying the complete publication date block',async()=>{
+  for(const heading of ['References','References and Notes','Bibliography','参考文献']){
+    const result=await inspect(numpyPage(heading+'\nhttps://doi.org/'+NUMPY_DOI+'\n'+NUMPY_DATES),NUMPY_TARGET);
+    assert.equal(result.status,'unknown',heading);assert.deepEqual(result.detectedDOIs,[],heading);
+  }
+  const unheaded=await inspect(numpyPage('1. Harris et al. (2020).\nhttps://doi.org/'+NUMPY_DOI+'\n'+NUMPY_DATES),NUMPY_TARGET);
+  assert.equal(unheaded.status,'unknown');assert.deepEqual(unheaded.detectedDOIs,[]);
+});
+
+test('explicit attribution and correction headings cannot reuse another article DOI with its date block',async()=>{
+  for(const label of ['Correction to','Erratum to','Corrigendum to','Retraction of']){
+    const result=await inspect(label+': Array programming with NumPy\n'+numpyPage(),NUMPY_TARGET);
+    assert.equal(result.status,'unknown',label);assert.deepEqual(result.detectedDOIs,[],label);
+  }
+  for(const attribution of ['Correction to','Adapted from','Reprinted from','See also']){
+    const result=await inspect(numpyPage(attribution+'\nhttps://doi.org/'+NUMPY_DOI+'\n'+NUMPY_DATES),NUMPY_TARGET);
+    assert.equal(result.status,'unknown',attribution);assert.deepEqual(result.detectedDOIs,[],attribution);
+  }
+});
+
+test('publication dates on page two and multiple authoritative DOI blocks never override ambiguity',async()=>{
+  const pageTwo=await inspect(numpyPage('End of page')+'\fhttps://doi.org/'+NUMPY_DOI+'\n'+NUMPY_DATES,NUMPY_TARGET);
+  assert.equal(pageTwo.status,'unknown');assert.deepEqual(pageTwo.detectedDOIs,[]);
+  const multiple=await inspect('DOI: 10.5555/another\n'+numpyPage(),NUMPY_TARGET);
+  assert.equal(multiple.status,'unknown');assert.equal(multiple.reason,'conflicting_dois');
+});
+
 test('a target article after a previous article reference section remains a diagnostic candidate', async () => {
   const title='Mesotocin and Nonapeptide Receptors Promote Estrildid Flocking Behavior';
   const text='References and Notes\n1. A cited paper.\n'+('Previous article bibliography.\n'.repeat(110))+'10.1126/science.1175028\nMesotocin and Nonapeptide Receptors\nPromote Estrildid Flocking Behavior\nJames L. Goodson\nResearch text.';

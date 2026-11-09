@@ -224,6 +224,10 @@
       allowAssist: input.allowAssist === true,
       attachmentID: optionalInteger(input.attachmentID, "attachmentID"),
       source: text(input.source, 100),
+      fulltextVersion: ["published", "accepted", "submitted"].includes(input.fulltextVersion) ? input.fulltextVersion : "unknown",
+      sourceDiagnostics: (Array.isArray(input.sourceDiagnostics) ? input.sourceDiagnostics : []).slice(0, 24).filter(value => value && typeof value === "object").map(value => ({
+        source: text(value.source, 40), code: text(value.code, 60), message: cleanError(value.message),
+      })),
       acquisitionMode: ["browser", "manual"].includes(input.acquisitionMode) ? input.acquisitionMode : "",
       downloadRoute: ["normal", "highspeed"].includes(input.downloadRoute) ? input.downloadRoute : "",
       attempts: optionalInteger(input.attempts, "attempts") || 0,
@@ -237,6 +241,17 @@
     };
     task.assistReceipt = normalizeAssistReceipt(input.assistReceipt, task);
     task.assistReview = normalizeAssistReview(input.assistReview, task);
+    task.sourceReview = null;
+    const sourceReview = input.sourceReview;
+    if (task.state === "manual_review" && !task.attachmentID && sourceReview && /^[a-f0-9]{64}$/i.test(sourceReview.sha256 || "")) {
+      try {
+        if (normalizeDOI(sourceReview.doi) === task.doi) task.sourceReview = {
+          sha256: sourceReview.sha256.toLowerCase(), doi: task.doi, title: text(sourceReview.title, 2000),
+          source: text(sourceReview.source, 100), sourceURL: cleanOfficialURL(sourceReview.sourceURL),
+          fulltextVersion: ["published", "accepted", "submitted"].includes(sourceReview.fulltextVersion) ? sourceReview.fulltextVersion : "unknown",
+        };
+      } catch (_) { /* Invalid review metadata cannot discard task history. */ }
+    }
     task.submissionReview = null;
     if (!task.requestID && ["submission_unknown", "paused", "error"].includes(task.state) && input.submissionReview) {
       try {
@@ -330,6 +345,8 @@
     if(["libraryID","itemID","itemKey","doi","title"].some(field=>updated[field]!==previous[field]))updated.doiCheck=null;
     if ((updated.requestID !== previous.requestID || updated.requestedPoints !== previous.requestedPoints) && patch.pointsVerified !== true) updated.pointsVerified = false;
     if (["libraryID", "itemID", "itemKey", "doi"].some(field => updated[field] !== previous[field])) { updated.accessEvidence = null; updated.publisherURL = ""; }
+    if (previous.sourceReview && (identityChanged || attachmentChanged)) updated.sourceReview = null;
+    if (identityChanged) { updated.fulltextVersion = "unknown"; updated.sourceDiagnostics = []; }
     if ((previous.assistReceipt || previous.assistReview) && identityChanged || previous.assistReceipt && attachmentChanged) {
       updated.assistReceipt = null; updated.assistReview = null;
     }

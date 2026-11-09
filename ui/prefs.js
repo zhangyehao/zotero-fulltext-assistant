@@ -18,6 +18,9 @@
     let busy = false;
     let settingsDirty = false;
     let accountDirty = false;
+    let sourceSettingsDirty = false;
+    let sourceCredentialsDirty = false;
+    let autoUpdateSaving = false;
     let checkInStartupError = "";
     let destroyed = false;
     let activePage = "tasks";
@@ -30,6 +33,7 @@
     const expandedDownloadDetails = new Set();
     const expandedDownloadDiagnostics = new Set();
     const expandedDOIChecks = new Set();
+    const expandedSourceDetails = new Set();
     const copyTimers = new Set();
     const bindings = [];
     const pageTabs = [...$("fta-pref-tabs").querySelectorAll('[role="tab"]')];
@@ -46,7 +50,10 @@
     };
     const accountLabels = { authenticated: "已登录", logged_in: "已登录", signed_out: "未登录", logged_out: "未登录", pending_login: "需要登录", expired: "登录已过期", checking: "正在登录", logging_in: "正在登录", captcha: "需要验证", error: "登录失败", unknown: "待验证", unverified: "待验证" };
     const filterLabels = { unfinished: "未完成", all: "全部历史", success: "已获取", login: "需网页登录", fallback: "待兜底", active: "进行中" };
-    const sourceLabels = { publisher: "出版社网页", rendered_publisher: "出版社网页", open_access: "开放获取", existing: "已有附件", ablesci: "科研通", local_file: "本地 PDF", edge_browser: "Edge 浏览器", browser_download: "浏览器下载" };
+    const sourceLabels = { publisher: "出版社网页", rendered_publisher: "出版社网页", open_access: "开放获取", existing: "已有附件", ablesci: "科研通", local_file: "本地 PDF", edge_browser: "Edge 浏览器", browser_download: "浏览器下载", openalex: "OpenAlex", pmc: "PubMed Central", core: "CORE", semanticScholar: "Semantic Scholar", custom: "自定义来源" };
+    const sourceProviderIDs = ["publisher", "openAccess", "openalex", "pmc", "core", "semanticScholar", "custom"];
+    const sourceKeyIDs = ["openalex", "core", "semanticScholar"];
+    const sourceSettingIDs = [...sourceProviderIDs.map(id => "fta-pref-source-" + id), "fta-pref-source-version", "fta-pref-source-templates", "fta-pref-openalex-content", "fta-pref-openalex-limit"];
     const browserNotes = {
       manual_waiting: "已开始检查下载文件夹。请在默认浏览器完成验证并点击 PDF 下载，保存到配置文件夹；明确匹配的新 PDF 会自动添加到原文献。",
       manual_review: "无法自动确认所选 PDF 的论文身份。请先预览并核对标题、作者和 DOI，再明确确认。",
@@ -95,6 +102,8 @@
         tab.setAttribute("tabindex", selected ? "0" : "-1");
         $(tab.getAttribute("aria-controls")).hidden = !selected;
       }
+      $("fta-pref-tab-settings").dataset.dirty = String(sourceSettingsDirty || sourceCredentialsDirty);
+      $("fta-pref-tab-settings").setAttribute("aria-label", sourceSettingsDirty || sourceCredentialsDirty ? "设置，有未保存的更改" : "设置");
       $("fta-pref-tab-account").dataset.dirty = String(settingsDirty);
       $("fta-pref-tab-account").setAttribute("aria-label", settingsDirty ? "科研通设置，有未保存的更改" : "科研通设置");
       localize();
@@ -184,6 +193,77 @@
     }
     function directoryPauseNote(result) {
       return Number.isSafeInteger(result?.paused) && result.paused > 0 ? " 已暂停 " + result.paused + " 个等待下载的任务；请点击各任务的“浏览器下载并自动入库”，按新目录重新开始检查。" : "";
+    }
+    function renderSourceSettings() {
+      const settings = snapshot.sourceSettings || {}, enabled = settings.enabled || {};
+      if (!sourceSettingsDirty) {
+        for (const provider of sourceProviderIDs) $("fta-pref-source-" + provider).checked = typeof enabled[provider] === "boolean" ? enabled[provider] : provider !== "custom";
+        const preference = ["published", "accepted", "any"].includes(settings.versionPreference) ? settings.versionPreference : "accepted";
+        const versionOptions = [...$("fta-pref-source-version").querySelectorAll("option")];
+        for (const option of versionOptions) option.selected = false;
+        const selectedVersion = versionOptions.find(option => option.value === preference);
+        if (selectedVersion) selectedVersion.selected = true;
+        $("fta-pref-source-templates").value = Array.isArray(settings.customTemplates) ? settings.customTemplates.join("\n") : "";
+        $("fta-pref-openalex-content").checked = settings.openalexContentEnabled === true;
+        $("fta-pref-openalex-limit").value = String(settings.openalexDailyLimit ?? 100);
+      }
+      for (const id of sourceSettingIDs) $(id).disabled = busy || typeof app.saveSourceSettings !== "function";
+      $("fta-pref-openalex-limit").disabled = busy || typeof app.saveSourceSettings !== "function" || !$("fta-pref-openalex-content").checked;
+      $("fta-pref-save-sources").disabled = busy || typeof app.saveSourceSettings !== "function";
+      for (const provider of sourceKeyIDs) {
+        const saved = snapshot.sourceCredentials?.[provider] === true;
+        const field = $("fta-pref-key-" + provider), clear = $("fta-pref-key-" + provider + "-clear");
+        // Never read a secret from a snapshot or refill password controls.
+        field.placeholder = saved ? "已保存；留空保留原密钥" : "输入 API 密钥";
+        $("fta-pref-key-" + provider + "-state").textContent = saved ? "已保存密钥" : "未保存密钥";
+        field.disabled = busy || typeof app.saveSourceCredentials !== "function" || clear.checked;
+        clear.disabled = busy || typeof app.saveSourceCredentials !== "function" || !saved;
+      }
+      $("fta-pref-save-source-keys").disabled = busy || typeof app.saveSourceCredentials !== "function";
+    }
+    function sourceSettingsInput() {
+      const limitText = String($("fta-pref-openalex-limit").value || "").trim();
+      const limit = /^[1-9]\d*$/.test(limitText) ? Number(limitText) : NaN;
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new Error("OpenAlex 每日下载上限必须是 1–1000 的整数。");
+      const versionPreference = $("fta-pref-source-version").value;
+      if (!["published", "accepted", "any"].includes(versionPreference)) throw new Error("请选择有效的全文版本偏好。");
+      const customTemplates = [...new Set(String($("fta-pref-source-templates").value || "").split(/[;\r\n]+/).map(value => value.trim()).filter(Boolean))];
+      for (const template of customTemplates) {
+        let url;
+        try { url = new URL(template.replaceAll("{doi}", "10.0000/example")); } catch (_) {}
+        if (!template.includes("{doi}") || !url || url.protocol !== "https:" || url.username || url.password) throw new Error("每个自定义网址必须使用 HTTPS、包含 {doi}，且不能含账号密码。");
+      }
+      const enabled = {};
+      for (const provider of sourceProviderIDs) enabled[provider] = $("fta-pref-source-" + provider).checked === true;
+      if (enabled.custom && !customTemplates.length) throw new Error("请先填写自定义 DOI 网址模板，或关闭此来源。");
+      return { enabled, versionPreference, customTemplates, openalexContentEnabled: $("fta-pref-openalex-content").checked === true, openalexDailyLimit: limit };
+    }
+    function renderUpdater() {
+      const info = snapshot.updateStatus || {}, state = info.state || "idle";
+      const working = ["checking", "downloading", "installing"].includes(state);
+      const labels = { idle: "尚未检查更新", checking: "正在检查更新…", current: "已是最新版本", available: "有可用更新", downloading: "正在下载更新…", installing: "正在安装更新…", installed: "更新已安装", error: "更新失败，可重试" };
+      const version = String(info.currentVersion || snapshot.version || "");
+      const availableVersion = String(info.availableVersion || "");
+      $("fta-pref-updater").dataset.state = state;
+      $("fta-pref-version").textContent = version ? "v" + version : "";
+      let message = labels[state] || "更新状态待核实";
+      if (state === "available" && availableVersion) message = "可更新至 v" + availableVersion;
+      if (state === "downloading" && Number.isFinite(info.progress?.percent)) message = "正在下载更新 · " + Math.max(0, Math.min(100, Math.round(info.progress.percent))) + "%";
+      $("fta-pref-update-state").textContent = message;
+      $("fta-pref-update-state").dataset.error = String(state === "error");
+      $("fta-pref-update-version").textContent = version ? "当前版本：v" + version : "当前版本尚未读取";
+      $("fta-pref-update-message").textContent = String(info.message || (info.restartRequired ? "请在 Zotero 插件管理器中确认是否需要重启。" : ""));
+      $("fta-pref-update-message").hidden = !$("fta-pref-update-message").textContent;
+      $("fta-pref-update-message").dataset.error = String(state === "error");
+      $("fta-pref-update-checked").textContent = info.checkedAt ? "最近检查更新 " + dateText(info.checkedAt, true) : "尚未检查更新";
+      $("fta-pref-check-update").disabled = busy || working || info.canCheck !== true || typeof app.checkForUpdates !== "function";
+      $("fta-pref-check-update").setAttribute("aria-busy", String(state === "checking"));
+      if (!autoUpdateSaving) $("fta-pref-auto-update").checked = info.autoUpdate === true;
+      $("fta-pref-auto-update").disabled = busy || working || typeof app.setAutoUpdate !== "function" || typeof info.autoUpdate !== "boolean";
+      $("fta-pref-update-global-note").hidden = info.globalUpdatesEnabled !== false;
+      $("fta-pref-release-notes").disabled = busy || typeof app.openReleaseNotes !== "function" || info.releaseNotesAvailable !== true;
+      $("fta-pref-install-update").hidden = !["available", "downloading", "installing"].includes(state) && info.canInstall !== true;
+      $("fta-pref-install-update").disabled = busy || working || info.canInstall !== true || typeof app.installUpdate !== "function";
     }
     function renderCaptureSummary() {
       const summary = snapshot.currentBatch?.summary || snapshot.captureSummary;
@@ -345,10 +425,15 @@
         const id = details.closest(".fta-row")?.dataset.taskId;
         if (id) { if (details.hasAttribute("open")) expandedDOIChecks.add(id);else expandedDOIChecks.delete(id); }
       }
+      for (const details of list.querySelectorAll(".fta-source-diagnostics")) {
+        const id = details.closest(".fta-row")?.dataset.taskId;
+        if (id) { if (details.hasAttribute("open")) expandedSourceDetails.add(id);else expandedSourceDetails.delete(id); }
+      }
       const taskIDs = new Set(tasks.map(task => String(task.id)));
       for (const id of expandedDownloadDetails) if (!taskIDs.has(id)) expandedDownloadDetails.delete(id);
       for (const id of expandedDownloadDiagnostics) if (!taskIDs.has(id)) expandedDownloadDiagnostics.delete(id);
       for (const id of expandedDOIChecks) if (!taskIDs.has(id)) expandedDOIChecks.delete(id);
+      for (const id of expandedSourceDetails) if (!taskIDs.has(id)) expandedSourceDetails.delete(id);
       list.replaceChildren();
       $("fta-pref-task-count").textContent = String(scopeTasks.length);
       $("fta-pref-task-scope").textContent = isBatchFilter(taskFilter)
@@ -412,7 +497,9 @@
         const hasRequest = Boolean(task.requestID || task.requestURL);
         const knownPoints = task.pointsVerified === true && Number.isSafeInteger(task.requestedPoints) && task.requestedPoints > 0;
         const pointsLabel = hasRequest || task.source === "ablesci" ? knownPoints ? task.assistReceipt?.adoption === "accepted" ? "已支出 " + task.requestedPoints + " 积分" : "悬赏 " + task.requestedPoints + " 积分（待采纳）" : "积分待核实" : "";
-        const meta = (acquired ? [completedDate ? "完成 " + completedDate : "完成日期未记录", "来源：" + (sourceLabels[task.source] || "未记录"), task.source === "ablesci" ? pointsLabel : "", route, task.doi] : [task.doi, task.requestID ? "求助 " + task.requestID : "", pointsLabel, route ? "来源：科研通" : "", route, task.lastCheckedAt ? "最近检查 " + dateText(task.lastCheckedAt) : ""]).filter(Boolean);
+        const fulltextVersionLabels = { published: "全文版本：出版版", accepted: "全文版本：作者接受稿", submitted: "全文版本：预印本", unknown: "全文版本：版本未核实" };
+        const versionLabel = acquired && (task.fulltextVersion || ["openalex", "pmc", "core", "semanticScholar", "custom"].includes(task.source)) ? fulltextVersionLabels[task.fulltextVersion] || fulltextVersionLabels.unknown : "";
+        const meta = (acquired ? [completedDate ? "完成 " + completedDate : "完成日期未记录", "来源：" + (sourceLabels[task.source] || "未记录"), versionLabel, task.source === "ablesci" ? pointsLabel : "", route, task.doi] : [task.doi, task.requestID ? "求助 " + task.requestID : "", pointsLabel, route ? "来源：科研通" : "", route, task.lastCheckedAt ? "最近检查 " + dateText(task.lastCheckedAt) : ""]).filter(Boolean);
         if (meta.length) {
           const metadata = make("div", "fta-row-meta");
           meta.forEach((part, index) => { if (index) metadata.append(document.createTextNode(" · "));metadata.append(part === task.doi ? copyControl(task.doi, "复制 DOI", "fta-doi-copy") : make("span", "", part)); });
@@ -511,11 +598,41 @@
           if (snapshot.settings?.acceptSiteMinimum === true) row.append(make("p", "fta-note", "已启用自动接受网站最低积分；最终悬赏可能高于按钮中的基础积分。"));
         }
         row.append(actions);
+        renderSourceDiagnostics(task, row);
         if (!acquired) renderDownloadDetails(task, row);
         if (unboundAvailable) renderBinding(task, row);
         list.append(row);
       }
       renderSelection();
+    }
+    function renderSourceDiagnostics(task, row) {
+      const records = Array.isArray(task.sourceDiagnostics) ? task.sourceDiagnostics.filter(value => value && typeof value === "object").slice(0, 24) : [];
+      if (!records.length) return;
+      const messages = {
+        invalid_doi: "需要有效的 DOI 或 PMCID。", no_result: "此来源未返回可下载候选。", no_pdf: "记录中没有可用 PDF。",
+        metadata_only: "此来源的 API 结果仅用于发现链接，仍需实际下载并核验 PDF。", key_required: "此操作需要先配置 API 密钥。", content_disabled: "未启用此来源的内容下载。",
+        daily_limit: "本机缓存下载计数不可用或已达到每日上限。", version_filtered: "候选版本不符合当前偏好，已跳过。", unknown_version: "此来源未说明全文版本，版本待核实。",
+        doi_mismatch: "来源记录的 DOI 与目标文献不一致。", unsafe_url: "网址不是受支持的公共 HTTPS 地址，已拒绝。", dns_unavailable: "无法核实目标是否为公共网络地址。",
+        private_address: "目标指向私有或保留地址，已拒绝。", invalid_template: "模板必须是公共 HTTPS 网址，{doi} 不能位于主机名中。", template_limit: "仅使用前 8 个不同的模板。",
+        human_verification: "此页面需要人工验证，请在浏览器完成。", login_required: "此来源需要网页登录。", response_too_large: "来源响应超过本次检查的大小限制。",
+        invalid_response: "来源响应格式无法识别。", unexpected_redirect: "跳转目标尚未核实，已停止。", rate_limited: "此来源要求稍后重试，本次已暂停查询。",
+        timeout: "此来源查询或下载超时，可稍后重试。", network_error: "此来源网络请求失败，可稍后重试。", disabled: "此来源已关闭。", key_storage: "无法读取已配置的 API 密钥。",
+        source_not_enabled: "此候选的来源已关闭，未继续下载。", untrusted_candidate: "无法确认候选来源，已停止下载。", credentials_in_url: "网址包含凭据，已拒绝。", retracted: "此来源将该版本标记为已撤稿，已跳过。",
+        pdf_mismatch: "PDF 的 DOI 或标题与目标论文冲突，已拒绝自动入库。", pdf_unknown: "已取得 PDF，但 DOI 和标题证据不足，需要预览核对。",
+        download_restricted: "此来源下载受限，可尝试其他来源或浏览器下载。", download_failed: "此来源下载失败，未取得可用全文。"
+      };
+      const details = make("details", "fta-source-diagnostics");
+      if (expandedSourceDetails.has(String(task.id))) details.setAttribute("open", "");
+      details.append(make("summary", "", "来源检查详情"));
+      details.append(make("p", "fta-note", "候选链接不代表已取得全文；以 PDF 核对和入库结果为准。"));
+      const list = make("dl", "fta-source-diagnostic-list");
+      for (const record of records) {
+        const item = make("div", "fta-source-diagnostic-row");
+        item.append(make("dt", "", sourceLabels[record.source] || (record.source === "openAccess" ? "Zotero 开放获取" : "其他来源")));
+        item.append(make("dd", "", messages[record.code] || String(record.message || "此来源检查未完成，请查看任务提示。")));
+        list.append(item);
+      }
+      details.append(list);row.append(details);
     }
     function renderDownloadDetails(task, row) {
       const downloadStatus = task.downloadStatus;
@@ -712,6 +829,8 @@
       renderNavigation();
       renderCaptureSummary();
       renderDirectories();
+      renderSourceSettings();
+      renderUpdater();
       renderTasks();
       renderCheckIn();
       renderSpending();
@@ -725,11 +844,12 @@
       $("fta-pref-language").disabled = busy || typeof app.saveSettings !== "function";
       localize();
     }
-    async function run(action, message = "", sensitive = false) {
+    async function run(action, message = "", sensitive = false, options = {}) {
       if (busy || destroyed) return;
-      busy = true; render(); status("正在处理…");
-      try { const result = await action(); if (!destroyed) status(typeof message === "function" ? message(result) : message || "已更新。"); return result; }
-      catch (error) { if (!destroyed) status(sensitive ? "登录未完成，请检查账号密码或使用网页登录完成验证。" : error?.message || "操作未完成，请稍后再试。", true); }
+      const target = options.target || "fta-pref-status";
+      busy = true; render(); status("正在处理…", false, target);
+      try { const result = await action(); if (!destroyed) status(typeof message === "function" ? message(result) : message || "已更新。", false, target); return result; }
+      catch (error) { if (!destroyed) status(options.errorMessage || (sensitive ? "登录未完成，请检查账号密码或使用网页登录完成验证。" : error?.message || "操作未完成，请稍后再试。"), true, target); }
       finally { busy = false; if (!destroyed) render(); }
     }
     for (const tab of pageTabs) {
@@ -747,6 +867,81 @@
         selectPage(pageTabs[next].dataset.page, true);
       });
     }
+    const sourceChanged = () => {
+      if (busy) return;
+      sourceSettingsDirty = true;
+      status("有未保存的更改", false, "fta-pref-source-save-state");
+      renderSourceSettings();renderNavigation();
+    };
+    for (const id of sourceSettingIDs) {
+      on($(id), "input", sourceChanged);
+      on($(id), "change", sourceChanged);
+    }
+    on($("fta-pref-source-settings-form"), "submit", event => {
+      event.preventDefault();
+      if (busy || $("fta-pref-save-sources").disabled) return;
+      let settings;
+      try { settings = sourceSettingsInput(); }
+      catch (error) { return status(error.message, true, "fta-pref-source-save-state"); }
+      run(async () => { await app.saveSourceSettings(settings); sourceSettingsDirty = false; }, "全文来源设置已保存。", false, { target: "fta-pref-source-save-state" });
+    });
+    const sourceCredentialChanged = () => {
+      if (busy) return;
+      sourceCredentialsDirty = true;
+      status("有未保存的更改", false, "fta-pref-source-key-state");
+      renderSourceSettings();renderNavigation();
+    };
+    for (const provider of sourceKeyIDs) {
+      on($("fta-pref-key-" + provider), "input", sourceCredentialChanged);
+      on($("fta-pref-key-" + provider + "-clear"), "change", sourceCredentialChanged);
+    }
+    on($("fta-pref-source-credentials-form"), "submit", event => {
+      event.preventDefault();
+      if (busy || $("fta-pref-save-source-keys").disabled) return;
+      const values = {};
+      for (const provider of sourceKeyIDs) {
+        const value = String($("fta-pref-key-" + provider).value || "").trim();
+        if ($("fta-pref-key-" + provider + "-clear").checked) values[provider] = null;
+        else if (value) values[provider] = value;
+      }
+      if (!Object.keys(values).length) {
+        sourceCredentialsDirty = false;renderNavigation();
+        return status("未修改 API 密钥；已保存的密钥保持不变。", false, "fta-pref-source-key-state");
+      }
+      run(async () => {
+        await app.saveSourceCredentials(values);
+        for (const provider of sourceKeyIDs) { $("fta-pref-key-" + provider).value = "";$("fta-pref-key-" + provider + "-clear").checked = false; }
+        sourceCredentialsDirty = false;
+      }, "API 密钥已保存。", false, { target: "fta-pref-source-key-state", errorMessage: "API 密钥保存未完成，请检查输入或凭据存储后重试。输入已保留。" });
+    });
+    function checkedUpdateResult(result) {
+      const info = result && typeof result === "object" ? result : app.getSnapshot()?.updateStatus;
+      if (info?.state === "error") throw new Error(info.message || "更新操作未完成，请重试。");
+      return result;
+    }
+    on($("fta-pref-check-update"), "click", () => {
+      if ($("fta-pref-check-update").disabled) return;
+      run(async () => checkedUpdateResult(await app.checkForUpdates()), "更新检查已完成，请查看版本状态。", false, { target: "fta-pref-update-action-status" });
+    });
+    on($("fta-pref-install-update"), "click", () => {
+      if ($("fta-pref-install-update").disabled || snapshot.updateStatus?.canInstall !== true) return;
+      run(async () => checkedUpdateResult(await app.installUpdate()), "更新操作已完成，请查看版本状态。", false, { target: "fta-pref-update-action-status" });
+    });
+    on($("fta-pref-release-notes"), "click", () => {
+      if ($("fta-pref-release-notes").disabled) return;
+      run(() => app.openReleaseNotes(), "已打开更新日志。", false, { target: "fta-pref-update-action-status" });
+    });
+    on($("fta-pref-auto-update"), "change", () => {
+      if (busy || $("fta-pref-auto-update").disabled) return;
+      const enabled = $("fta-pref-auto-update").checked === true;
+      autoUpdateSaving = true;
+      run(async () => {
+        try {
+          const result = await app.setAutoUpdate(enabled), info = result && typeof result === "object" ? result : app.getSnapshot()?.updateStatus;
+          if (info?.errorCode === "SETTINGS_FAILED" || info?.autoUpdate !== enabled) throw new Error(info?.message || "无法保存 Zotero 自动更新设置，请重试。");
+        } finally { autoUpdateSaving = false; }
+      }, "自动更新设置已保存。", false, { target: "fta-pref-update-action-status" });
+    });
     on($("fta-pref-username"), "input", () => { accountDirty = true; });
     on($("fta-pref-password"), "input", () => { accountDirty = true; });
     on($("fta-pref-language"), "change", () => {
@@ -843,6 +1038,7 @@
       if (destroyed) return;
       destroyed = true;
       $("fta-pref-password").value = "";
+      for (const provider of sourceKeyIDs) $("fta-pref-key-" + provider).value = "";
       if (typeof unsubscribe === "function") unsubscribe();
       for (const unbind of bindings) unbind();
       for (const timer of copyTimers) window.clearTimeout(timer);copyTimers.clear();
