@@ -153,3 +153,96 @@ test('search handoff provides the official page and no guessed result binding',(
  assert.equal(cnki.searchURL(title),'https://kns.cnki.net/kns8s/defaultresult/index');
  assert.equal(cnki.fromItem({title,getField:()=>''}),null);
 });
+
+const readerIX='https://ix.cnki.net/read/article/readonline?appid=CRSP_BASIC_PSMC&dbcode=CAPJ&tablename=CAPJLAST&filename=SYNTH20260810001&fileSourceType=1';
+const readerX='https://x.cnki.net/web/xmlRead/pdf.html?pageType=pdfweb&fileName=SYNTH20260810001&tableName=CAPJTOTAL&dbCode=CAPJ&fileSourceType=1&appId=CRSP_BASIC_PSMC';
+test('official reader routes preserve their own stable URLs and reconcile table names',()=>{
+ for(const address of [readerIX,readerX]){
+  const value=cnki.normalizeRecord(address+'&topic=&taskId=&v=synthetic-transient&token=synthetic-transient#page=2');
+  assert.equal(value.id,'CNKI:CAPJ:SYNTH20260810001');
+  assert.equal(new URL(value.url).origin,new URL(address).origin);
+  assert.equal(new URL(value.url).pathname,new URL(address).pathname);
+  assert.equal(value.url.includes('synthetic-transient'),false);
+  assert.equal(value.url.includes('taskId'),false);
+  assert.equal(cnki.pageURL(address+'&token=synthetic-transient'),value.url);
+  assert.deepEqual(cnki.normalizeRecord(value),value);
+  assert.equal(cnki.normalizeInput(address).kind,'url');
+  assert.equal(cnki.parsePage(doc(),address).record.id,value.id);
+ }
+ assert.equal(cnki.normalizeRecord(readerIX).dbname,'CAPJLAST');
+ assert.equal(cnki.normalizeRecord(readerX).dbname,'CAPJTOTAL');
+ assert.equal(cnki.normalizeRecord(readerIX+'&dbname=CAPJLAST').id,'CNKI:CAPJ:SYNTH20260810001');
+});
+test('reader input rejects unverified routes, routing values and conflicting table aliases',()=>{
+ const invalid=[readerIX.replace('ix.cnki.net','kns.cnki.net'),readerIX.replace('/readonline','/readonline/'),readerX.replace('/xmlRead/','/xmlread/'),readerIX+'&dbname=CJFDTOTAL',readerIX+'&dbname=CAPJTOTAL',readerIX+'&dbcode=CJFD',readerIX+'&filename=OTHER',readerIX.replace('CAPJLAST','../CAPJLAST'),readerIX.replace('CRSP_BASIC_PSMC','OTHER_APP'),readerIX+'&appId=OTHER_APP',readerIX.replace('fileSourceType=1','fileSourceType=2'),readerX.replace('pdfweb','other'),readerX.replace('pageType=pdfweb&',''),readerIX.replace('&tablename=CAPJLAST','')];
+ for(const address of invalid){assert.equal(cnki.normalizeRecord(address),null,address);assert.equal(cnki.pageURL(address),null,address);assert.equal(cnki.normalizeInput(address),null,address);}
+});
+test('a reader shell is never presented as verified article metadata',()=>{
+ for(const html of ['<html><head><title>研学阅读</title></head><body><div id="app"></div></body></html>','<html><body><h1>研学阅读</h1></body></html>']){
+  const result=cnki.parsePage(parseHTML(html).document,readerX);
+  assert.equal(result.status,'metadata_unavailable');assert.equal(result.candidates.length,0);
+ }
+});
+test('modern thesis fields retain the file suffix and keep the institution out of authors',()=>{
+ const html='<html><body><div class="wx-tit"><h1>'+title+'</h1><h3 class="author" id="authorpart"><span><a href="https://kns.cnki.net/kcms2/author/detail?v=synthetic">合成作者</a></span></h3><h3 class="author"><span><a href="https://kns.cnki.net/kcms2/organ/detail?v=synthetic">合成研究大学</a></span></h3></div><input type="hidden" id="param-filename" value="1026123456.nh"><input type="hidden" id="paramdbcode" value="CDFD"><input type="hidden" id="paramresource" value="DISSERTATION"><a id="cajDown" name="cajDown" href="https://bar.cnki.net/bar/download/order?id=synthetic-pdf">PDF下载</a><a id="cajDown" name="cajDown" href="https://bar.cnki.net/bar/download/order?id=synthetic-caj">CAJ下载</a></body></html>';
+ const result=cnki.parsePage(parseHTML(html).document,'https://kns.cnki.net/kcms2/article/abstract?v=synthetic-detail');
+ assert.equal(result.record.id,'CNKI:CDFD:1026123456.NH');assert.equal(result.metadata.itemType,'thesis');assert.equal(result.metadata.university,'合成研究大学');assert.deepEqual(result.metadata.authors,['合成作者']);assert.equal(result.status,'pdf_available');assert.equal(result.candidates.length,1);assert.equal(result.candidates[0].url,'https://bar.cnki.net/bar/download/order?id=synthetic-pdf');assert.equal(result.cajAvailable,true);assert.equal(result.articleURL.includes('synthetic-detail'),false);
+});
+test('author fallback excludes organization links and university is restricted to thesis metadata',()=>{
+ const body='<div class="wx-tit"><h3 class="author"><a href="/kcms2/author/detail?v=synthetic">合成作者</a><a href="/kcms2/organ/detail?v=synthetic">合成研究大学</a></h3></div>';
+ const journal=parsed(body);assert.deepEqual(journal.metadata.authors,['合成作者']);assert.equal(journal.metadata.university,'');
+ const thesis=cnki.parsePage(doc(body),'https://kns.cnki.net/KCMS/detail/detail.aspx?dbcode=CMFD&filename=1026123456.nh');
+ assert.equal(thesis.metadata.itemType,'thesis');assert.equal(thesis.metadata.university,'合成研究大学');assert.deepEqual(thesis.metadata.authors,['合成作者']);
+});
+test('modern and legacy hidden field aliases must agree, including id and name aliases',()=>{
+ const opaque='https://kns.cnki.net/kcms2/article/abstract?v=synthetic';
+ const base='<input id="param-filename" value="TEST202401001"><input id="paramdbcode" value="CJFD">';
+ assert.equal(cnki.parsePage(doc(base+'<input id="hidfilename" value="test202401001"><input id="hiddbcode" value="CJFQ">'),opaque).record.id,id);
+ assert.equal(cnki.parsePage(doc('<input id="unrelated" name="param-filename" value="TEST202401001"><input id="paramdbcode" value="CJFD">'),opaque).record.id,id);
+ for(const extra of ['<input id="hidfilename" value="OTHER">','<input id="hiddbcode" value="CDFD">','<input id="unrelated" name="param-filename" value="OTHER">'])assert.equal(cnki.parsePage(doc(base+extra),opaque).status,'article_mismatch');
+ assert.equal(parsed('<input id="paramdbcode" value="CDFD">').status,'article_mismatch');
+ assert.equal(parsed('<input id="param-filename" value="OTHER">').status,'article_mismatch');
+ assert.equal(parsed('<input id="param-filename" value="TEST202401001">').record.id,id);
+});
+test('an explicit PDF label wins over a shared cajDown marker but never a CAJ file or dtype',()=>{
+ const address='https://bar.cnki.net/bar/download/order?id=synthetic';
+ const pdf=parsed('<a id="cajDown" name="cajDown" href="'+address+'">PDF下载</a>');
+ assert.equal(pdf.status,'pdf_available');assert.equal(pdf.candidates[0].url,address);assert.equal(pdf.cajAvailable,false);
+ for(const href of [address+'&dtype=caj','https://bar.cnki.net/file.caj']){
+  const result=parsed('<a id="cajDown" name="cajDown" href="'+href+'">PDF下载</a>');
+  assert.equal(result.status,'caj_only');assert.equal(result.candidates.length,0);
+ }
+});
+test('input normalization separates article URLs, whole DOIs and titles',()=>{
+ const paperDOI='10.1234/d.cnki.synthetic.2026.000001';
+ for(const value of [paperDOI.toUpperCase(),'DOI: '+paperDOI])assert.deepEqual(cnki.normalizeInput(value),{kind:'doi',value:paperDOI,doi:paperDOI,url:'https://doi.org/'+paperDOI});
+ for(const value of ['https://doi.org/'+paperDOI,'https://www.chndoi.org/Resolution/Handler?doi='+paperDOI,'https://link.cnki.net/doi/'+paperDOI,'https://link.oversea.cnki.net/doi/'+paperDOI]){
+  const result=cnki.normalizeInput(value);assert.equal(result.kind,'doi');assert.equal(result.doi,paperDOI);assert.equal(cnki.resolverURL(result.url).doi,paperDOI);
+ }
+ assert.deepEqual(cnki.normalizeInput('  '+title+'  '),{kind:'title',value:title,title});
+ assert.equal(cnki.normalizeInput(url).kind,'url');
+ assert.deepEqual(cnki.normalizeInput('Effects: a synthetic study'),{kind:'title',value:'Effects: a synthetic study',title:'Effects: a synthetic study'});
+});
+test('DOI resolvers reject spoofing, user info, unapproved routes and query injection',()=>{
+ const d='10.1234/synthetic';
+ const invalid=['http://doi.org/'+d,'https://dx.doi.org/'+d,'https://doi.org.evil.example/'+d,'https://user:secret@doi.org/'+d,'https://doi.org:444/'+d,'https://doi.org/'+d+'?redirect=https://evil.example','https://doi.org/'+d+'%0A','https://www.chndoi.org/Resolution/Other?doi='+d,'https://www.chndoi.org/Resolution/Handler?doi='+d+'&doi=10.1234/other','https://www.chndoi.org/Resolution/Handler?doi='+d+'&url=https://evil.example','https://link.cnki.net/DOI/'+d,'https://link.cnki.net/doi/'+d+'?v=opaque','https://link.cnki.net.evil.example/doi/'+d,'https://bar.cnki.net/bar/download/order?id=synthetic','https://kns.cnki.net/search','javascript:alert(1)','10.1234/invalid doi','10.1234/'];
+ for(const value of invalid){assert.equal(cnki.resolverURL(value),null,value);assert.equal(cnki.normalizeInput(value),null,value);}
+ assert.equal(cnki.normalizeInput(''),null);assert.equal(cnki.normalizeInput(title+'\n'+title),null);
+});
+function resolverDoc({paperDOI='10.1234/synthetic',links=['https://link.cnki.net/doi/10.1234/synthetic','https://link.oversea.cnki.net/doi/10.1234/synthetic'],extra=''}={}){
+ return parseHTML('<html><body><div class="feedbackresult"><div class="fbHd">多重解析地址选择页面</div><div class="fbBd"><table><tr><td><label>题名：</label>'+title+'</td></tr><tr><td><label>作者：</label>合成作者甲；合成作者乙</td></tr><tr><td><label>出版机构：</label>合成研究大学</td></tr><tr><td><label>DOI码：</label>'+paperDOI+'</td></tr><tr><td><label>注册时间：</label>2026-11-02 10:57:11</td></tr>'+extra+'<tr><td>'+links.map(href=>'<a href="'+href+'">解析地址</a>').join('')+'</td></tr></table></div></div></body></html>').document;
+}
+test('official DOI selection page yields only explicit exactly matching CNKI links',()=>{
+ const result=cnki.parseDOIResolver(resolverDoc({links:['https://link.cnki.net/doi/10.1234/synthetic','https://link.oversea.cnki.net/doi/10.1234/synthetic','https://link.cnki.net/doi/10.1234/other','https://evil.example/doi/10.1234/synthetic','https://link.cnki.net/doi/10.1234/synthetic']}),'https://www.chndoi.org/Resolution/Handler?doi=10.1234/synthetic','10.1234/synthetic');
+ assert.deepEqual(result,{doi:'10.1234/synthetic',title,authors:['合成作者甲','合成作者乙'],links:['https://link.cnki.net/doi/10.1234/synthetic','https://link.oversea.cnki.net/doi/10.1234/synthetic']});
+});
+test('DOI selection requires request, page and link identities to agree',()=>{
+ const address='https://www.chndoi.org/Resolution/Handler?doi=10.1234/synthetic';
+ assert.equal(cnki.parseDOIResolver(resolverDoc(),address,''),null);
+ assert.equal(cnki.parseDOIResolver(resolverDoc(),address,'10.1234/other'),null);
+ assert.equal(cnki.parseDOIResolver(resolverDoc({paperDOI:'10.1234/other'}),address,'10.1234/synthetic'),null);
+ assert.equal(cnki.parseDOIResolver(resolverDoc({extra:'<tr><td><label>DOI码：</label>10.1234/other</td></tr>'}),address,'10.1234/synthetic'),null);
+ assert.equal(cnki.parseDOIResolver(resolverDoc({links:['https://link.cnki.net/doi/10.1234/other']}),address,'10.1234/synthetic'),null);
+ assert.equal(cnki.parseDOIResolver(resolverDoc(),'https://doi.org/10.1234/synthetic','10.1234/synthetic'),null);
+ assert.equal(cnki.parseDOIResolver(doc('<a href="https://link.cnki.net/doi/10.1234/synthetic">link</a>'),address,'10.1234/synthetic'),null);
+});

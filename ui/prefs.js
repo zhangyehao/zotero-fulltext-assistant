@@ -23,6 +23,7 @@
     let sourceSettingsDirty = false;
     let sourceCredentialsDirty = false;
     let cnkiPreviewDirty = false;
+    let cnkiInputRevision = 0;
     let cnkiPreviewKey = "";
     let cnkiReferenceKey = "", cnkiReferenceRecord = "", cnkiReferencePage = 0;
     const selectedCNKIReferences = new Set();
@@ -273,10 +274,10 @@
     function renderCNKI() {
       const info = snapshot.cnki || {}, working = busy || info.checking === true;
       const state = info.checking ? "checking" : info.state || "idle";
-      const labels = { idle: "尚未验证访问", checking: "正在检查知网…", metadata_ready: "已读取元数据", login_required: "需要知网登录", human_verification: "需要网站验证", purchase_required: "网站要求购买", access_denied: "没有文献访问权限", caj_only: "仅有 CAJ 文件", not_found: "未找到知网文献", error: "知网检查未完成", no_sample: "没有可验证的知网样本" };
+      const labels = { idle: "尚未验证访问", checking: "正在检查知网…", metadata_ready: "已读取元数据", search_required: "请在官网选择文章", login_required: "需要知网登录", human_verification: "需要网站验证", purchase_required: "网站要求购买", access_check_required: "需核验下载权限", access_denied: "没有文献访问权限", caj_only: "仅有 CAJ 文件", not_found: "未找到知网文献", error: "知网检查未完成", no_sample: "没有可验证的知网样本" };
       $("fta-pref-cnki").setAttribute("aria-busy", String(working));
       $("fta-pref-cnki-state").textContent = labels[state] || "尚未验证访问";
-      $("fta-pref-cnki-state").dataset.tone = state === "error" ? "error" : ["login_required", "human_verification", "purchase_required", "access_denied", "caj_only"].includes(state) ? "warning" : "";
+      $("fta-pref-cnki-state").dataset.tone = state === "error" ? "error" : ["login_required", "human_verification", "purchase_required", "access_check_required", "access_denied", "caj_only"].includes(state) ? "warning" : "";
       $("fta-pref-cnki-enabled").checked = info.enabled !== false;
       $("fta-pref-cnki-enabled").disabled = working || typeof app.saveCNKISettings !== "function";
       $("fta-pref-cnki-session").textContent = info.sessionRemembered === true ? "已允许保存知网会话；当前访问权限仍需验证。" : "尚未开启知网会话保存。";
@@ -289,7 +290,11 @@
       for (const [id, method] of Object.entries(methods)) $("fta-pref-cnki-" + id).disabled = working || typeof app[method] !== "function";
       for (const id of ["verify", "inspect", "import", "enrich"]) $("fta-pref-cnki-" + id).disabled ||= info.enabled === false;
       $("fta-pref-cnki-url").disabled = working || typeof app.inspectCNKIURL !== "function";
-      $("fta-pref-cnki-inspect").disabled ||= !String($("fta-pref-cnki-url").value || "").trim();
+      const inputValue = String($("fta-pref-cnki-url").value || "").trim(), input = app.normalizeCNKIInput?.(inputValue);
+      $("fta-pref-cnki-inspect").textContent = input?.kind === "title" ? "搜索标题" : "解析文献";
+      $("fta-pref-cnki-inspect").disabled ||= !input;
+      $("fta-pref-cnki-input-error").hidden = !inputValue || !!input || typeof app.normalizeCNKIInput !== "function";
+      $("fta-pref-cnki-url").setAttribute("aria-invalid", String(!!inputValue && !input));
       $("fta-pref-cnki-import").disabled ||= info.canImport !== true || !info.record?.id || !info.metadata?.title || cnkiPreviewDirty;
       $("fta-pref-cnki-enrich").disabled ||= info.canEnrich === false;
       $("fta-pref-cnki-preview-stale").hidden = !cnkiPreviewDirty;
@@ -301,7 +306,7 @@
         cnkiPreviewKey = key;
         const list = $("fta-pref-cnki-metadata");list.textContent = "";
         const authors = Array.isArray(metadata.authors) ? metadata.authors.filter(value => typeof value === "string").join(" · ") : "";
-        const fields = [["题名", titleText(metadata.title)], ["作者", authors], ["期刊", metadata.journal], ["发表日期", metadata.date], ["DOI", metadata.doi], ["知网标识", record.id], ["摘要", metadata.abstract]];
+        const fields = [["题名", titleText(metadata.title)], ["作者", authors], ["期刊", metadata.journal], ["授予单位", metadata.university], ["发表日期", metadata.date], ["DOI", metadata.doi], ["知网标识", record.id], ["摘要", metadata.abstract]];
         for (const [label, value] of fields) {
           if (!value) continue;
           list.append(make("dt", "", label));
@@ -1090,21 +1095,26 @@
       const enabled = $("fta-pref-cnki-enabled").checked === true;
       run(async () => checkedCNKIResult(await app.saveCNKISettings({ enabled })), "知网来源设置已保存。", false, cnkiActionOptions);
     });
-    on($("fta-pref-cnki-url"), "input", () => { cnkiPreviewDirty = true;renderCNKI();localize(); });
+    on($("fta-pref-cnki-url"), "input", () => { cnkiInputRevision++;cnkiPreviewDirty = true;selectedCNKIReferences.clear();cnkiReferencePage = 0;cnkiReferenceKey = "";renderCNKI();localize(); });
     on($("fta-pref-cnki-url-form"), "submit", event => {
       event.preventDefault();
       if ($("fta-pref-cnki-inspect").disabled) return;
-      const url = String($("fta-pref-cnki-url").value || "").trim();
+      const value = String($("fta-pref-cnki-url").value || "").trim(), revision = cnkiInputRevision;
       selectedCNKIReferences.clear();cnkiReferencePage = 0;cnkiReferenceKey = "";
-      run(async () => { const result = checkedCNKIResult(await app.inspectCNKIURL(url));cnkiPreviewDirty = false;return result; }, result => result?.message || "解析已完成，请核对文献预览。", false, cnkiActionOptions);
+      run(async () => {
+        const result = checkedCNKIResult(await app.inspectCNKIURL(value));
+        if (revision !== cnkiInputRevision || value !== String($("fta-pref-cnki-url").value || "").trim()) { cnkiPreviewDirty = true;return { message: "输入已更改，请先解析新内容，再导入预览文献。" }; }
+        cnkiPreviewDirty = false;return result;
+      }, result => result?.message || (result?.state === "search_required" ? "请在官网选择文章" : "解析已完成，请核对文献预览。"), false, cnkiActionOptions);
     });
     for (const [id, method, message] of [["login", "openCNKILogin", "已打开知网网页登录。请自行完成登录或验证。"], ["reset", "resetCNKISession", "知网会话已重置。"], ["verify", "verifyCNKI", "知网检查已完成，请查看访问状态。"], ["import", "importCNKIPreview", "知网条目操作已完成，请查看结果。"], ["enrich", "enrichSelectedCNKI", "知网元数据补全已完成，请查看结果。"]]) {
       on($("fta-pref-cnki-" + id), "click", () => {
         if ($("fta-pref-cnki-" + id).disabled) return;
+        const revision = cnkiInputRevision;
         if (id === "verify" || id === "reset") { selectedCNKIReferences.clear();cnkiReferencePage = 0;cnkiReferenceKey = ""; }
         run(async () => {
           const result = checkedCNKIResult(await app[method]());
-          if (id === "verify" || id === "reset") cnkiPreviewDirty = false;
+          if (id === "verify" || id === "reset") cnkiPreviewDirty = revision !== cnkiInputRevision;
           return result;
         }, result => typeof result?.message === "string" && result.message ? result.message : message, false, cnkiActionOptions);
       });

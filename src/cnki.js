@@ -45,7 +45,29 @@
   }
   function detailURL(url) {
     return /^\/(?:kcms\/detail\/detail\.aspx|kcms2\/article\/abstract)\/?$/i.test(url.pathname)
-      || /^\/Article\/[A-Z0-9_]+-[A-Z0-9_.-]+\.htm$/i.test(url.pathname);
+      || /^\/Article\/[A-Z0-9_]+-[A-Z0-9_.-]+\.htm$/i.test(url.pathname) || !!readerRoute(url);
+  }
+  function readerRoute(url) {
+    if (url.hostname === "ix.cnki.net" && url.pathname === "/read/article/readonline") return "ix";
+    if (url.hostname === "x.cnki.net" && url.pathname === "/web/xmlRead/pdf.html") return "x";
+    return "";
+  }
+  function readerURL(record, source) {
+    const route = readerRoute(source);
+    if (!route || !record.dbname) return null;
+    const app = parameter(source, ["appid"], value => value), type = parameter(source, ["filesourcetype"], value => value), page = parameter(source, ["pagetype"], value => value);
+    // These are the nonsecret routing values observed in the official reader
+    // and its redirect. Never preserve session keys or invent another route.
+    if (app.conflict || type.conflict || page.conflict || app.value && app.value !== "CRSP_BASIC_PSMC"
+        || type.value && type.value !== "1" || page.value && page.value !== "pdfweb" || route === "x" && page.value !== "pdfweb") return null;
+    const url = new URL(source.origin + source.pathname);
+    if (route === "x") url.searchParams.set("pageType", "pdfweb");
+    url.searchParams.set(route === "x" ? "dbCode" : "dbcode", record.dbcode);
+    url.searchParams.set(route === "x" ? "tableName" : "tablename", record.dbname);
+    url.searchParams.set(route === "x" ? "fileName" : "filename", record.filename);
+    if (type.value) url.searchParams.set("fileSourceType", type.value);
+    if (app.value) url.searchParams.set(route === "x" ? "appId" : "appid", app.value);
+    return url.href;
   }
   function recordFromURL(value) {
     const url = articleLocation(value);
@@ -58,12 +80,14 @@
     if (article && article[1].toUpperCase() === "CDMD") return null;
     if (article) result = fields("", article[1], article[2]);
     else {
-      const code = parameter(url, ["dbcode"], databaseCode), name = parameter(url, ["dbname"]), file = parameter(url, ["filename"]);
+      const code = parameter(url, ["dbcode"], databaseCode), name = parameter(url, ["dbname", "tablename"]), file = parameter(url, ["filename"]);
       if (code.conflict || name.conflict || file.conflict) return null;
+      if (readerRoute(url) && (!code.value || !name.value || !file.value)) return null;
       result = fields(code.value, name.value, file.value);
     }
     if (!result) return null;
     if (article) result.url = url.origin + "/Article/" + result.dbname + "-" + result.filename + ".htm";
+    else if (readerRoute(url)) { result.url = readerURL(result, url); if (!result.url) return null; }
     else result.url = stableURL(result, url.hostname);
     return result;
   }
@@ -97,8 +121,10 @@
     else if (input && typeof input === "object") input = input.url || input.articleURL || normalizeRecord(input)?.url;
     const url = articleLocation(input);
     if (!url || !detailURL(url)) return null;
-    const hasIdentity = [...url.searchParams.keys()].some(key => ["filename", "dbcode", "dbname"].includes(key.toLowerCase()));
-    return hasIdentity && !recordFromURL(url.href) ? null : url.href;
+    const record = recordFromURL(url.href);
+    const hasIdentity = [...url.searchParams.keys()].some(key => ["filename", "dbcode", "dbname", "tablename"].includes(key.toLowerCase()));
+    if (readerRoute(url)) return record?.url || null;
+    return hasIdentity && !record ? null : url.href;
   }
   function fromItem(item) {
     if (!item) return null;
@@ -114,6 +140,73 @@
     // bind an arbitrary first result to the current paper.
     return "https://kns.cnki.net/kns8s/defaultresult/index";
   }
+  function inputDOI(value) {
+    const text = String(value || "").trim().replace(/^doi\s*:\s*/i, "");
+    return /^10\.\d{4,9}\/[^\s<>"?#\\]{1,1800}$/i.test(text) ? text.toLowerCase() : "";
+  }
+  function resolverURL(value) {
+    try {
+      const url = new URL(String(value || "").trim());
+      if (url.protocol !== "https:" || url.username || url.password || url.port || url.href.length > 8192) return null;
+      let raw = "", address;
+      if (url.hostname === "doi.org" && !url.search) {
+        raw = decodeURIComponent(url.pathname.slice(1));
+        address = "https://doi.org/";
+      } else if (url.hostname === "www.chndoi.org" && url.pathname === "/Resolution/Handler") {
+        const values = [...url.searchParams];
+        if (values.length !== 1 || values[0][0] !== "doi") return null;
+        raw = values[0][1]; address = "https://www.chndoi.org/Resolution/Handler?doi=";
+      } else if (["link.cnki.net", "link.oversea.cnki.net"].includes(url.hostname) && url.pathname.startsWith("/doi/") && !url.search) {
+        raw = decodeURIComponent(url.pathname.slice(5)); address = url.origin + "/doi/";
+      } else return null;
+      const paperDOI = inputDOI(raw);
+      if (!paperDOI || raw !== raw.trim() || /^doi\s*:/i.test(raw)) return null;
+      // Escaping the suffix prevents DOI characters from becoming URL syntax.
+      const encoded = encodeURIComponent(paperDOI).replace(/%2F/gi, "/");
+      return { doi: paperDOI, url: address + (url.hostname === "www.chndoi.org" ? encodeURIComponent(paperDOI) : encoded) };
+    } catch (_) { return null; }
+  }
+  function normalizeInput(value) {
+    const text = String(value || "").trim();
+    if (!text || text.length > 8192 || /[\u0000-\u001F\u007F]/.test(text)) return null;
+    const resolved = resolverURL(text);
+    if (resolved) return { kind: "doi", value: resolved.doi, ...resolved };
+    const paperDOI = inputDOI(text);
+    if (paperDOI) return { kind: "doi", value: paperDOI, doi: paperDOI, url: resolverURL("https://doi.org/" + encodeURIComponent(paperDOI).replace(/%2F/gi, "/")).url };
+    const address = pageURL(text);
+    if (address) return { kind: "url", value: address, url: address };
+    if (/^(?:[a-z][a-z0-9+.-]*:\/\/|(?:https?|file|data|javascript|doi):|www\.)/i.test(text) || /^10\.\d+\//.test(text) || text.length > 2000) return null;
+    const title = clean(text);
+    return title ? { kind: "title", value: title, title } : null;
+  }
+  function parseDOIResolver(doc, address, expectedDOI) {
+    const source = resolverURL(address), wanted = inputDOI(expectedDOI);
+    if (!source || !wanted || source.doi !== wanted || new URL(source.url).hostname !== "www.chndoi.org" || !doc?.querySelectorAll) return null;
+    const region = doc.querySelector(".feedbackresult .fbBd");
+    if (!region) return null;
+    const values = { doi: [], title: [], authors: [] };
+    for (const row of region.querySelectorAll("tr")) {
+      const label = row.querySelector("td label");
+      if (!label) continue;
+      const key = nodeText(label, 100).replace(/[:：\s]/g, "").toLowerCase();
+      const field = key === "doi码" || key === "doi" ? "doi" : key === "题名" ? "title" : key === "作者" ? "authors" : "";
+      if (!field) continue;
+      const cell = label.parentElement.cloneNode(true);
+      for (const element of cell.querySelectorAll("label")) element.remove();
+      const value = nodeText(cell, field === "title" ? 2000 : 4000);
+      if (value) values[field].push(value);
+    }
+    if (!values.doi.length || values.doi.some(value => inputDOI(value) !== wanted) || new Set(values.title).size > 1) return null;
+    const links = [];
+    for (const node of region.querySelectorAll("a[href]")) {
+      const link = resolverURL(node.getAttribute("href"));
+      if (!link || link.doi !== wanted || !["link.cnki.net", "link.oversea.cnki.net"].includes(new URL(link.url).hostname)) continue;
+      if (!links.includes(link.url) && links.length < LIMIT) links.push(link.url);
+    }
+    if (!links.length) return null;
+    const authors = [...new Set(values.authors.flatMap(value => value.split(/[;；、]/)).map(value => clean(value, 300)).filter(Boolean))].slice(0, 100);
+    return { doi: wanted, title: values.title[0] || "", authors, links };
+  }
   function metaValues(doc, names) {
     const wanted = new Set(names.map(value => value.toLowerCase()));
     return [...doc.querySelectorAll("meta[name],meta[property]")].filter(node => wanted.has((node.getAttribute("name") || node.getAttribute("property") || "").toLowerCase()))
@@ -125,18 +218,21 @@
     for (const child of node.querySelectorAll("script,style,.full-text,.type,[hidden],[aria-hidden='true']")) child.remove();
     return clean(node.textContent, limit);
   }
-  function hidden(doc, name) {
-    return [...doc.querySelectorAll("input")].filter(node => (node.id || node.getAttribute("name") || "").toLowerCase() === name)
+  function hidden(doc, names) {
+    const wanted = new Set((Array.isArray(names) ? names : [names]).map(value => value.toLowerCase()));
+    return [...doc.querySelectorAll("input")].filter(node => [node.id, node.getAttribute("name")].some(value => wanted.has(String(value || "").toLowerCase())))
       .map(node => clean(node.getAttribute("value"), 160)).filter(Boolean);
   }
   function pageRecord(doc, url) {
-    const file = hidden(doc, "hidfilename"), code = hidden(doc, "hiddbcode"), name = hidden(doc, "hiddbname");
+    const file = hidden(doc, ["hidfilename", "param-filename"]), code = hidden(doc, ["hiddbcode", "paramdbcode"]), name = hidden(doc, "hiddbname");
     if ([file, name].some(values => new Set(values.map(value => value.toUpperCase())).size > 1) || new Set(code.map(databaseCode)).size > 1) return { conflict: true };
-    const visible = file.length ? fields(code[0], name[0], file[0]) : null;
     const location = recordFromURL(url);
-    const suppliedIdentity = [...new URL(url).searchParams.keys()].some(key => ["filename", "dbcode", "dbname"].includes(key.toLowerCase()));
+    const visible = file.length ? fields(code[0] || location?.dbcode, name[0] || location?.dbname, file[0]) : null;
+    const suppliedIdentity = [...new URL(url).searchParams.keys()].some(key => ["filename", "dbcode", "dbname", "tablename"].includes(key.toLowerCase()));
     if (suppliedIdentity && !location) return { conflict: true };
-    if (file.length && !visible || visible && location && visible.id !== location.id) return { conflict: true };
+    if (file.length && !visible || visible && location && visible.id !== location.id
+        || location && code.length && databaseCode(code[0]) !== location.dbcode
+        || name.length && !fields(code[0] || location?.dbcode, name[0], file[0] || location?.filename)) return { conflict: true };
     const record = visible || location;
     return { conflict: false, record: record ? { ...record, url: location?.url || stableURL(record, new URL(url).hostname) } : null };
   }
@@ -145,11 +241,15 @@
     const heading = doc.querySelector(".wx-tit h1 .title-one,h1 .title-one,.wx-tit h1,h1.xx_title,h1");
     const title = first(["citation_title", "dc.title"]) || nodeText(heading);
     let authors = metaValues(doc, ["citation_author"]);
-    if (!authors.length) authors = [...doc.querySelectorAll("#authorpart a,.author a,.authors a")].map(node => nodeText(node, 300)).filter(Boolean);
+    const authorNodes = doc.querySelectorAll("#authorpart a");
+    if (!authors.length) authors = [...(authorNodes.length ? authorNodes : doc.querySelectorAll(".author a,.authors a"))]
+      .filter(node => !/\/organ\/detail(?:[/?#]|$)/i.test(node.getAttribute("href") || "")).map(node => nodeText(node, 300)).filter(Boolean);
     if (!authors.length && heading?.matches("h1.xx_title")) authors = [...(heading.parentElement?.nextElementSibling?.querySelectorAll('a[href*="author="]') || [])].map(node => nodeText(node, 300)).filter(Boolean);
     let paperDOI = doi(first(["citation_doi", "dc.identifier"]));
     if (!paperDOI) paperDOI = doi(nodeText(doc.querySelector("#DOI,#doi")));
     const date = first(["citation_publication_date", "citation_date", "dc.date"]);
+    const itemType = TYPES[record?.dbcode] || (/^https:\/\/cdmd\.cnki\.com\.cn\/Article\/CDMD-/i.test(address) || hidden(doc, "paramresource").includes("DISSERTATION") ? "thesis" : "journalArticle");
+    const university = itemType === "thesis" ? first(["citation_dissertation_institution"]) || nodeText(doc.querySelector('.wx-tit .author a[href*="/organ/detail"]'), 500) : "";
     return { title: clean(title), doi: paperDOI, authors: [...new Set(authors)].slice(0, 100),
       abstract: first(["citation_abstract"]) || nodeText(doc.querySelector("#ChDivSummary,.abstract-text"), 20000),
       journal: first(["citation_journal_title"]), date: clean(date, 100),
@@ -157,7 +257,7 @@
       pages: [first(["citation_firstpage"]), first(["citation_lastpage"])].filter(Boolean).join("-"),
       issn: first(["citation_issn"]), isbn: first(["citation_isbn"]),
       keywords: [...new Set(metaValues(doc, ["citation_keywords", "keywords"]).flatMap(value => value.split(/[;,；，]|\s{2,}/).map(value => clean(value, 200)).filter(Boolean)))].slice(0, 40),
-      itemType: TYPES[record?.dbcode] || (/^https:\/\/cdmd\.cnki\.com\.cn\/Article\/CDMD-/i.test(address) ? "thesis" : "journalArticle") };
+      university: clean(university, 500), itemType };
   }
   function gate(doc, url) {
     const host = officialURL(url)?.hostname || "";
@@ -187,7 +287,7 @@
       result.status = "article_mismatch"; return result;
     }
     if (!result.record) { result.status = "record_unavailable"; return result; }
-    if (!info.title || info.title.includes("\uFFFD")) { result.status = "metadata_unavailable"; return result; }
+    if (!info.title || info.title.includes("\uFFFD") || readerRoute(url) && info.title === "研学阅读") { result.status = "metadata_unavailable"; return result; }
     let purchase = false;
     function add(raw, format, node) {
       const candidate = officialURL(raw, url.href);
@@ -212,9 +312,9 @@
       if (node.closest('[hidden],[aria-hidden="true"],.references,#references,.related-articles,[class*="reference"],[id*="reference"]')) continue;
       const marker = [node.id, node.getAttribute("name"), node.getAttribute("data-dflag")].join(" ");
       const label = nodeText(node, 300);
-      const pdf = /(?:^|\s)(?:pdfDown|ty_pdf|pdfdown)(?:$|\s)/i.test(marker) || /^(?:PDF|PDF下载|下载PDF|Download PDF|Full Text PDF)$/i.test(label)
-        || node.closest("#DownLoadParts") && /\bPDF\b/i.test(label);
-      const caj = /(?:^|\s)(?:cajDown|ty_caj|cajdown)(?:$|\s)/i.test(marker) || /\bCAJ\b/i.test(label);
+      const explicitPDF = /^(?:PDF|PDF下载|下载PDF|Download PDF|Full Text PDF)$/i.test(label) || node.closest("#DownLoadParts") && /\bPDF\b/i.test(label);
+      const pdf = explicitPDF || /(?:^|\s)(?:pdfDown|ty_pdf|pdfdown)(?:$|\s)/i.test(marker);
+      const caj = /\bCAJ\b/i.test(label) || !explicitPDF && /(?:^|\s)(?:cajDown|ty_caj|cajdown)(?:$|\s)/i.test(marker);
       if (pdf || caj) add(node.getAttribute("href"), caj ? "caj" : "pdf", node);
     }
     result.status = result.candidates.length ? "pdf_available" : purchase ? "purchase_required" : result.cajAvailable ? "caj_only" : "metadata_only";
@@ -250,7 +350,7 @@
     }
     return text;
   }
-  const api = Object.freeze({ normalizeRecord, fromItem, isCNKIURL, safeArticleURL, pageURL, parsePage, classifyResponse, searchURL, decodeHTML });
+  const api = Object.freeze({ normalizeRecord, normalizeInput, resolverURL, parseDOIResolver, fromItem, isCNKIURL, safeArticleURL, pageURL, parsePage, classifyResponse, searchURL, decodeHTML });
   root.FulltextCNKI = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(globalThis);

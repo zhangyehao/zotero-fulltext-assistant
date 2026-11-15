@@ -7,7 +7,7 @@
 - [浏览器下载、目录配置与 PDF 核对](browser-downloads.md)
 - [全文来源、API 和配置说明](fulltext-sources.md)
 - [知网文献、元数据、参考文献与全文](cnki.md)
-- [1.1.0 更新说明](release-v1.1.0.md) · [最终候选验收记录](verification-v1.1.0.md)
+- [1.1.1 更新说明](release-v1.1.1.md) · [候选验收记录](verification-v1.1.1.md)
 - [维护者发布与更新指南](PUBLISHING.md)
 - [后续更新注意事项与踩坑记录](UPDATING.md)
 - [隐私与本地数据](../PRIVACY.md)
@@ -17,6 +17,7 @@
 
 | 版本 | 记录 |
 | --- | --- |
+| 1.1.0 | [更新说明](release-v1.1.0.md) · [验收记录](verification-v1.1.0.md) |
 | 1.0.0 | [更新说明](release-v1.0.0.md) · [验收记录](verification-v1.0.0.md) |
 | 0.9.0 | [更新说明](release-v0.9.0.md) · [验收记录](verification-v0.9.0.md) |
 | 0.8.0 | [更新说明](release-v0.8.0.md) · [验收记录](verification-v0.8.0.md) |

@@ -103,18 +103,19 @@
         <html:p class="fta-note">更改立即保存。批量获取会尝试知网条目；元数据可读取不代表有 PDF 下载权限。</html:p>
         <html:p id="fta-pref-cnki-session" class="fta-secondary" role="status"></html:p>
         <html:div class="fta-actions"><html:button id="fta-pref-cnki-login" type="button">网页登录</html:button><html:button id="fta-pref-cnki-verify" type="button">验证访问</html:button><html:button id="fta-pref-cnki-reset" type="button">重置知网会话</html:button></html:div>
-        <html:p class="fta-note">在插件网页中自行完成登录或验证。验证优先检查选中的知网条目，否则使用文库中的一个知网样本；不会为你购买文献。</html:p>
+        <html:p class="fta-note">在插件网页中自行完成登录或验证。验证优先检查选中条目的 DOI 或知网文章链接，否则使用文库中的一个知网样本；不会为你购买文献。</html:p>
         <html:p id="fta-pref-cnki-message" class="fta-note" role="status" aria-live="polite"></html:p>
         <html:p id="fta-pref-cnki-checked" class="fta-note"></html:p>
         <html:form id="fta-pref-cnki-url-form" class="fta-cnki-url-form">
-          <html:label for="fta-pref-cnki-url">知网文献链接</html:label>
-          <html:input id="fta-pref-cnki-url" type="url" autocomplete="off" spellcheck="false" placeholder="粘贴知网文献详情页链接" aria-describedby="fta-pref-cnki-preview-note"/>
-          <html:div class="fta-actions"><html:button id="fta-pref-cnki-inspect" type="submit">解析链接</html:button></html:div>
-          <html:p id="fta-pref-cnki-preview-note" class="fta-note">先预览题名、作者与来源，再明确导入；解析链接不会创建条目或下载 PDF。</html:p>
+          <html:label for="fta-pref-cnki-url">知网文献：DOI、链接或标题</html:label>
+          <html:input id="fta-pref-cnki-url" type="text" maxlength="2000" autocomplete="off" spellcheck="false" placeholder="输入 DOI、知网官方文章链接或完整标题" aria-describedby="fta-pref-cnki-preview-note fta-pref-cnki-input-error"/>
+          <html:div class="fta-actions"><html:button id="fta-pref-cnki-inspect" type="submit">解析文献</html:button></html:div>
+          <html:p id="fta-pref-cnki-preview-note" class="fta-note">DOI 或官方链接可解析文献预览；标题会打开官网搜索，需选择文章后填回详情链接。解析和搜索都不会创建条目或下载 PDF。</html:p>
+          <html:p id="fta-pref-cnki-input-error" class="fta-note" data-error="true" role="status" hidden="hidden">请输入有效 DOI、知网官方文章链接或完整标题。</html:p>
         </html:form>
         <html:div id="fta-pref-cnki-preview" class="fta-cnki-preview" hidden="hidden">
           <html:h4>文献预览</html:h4><html:dl id="fta-pref-cnki-metadata"></html:dl>
-          <html:p id="fta-pref-cnki-preview-stale" class="fta-note" hidden="hidden">链接已更改，请先解析新链接，再导入预览文献。</html:p>
+          <html:p id="fta-pref-cnki-preview-stale" class="fta-note" hidden="hidden">输入已更改，请先解析新内容，再导入预览文献。</html:p>
           <html:div class="fta-actions"><html:button id="fta-pref-cnki-import" type="button" class="fta-primary">导入为新条目</html:button></html:div>
           <html:p class="fta-note">导入前会检查已有条目，避免重复；全文仍通过“批量获取全文”获取。</html:p>
           <html:section id="fta-pref-cnki-references" class="fta-cnki-references" aria-labelledby="fta-pref-cnki-references-heading">
@@ -128,7 +129,7 @@
             <html:p class="fta-note">题名证据不足的引文仅供查看，不能直接导入。登录限制或页面不完整时，列表可能只包含部分参考文献。</html:p>
           </html:section>
         </html:div>
-        <html:div class="fta-cnki-enrich"><html:button id="fta-pref-cnki-enrich" type="button">补全选中条目元数据</html:button><html:p class="fta-note">在文库选中知网条目后使用；只补充空白字段，保留已有内容。</html:p></html:div>
+        <html:div class="fta-cnki-enrich"><html:button id="fta-pref-cnki-enrich" type="button">补全选中条目元数据</html:button><html:p class="fta-note">在文库选中带 DOI 或知网文章链接的条目后使用；只补充空白字段，保留已有内容。</html:p></html:div>
         <html:p id="fta-pref-cnki-summary" class="fta-note" role="status" aria-live="polite" hidden="hidden"></html:p>
         <html:p id="fta-pref-cnki-action-status" class="fta-note" role="status" aria-live="polite"></html:p>
       </html:section>

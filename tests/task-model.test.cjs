@@ -477,3 +477,16 @@ test('CNKI IDs and provenance survive no-DOI tasks without persisting signed dow
   assert.equal(task.cnkiRecord.id,record.id);assert.equal(task.sourceReview.discoveryProvider,'cnki');assert.equal(task.publisherURL,'');const restored=model.deserializeQueue(model.serializeQueue([task])).tasks[0];assert.deepEqual(restored.cnkiRecord,record);assert.doesNotMatch(JSON.stringify(restored),/PRIVATE|SECRET/);
   const changed=model.updateTask(task,{cnkiRecord:CNKI.normalizeRecord(url.replace('001','002'))});assert.equal(changed.sourceReview,null);
 });
+
+test('CNKI reader and DOI routes survive queue persistence while unrelated temporary parameters are dropped',()=>{
+  const CNKI=require('../src/cnki.js');
+  const reader='https://ix.cnki.net/read/article/readonline?appid=CRSP_BASIC_PSMC&dbcode=CAPJ&tablename=CAPJLAST&filename=SYNTHETIC202601001&fileSourceType=1&v=SECRET';
+  const record=CNKI.normalizeRecord(reader);
+  const task=model.createTask({itemID:52,libraryID:1,itemKey:'CNKI52',title:'合成在线阅读文献',cnkiRecord:record,officialURL:reader,state:'needs_login'});
+  const restored=model.deserializeQueue(model.serializeQueue([task])).tasks[0];
+  assert.equal(restored.cnkiRecord.id,'CNKI:CAPJ:SYNTHETIC202601001');
+  assert.equal(CNKI.normalizeRecord(restored.officialURL).id,record.id);assert.doesNotMatch(JSON.stringify(restored),/SECRET/);
+  const doiURL='https://link.cnki.net/doi/10.1234/d.cnki.example.2026.000001';
+  const doiTask=model.createTask({itemID:53,libraryID:1,itemKey:'CNKI53',title:'合成学位论文题名',doi:'10.1234/d.cnki.example.2026.000001',officialURL:doiURL,state:'queued'});
+  assert.equal(model.deserializeQueue(model.serializeQueue([doiTask])).tasks[0].officialURL,doiURL);
+});

@@ -10,9 +10,9 @@
 | --- | --- |
 | 仓库 | `zhangyehao/zotero-fulltext-assistant` |
 | 插件 ID | `fulltext-assistant@local.invalid`，沿用旧版本，不能改成另一个插件 |
-| 当前开发目标 | `1.1.0`；发布前必须同步 manifest、package 和锁文件，正式状态以 Release 为准 |
+| 当前开发目标 | `1.1.1`；发布前必须同步 manifest、package 和锁文件，正式状态以 Release 为准 |
 | Zotero 安装范围 | `10.0.7`–`10.0.*` |
-| 原生实测环境 | 1.1.0：Windows / Zotero 10.0.8；安装兼容范围不变 |
+| 原生实测环境 | 1.1.1 为 Windows / Zotero 10.0.8，九组 316 项；具体边界见对应验收记录，安装兼容范围不变 |
 | 更新地址 | `https://github.com/zhangyehao/zotero-fulltext-assistant/releases/latest/download/updates.json` |
 
 插件 ID 中的 `.invalid` 是既有身份标识，并非网络地址；实际 `update_url` 必须是上表可匿名访问的 HTTPS 地址。更新源不包含个人访问令牌。0.7.x 的安装包仍保存旧占位地址，用户需要手动安装一次 0.8.0 或更新版本，之后再验证 Zotero 更新发现流程。
@@ -52,8 +52,8 @@ python scripts/release.py verify-local --directory dist
 4. 推送标签会触发 **Prepare release candidate**，重新测试和构建，再创建或补齐草稿。也可从同一干净提交手动执行：
 
 ```sh
-python scripts/release.py prepare --tag v1.1.0 --directory dist
-python scripts/release.py verify --tag v1.1.0 --directory dist
+python scripts/release.py prepare --tag v1.1.1 --directory dist
+python scripts/release.py verify --tag v1.1.1 --directory dist
 ```
 
 `prepare` 只处理草稿并逐字节核对远端资产。相同资产可重复核实；内容不同会拒绝覆盖。确有需要且仍是未发布草稿时，才显式使用 `--replace-draft-assets`。不要对已公开版本更换文件来掩盖版本内容变化。
@@ -70,12 +70,12 @@ python scripts/release.py verify --tag v1.1.0 --directory dist
 核对草稿、版本说明和用户可见文件后，以实际 Zotero 验收过的 XPI 哈希执行：
 
 ```sh
-python scripts/release.py publish --tag v1.1.0 --directory dist --expected-sha256 <64位已验收XPI的SHA256>
+python scripts/release.py publish --tag v1.1.1 --directory dist --expected-sha256 <64位已验收XPI的SHA256>
 ```
 
 `publish` 再次核对本地与远端资产，拒绝私有仓库，把已核对草稿发布为稳定版并设为 latest。Actions 中的 **Publish reviewed stable release** 是独立手动入口，同样需要标签与明确的验收哈希；推送标签本身只准备草稿。
 
-1.1.0 的发行说明应单独记录本版功能、实际验收结果和剩余限制；可参考 [1.0.0 更新说明](release-v1.0.0.md) 的结构，但不沿用其中的测试数字或发行状态。知网验收边界见 [知网说明](cnki.md) 与 [更新维护记录](UPDATING.md)。不要把测试中拦截的提交写成真实科研通发布，也不要把人工下载、合成 PDF、免费下载线路测试写成验证码兼容或收费结算实测。性能汇总说明样本与测量边界，真实文库的逐篇结果、DOI 和个人路径只保留本地。
+1.1.1 的发行说明与验收状态分别见 [更新说明](release-v1.1.1.md) 和 [验收记录](verification-v1.1.1.md)，不沿用旧版测试数字、哈希或发行状态。知网兼容性检查须区分合成数据、本地网页重放、真实只读网页以及实际 PDF 下载；公开文档使用聚合或合成证据，不包含实际样本题名、DOI、个人路径或原始签名网址。知网访问边界见 [知网说明](cnki.md) 与 [更新维护记录](UPDATING.md)。不要把测试中拦截的提交写成真实科研通发布，也不要把人工下载、合成 PDF、免费下载线路测试写成验证码兼容或收费结算实测。
 
 ## 发布后核实更新
 

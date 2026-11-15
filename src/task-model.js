@@ -80,7 +80,7 @@
       if (!/^https?:$/.test(url.protocol) || url.username || url.password) return "";
       // Only stable bibliographic CNKI URLs survive serialization. Opaque
       // download, order and signed-session URLs are never task identity.
-      if (CNKI?.isCNKIURL(url.href)) return CNKI.safeArticleURL(url.href) || "";
+      if (CNKI?.isCNKIURL(url.href)) return CNKI.safeArticleURL(url.href) || CNKI.resolverURL?.(url.href)?.url || "";
       for (const name of Array.from(url.searchParams.keys())) {
         if (secretQueryNames.test(name)) url.searchParams.delete(name);
       }

@@ -209,6 +209,7 @@
     };
     const existingPDF = item => findExistingPDF(item, { Zotero, IOUtils });
     const cnkiEnabled = () => !!cnki && getCNKISettings()?.enabled !== false;
+    const cnkiRoute = url => cnki?.pageURL(url) || cnki?.resolverURL?.(url)?.url || null;
     function cnkiEmpty(status, title = "") {
       return { status, record: null, articleURL: null, metadata: null, candidates: [], cajAvailable: false, diagnostics: [], ...(status === "needs_url" ? { searchURL: cnki?.searchURL(title) } : {}) };
     }
@@ -232,7 +233,63 @@
       const host = new URL(url).hostname;
       if (/^(?:pay|mall)\.cnki\.net$/.test(host)) return "purchase_required";
       if (/^(?:login|passport)\.cnki\.net$/.test(host)) return "login_required";
+      // The current thesis PDF button leads to an authorization/order page,
+      // not a file. Leave this website interaction to the user; do not label
+      // all institution-authorized downloads as requiring a purchase.
+      if (/\/(?:order|purchase|checkout|pay)(?:\/|$)/i.test(new URL(url).pathname)) return "access_check_required";
       return null;
+    }
+    async function resolveCNKIDOI(start, expectedDOI, isCancelled) {
+      const queue = [start], visited = new Set();
+      let registration = null, failure = "metadata_unavailable";
+      for (let count = 0; queue.length && count < 8; count++) {
+        if (isCancelled()) throw abort();
+        if (!cnkiEnabled()) return { code: "disabled" };
+        const current = queue.shift();
+        if (visited.has(current)) continue;
+        visited.add(current);
+        const resolver = cnki.resolverURL?.(current);
+        if (!resolver) {
+          const address = cnki.pageURL(current), gate = cnkiRequestGate(current);
+          if (address && !gate) return { address, registration };
+          return { code: gate || "unsupported_url" };
+        }
+        if (resolver.doi !== expectedDOI) return { code: "article_mismatch" };
+        let cancel = () => {}, exceeded = false;
+        try {
+          // DOI registration/routing is public metadata. Never send Zotero's
+          // institution cookies or account credentials to a resolver.
+          const operation = Zotero.HTTP.request("GET", current, {
+            anon: true, responseType: "arraybuffer", successCodes: false, followRedirects: false,
+            timeout: 30000, headers: { Accept: "text/html,application/xhtml+xml" },
+            debug: false, logBodyLength: 0, errorDelayMax: 0, noRetryOnThrottle: true,
+            cancellerReceiver(value) { cancel = value; },
+            requestObserver(xhr) { xhr.addEventListener?.("progress", event => { if (event.loaded > MAX_PAGE_BYTES) { exceeded = true; xhr.abort(); } }); },
+          });
+          const response = await cnkiBounded(operation, () => cancel(), isCancelled);
+          if (exceeded) return { code: "response_too_large" };
+          if ((httpURL(response.responseURL) || current) !== httpURL(current)) return { code: "unsafe_redirect" };
+          const status = Number(response.status);
+          if ([301,302,303,307,308].includes(status)) {
+            const next = httpURL(responseHeader(response, "Location"), current);
+            if (!next || !(cnki.resolverURL?.(next) || cnki.pageURL(next))) return { code: "unsupported_url" };
+            queue.unshift(next); continue;
+          }
+          if (status === 429) return { code: "rate_limited" };
+          if (status === 401 || status === 403) return { code: "access_denied" };
+          if (status < 200 || status >= 300) { failure = "http_error"; continue; }
+          const bytes = asBytes(response.response);
+          if (bytes.length > MAX_PAGE_BYTES) return { code: "response_too_large" };
+          const registered = cnki.parseDOIResolver?.(parse(decode(bytes, responseHeader(response, "Content-Type")), current), current, expectedDOI);
+          if (!registered) return { code: "metadata_unavailable" };
+          registration = registered;
+          queue.unshift(...registered.links.slice(0, 2));
+        } catch (error) {
+          if (error.name === "AbortError") throw error;
+          failure = error.code === "timeout" ? "timeout" : "network_error";
+        }
+      }
+      return { code: queue.length ? "redirect_limit" : failure };
     }
     async function requestCNKI(address, referrer, { isCancelled = () => false, pageOnly = false, expectedRecord, allowURL } = {}) {
       let current = address;
@@ -281,16 +338,33 @@
       if (!cnkiEnabled()) return cnkiEmpty("disabled");
       const isItem = !!itemOrURL?.getField;
       const record = isItem ? cnki.fromItem(itemOrURL) : cnki.normalizeRecord(itemOrURL);
-      const address = cnki.pageURL(itemOrURL) || record?.url;
+      let address = cnki.pageURL(itemOrURL) || record?.url;
       const expected = { expectedRecord: record, expectedDOI: isItem ? itemOrURL.getField("DOI") || itemOrURL.getExtraField?.("DOI") : "",
         expectedTitle: isItem ? itemOrURL.getField("title") : "" };
+      const originalDOI = expected.expectedDOI || "", originalTitle = expected.expectedTitle || "";
       const itemURL = isItem ? itemOrURL.getField("url") : "";
       if (isItem && cnki.normalizeRecord(itemURL) && !record) return cnkiEmpty("article_mismatch");
       const check = () => {
         if (isCancelled() || !cnkiEnabled() || isItem && ((cnki.fromItem(itemOrURL)?.id || "") !== (record?.id || "")
-          || itemOrURL.getField("url") !== itemURL || itemOrURL.getField("title") !== expected.expectedTitle
-          || (itemOrURL.getField("DOI") || itemOrURL.getExtraField?.("DOI") || "") !== (expected.expectedDOI || ""))) throw abort();
+          || itemOrURL.getField("url") !== itemURL || itemOrURL.getField("title") !== originalTitle
+          || (itemOrURL.getField("DOI") || itemOrURL.getExtraField?.("DOI") || "") !== originalDOI)) throw abort();
       };
+      let resolution = null;
+      if (!address) {
+        const input = cnki.normalizeInput?.(isItem ? (cnki.resolverURL?.(itemURL) ? itemURL : originalDOI) : itemOrURL);
+        if (input?.kind === "doi") {
+          if (originalDOI && doi(originalDOI) !== input.doi) return cnkiEmpty("article_mismatch");
+          expected.expectedDOI = input.doi;
+          resolution = await resolveCNKIDOI(input.url, input.doi, () => { try { check(); return false; } catch (_) { return true; } });
+          check();
+          if (!resolution.address) return cnkiEmpty(resolution.code);
+          address = resolution.address;
+          const registeredTitle = resolution.registration?.title || "";
+          const titleKey = value => String(value || "").normalize("NFKC").toLowerCase().replace(/[\p{P}\p{Z}\s]/gu, "");
+          if (originalTitle && registeredTitle && titleKey(originalTitle) !== titleKey(registeredTitle)) return cnkiEmpty("article_mismatch");
+          expected.expectedTitle ||= registeredTitle;
+        }
+      }
       if (!address) return cnkiEmpty("needs_url", expected.expectedTitle);
       const displayURL = record?.url || null;
       if (gateFor(address)) return { ...cnkiEmpty("human_verification"), record, articleURL: displayURL };
@@ -300,6 +374,11 @@
       let result, referencesRequested = false;
       const parseCNKI = (doc, url) => {
         const value = cnki.parsePage(doc, url, expected);
+        // An exact official DOI route can supply a missing DOI only after the
+        // landing page has a valid record/title and has passed identity checks.
+        if (resolution && value.record && value.metadata?.title && !["article_mismatch", "unsupported_url"].includes(value.status)) {
+          value.metadata.doi ||= expected.expectedDOI;
+        }
         if (cnkiReferences && !["article_mismatch", "unsupported_url"].includes(value.status)) value.references = cnkiReferences.parse(doc, url);
         if (value.status === "human_verification") rememberGate(address, "verification");
         return value;
@@ -600,7 +679,7 @@
       }
       async function trySource(candidate, depth = 0) {
         check();
-        if (cnki?.isCNKIURL(candidate.url)) return cnki.pageURL(candidate.url) ? tryCNKI(candidate.url) : null;
+        if (cnki?.isCNKIURL(candidate.url)) return cnkiRoute(candidate.url) ? tryCNKI(candidate.url) : null;
         if (triedDownloads.size >= 24 || triedDownloads.has("api:" + candidate.url)) return null;
         triedDownloads.add("api:" + candidate.url);
         progress("open_access", "正在下载并核对开放全文候选…", candidate.url);
@@ -624,7 +703,7 @@
           }
         } catch (error) {
           if (["AbortError", "AttachmentImportError"].includes(error.name)) throw error;
-          if (error.name === "CNKIRoute") return cnki.pageURL(error.url) ? tryCNKI(error.url) : null;
+          if (error.name === "CNKIRoute") return cnkiRoute(error.url) ? tryCNKI(error.url) : null;
           sourceDiagnostics.push({ source: candidate.source, code: /^[a-z_]{1,60}$/.test(error.code || "") ? error.code : "download_failed", message: "此来源未完成下载，已继续其他获取方式。" });
         }
         return null;
@@ -661,10 +740,11 @@
         if (cnkiResult) cnkiResult = { ...cnkiResult, status };
         sourceDiagnostics.push({ source: "cnki", code: status, message: status === "caj_only" ? "知网仅提供 CAJ，尚未取得可核验的 PDF。"
           : status === "purchase_required" ? "知网入口需要购买或订阅确认，请在浏览器中自行处理。"
+          : status === "access_check_required" ? "知网需要先核验下载权限，请在浏览器中完成后下载。"
           : status === "human_verification" ? "知网页面需要人工验证，已停止自动尝试。"
           : status === "article_mismatch" ? "知网页面的文献标识、DOI 或题名冲突，已拒绝该候选。"
           : "知网详情或 PDF 未完成获取，可检查浏览器权限或继续其他来源。" });
-        if (["login_required", "access_denied", "purchase_required", "human_verification", "rate_limited"].includes(status)) {
+        if (["login_required", "access_denied", "access_check_required", "purchase_required", "human_verification", "rate_limited"].includes(status)) {
           needsLogin = true; loginURL ||= stableURL || null;
           accessReason = status === "purchase_required" ? "purchase" : status === "access_denied" ? "institutional_access" : "login_possible";
           if (status === "human_verification") { challengeKind = "verification"; if (stableURL) rememberGate(stableURL, challengeKind); }
@@ -675,7 +755,7 @@
         if (!cnkiEnabled()) return null;
         checkCNKIItem();
         const target = address ? { getField: name => name === "url" ? address : item.getField(name), getExtraField: name => item.getExtraField?.(name) } : item;
-        const key = cnki.safeArticleURL(address) || initialCNKIRecord?.id || cnki.pageURL(target);
+        const key = cnki.safeArticleURL(address) || initialCNKIRecord?.id || cnki.pageURL(target) || cnki.resolverURL?.(address || initialItemURL)?.doi || expectedDOI;
         if (key && visitedPages.has("cnki:" + key)) return null;
         if (key) visitedPages.add("cnki:" + key);
         const inspected = await inspectCNKI(target, { isCancelled, onProgress });
@@ -708,7 +788,7 @@
             if (candidate.depth < 1 && nested.status === "pdf_available") candidates.push(...nested.candidates.map(value => ({ ...value, depth: 1 })));
             else noteCNKI(nested.status, inspected.articleURL);
           } else noteCNKI(response.code, inspected.articleURL);
-          if (["human_verification", "purchase_required", "login_required", "access_denied", "rate_limited", "unsafe_redirect"].includes(cnkiResult.status)) break;
+          if (["human_verification", "purchase_required", "access_check_required", "login_required", "access_denied", "rate_limited", "unsafe_redirect"].includes(cnkiResult.status)) break;
         }
         return null;
       }
@@ -716,7 +796,7 @@
         for (const candidate of candidates.slice(0, MAX_CANDIDATES)) {
           check();
           if (cnki?.isCNKIURL(candidate.url)) {
-            if (cnki.pageURL(candidate.url)) { const found = await tryCNKI(candidate.url); if (found) return found; }
+            if (cnkiRoute(candidate.url)) { const found = await tryCNKI(candidate.url); if (found) return found; }
             continue;
           }
           // JavaScript rendering can establish publisher cookies. A URL that
@@ -749,7 +829,7 @@
           }
           catch (error) {
             if (["AbortError", "AttachmentImportError"].includes(error.name)) throw error;
-            if (error.name === "CNKIRoute") { if (cnki.pageURL(error.url)) { const found = await tryCNKI(error.url); if (found) return found; } }
+            if (error.name === "CNKIRoute") { if (cnkiRoute(error.url)) { const found = await tryCNKI(error.url); if (found) return found; } }
             else caughtGate(error);
           }
         }
@@ -766,7 +846,7 @@
           if (!loaded) return null;
           let data = await cancellable(browser.getPageData(["documentHTML"], { timeout: 15000 }), () => browser.destroy());
           let pageURL = httpURL(browser.currentURI?.spec) || url;
-          if (cnki?.isCNKIURL(pageURL)) return cnki.pageURL(pageURL) ? tryCNKI(pageURL) : null;
+          if (cnki?.isCNKIURL(pageURL)) return cnkiRoute(pageURL) ? tryCNKI(pageURL) : null;
           let result = discover(parse(data.documentHTML, pageURL), pageURL, expectedDOI);
           noteGate(result, pageURL);
           rememberPublisherURL(pageURL, source);
@@ -789,7 +869,7 @@
       }
       async function visitPage(url, source = "publisher") {
         check();
-        if (cnki?.isCNKIURL(url)) return cnki.pageURL(url) ? tryCNKI(url) : null;
+        if (cnki?.isCNKIURL(url)) return cnkiRoute(url) ? tryCNKI(url) : null;
         if (visitedPages.has(url)) return null;
         if (cachedGate(url)) return null;
         visitedPages.add(url);
@@ -809,7 +889,14 @@
             const direct = await importPDF(result.bytes, result.url, source);
             if (direct) return direct;
             if (result.bytes.length <= MAX_PAGE_BYTES) {
-              const discovered = discover(parse(decode(result.bytes, result.type), result.url), result.url, expectedDOI);
+              const document = parse(decode(result.bytes, result.type), result.url);
+              const registered = expectedDOI && cnkiEnabled() && cnki.parseDOIResolver?.(document, result.url, expectedDOI);
+              if (registered?.links?.length) {
+                const found = await tryCNKI(registered.links[0]);
+                if (found) return found;
+                return null;
+              }
+              const discovered = discover(document, result.url, expectedDOI);
               noteGate(discovered, result.url);
               const found = await tryCandidates(discovered.candidates, source);
               if (found) return found;
@@ -821,14 +908,14 @@
         }
         catch (error) {
           if (["AbortError", "AttachmentImportError"].includes(error.name)) throw error;
-          if (error.name === "CNKIRoute") return cnki.pageURL(error.url) ? tryCNKI(error.url) : null;
+          if (error.name === "CNKIRoute") return cnkiRoute(error.url) ? tryCNKI(error.url) : null;
           caughtGate(error);
         }
         return renderedPage(renderURL, source === "open_access" ? source : "rendered_publisher");
       }
 
       check();
-      if (cnkiEnabled() && (initialCNKIRecord || cnki.pageURL(item))) {
+      if (cnkiEnabled() && (initialCNKIRecord || cnkiRoute(initialItemURL) || /\.cnki\./i.test(expectedDOI))) {
         const found = await tryCNKI();
         if (found) return found;
       }

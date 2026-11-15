@@ -3,7 +3,7 @@
 (function (root) {
   "use strict";
   const PREF = "extensions.fulltext-assistant.cnkiEnabled";
-  const HOSTS = ["cnki.net", "kns.cnki.net", "kns8.cnki.net", "kns8s.cnki.net", "oversea.cnki.net", "login.cnki.net", "passport.cnki.net", "fsso.cnki.net", "cnki.com.cn", "www.cnki.com.cn"];
+  const HOSTS = ["cnki.net", "kns.cnki.net", "kns8.cnki.net", "kns8s.cnki.net", "oversea.cnki.net", "ix.cnki.net", "x.cnki.net", "link.cnki.net", "link.oversea.cnki.net", "bar.cnki.net", "login.cnki.net", "passport.cnki.net", "fsso.cnki.net", "cnki.com.cn", "www.cnki.com.cn"];
   const clone = value => value == null ? value : JSON.parse(JSON.stringify(value));
   const clean = (value, limit = 2000) => typeof value === "string" ? value.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "").trim().slice(0, limit) : "";
   const titleKey = value => clean(value).normalize("NFKC").toLowerCase().replace(/[\p{P}\p{Z}\s]/gu, "");
@@ -22,13 +22,15 @@
     function metadata(value) {
       if (!value || typeof value !== "object") return null;
       const result = {};
-      for (const field of ["title", "doi", "abstract", "journal", "date", "volume", "issue", "pages", "issn", "isbn", "itemType"]) result[field] = clean(value[field], field === "abstract" ? 20000 : 2000);
+      for (const field of ["title", "doi", "abstract", "journal", "university", "date", "volume", "issue", "pages", "issn", "isbn", "itemType"]) result[field] = clean(value[field], field === "abstract" ? 20000 : 2000);
       result.authors = (Array.isArray(value.authors) ? value.authors : []).map(value => clean(value, 300)).filter(Boolean).slice(0, 100);
       result.keywords = (Array.isArray(value.keywords) ? value.keywords : []).map(value => clean(value, 200)).filter(Boolean).slice(0, 40);
       result.doi = normalizeDOI(result.doi);
       return result;
     }
     function normalizeDOI(value) { const text = clean(value).replace(/^https?:\/\/(?:dx\.)?doi\.org\//i, "").replace(/^doi\s*:\s*/i, ""); return /^10\.\d{4,9}\/[^\s<>]+$/i.test(text) ? text.toLowerCase() : ""; }
+    const normalizeInput = value => clone(cnki.normalizeInput(value));
+    const hasArticleInput = item => !!(cnki.fromItem(item) || cnki.pageURL(item) || cnki.resolverURL(item?.getField?.("url")) || normalizeInput(item?.getField?.("DOI") || item?.getExtraField?.("DOI"))?.kind === "doi");
     function safeReferenceURL(value) {
       const page = cnki.pageURL(value); if (!page) return "";
       const url = new URL(page);
@@ -36,21 +38,22 @@
     }
     function resultPatch(result) {
       const record = cnki.normalizeRecord(result?.record), data = metadata(result?.metadata);
-      const usable = !!record && !!data?.title && ["pdf_available", "metadata_only", "caj_only", "purchase_required", "access_denied", "login_required", "human_verification"].includes(result?.status);
-      const statusMap = { pdf_available: "metadata_ready", metadata_only: "metadata_ready", login_required: "login_required", human_verification: "human_verification", purchase_required: "purchase_required", access_denied: "access_denied", caj_only: "caj_only", article_mismatch: "error", metadata_unavailable: "not_found", record_unavailable: "not_found", unsupported_url: "error", needs_url: "no_sample", disabled: "idle" };
+      const usable = !!record && !!data?.title && ["pdf_available", "metadata_only", "caj_only", "purchase_required", "access_check_required", "access_denied", "login_required", "human_verification"].includes(result?.status);
+      const statusMap = { pdf_available: "metadata_ready", metadata_only: "metadata_ready", login_required: "login_required", human_verification: "human_verification", purchase_required: "purchase_required", access_check_required: "access_check_required", access_denied: "access_denied", caj_only: "caj_only", article_mismatch: "error", metadata_unavailable: "not_found", record_unavailable: "not_found", unsupported_url: "error", needs_url: "no_sample", disabled: "idle" };
       const messages = {
         pdf_available: "已解析文献元数据并发现 PDF 入口；实际下载和论文身份仍需核对。",
         metadata_only: "已解析文献元数据；此页面尚未提供可确认的 PDF 入口。",
         login_required: "知网需要网页登录；保存会话不代表具有此文献的下载权限。",
         human_verification: "知网要求人工验证，请在网页登录窗口完成后重试。",
         purchase_required: "页面要求购买或授权；插件不会自动下单。",
+        access_check_required: "知网需要先核验下载权限，请在浏览器中完成后下载。",
         access_denied: "当前会话没有此文献的下载权限。",
         caj_only: "此页面仅发现 CAJ 入口；本插件只自动导入经核对的 PDF。",
         article_mismatch: "页面文献与原条目的知网编号、DOI 或标题不一致，未导入。",
         metadata_unavailable: "此页面未提供足够的文献元数据，请核对详情页链接。",
         record_unavailable: "未能确认知网文献编号，请使用具体文献的详情页。",
-        unsupported_url: "请输入知网文献详情页链接。",
-        needs_url: "请先选择带知网详情页的条目，或粘贴知网详情页链接。",
+        unsupported_url: "请输入有效 DOI、知网官方文章链接或完整标题。",
+        needs_url: "请先选择带 DOI 或知网文章链接的条目，或输入 DOI、知网官方文章链接或完整标题。",
         disabled: "知网解析已关闭。",
       };
       return { state: statusMap[result?.status] || "error", message: messages[result?.status] || "知网页面暂时无法解析，请稍后重试。", record, metadata: data, canImport: usable, lastCheckedAt: new Date().toISOString() };
@@ -75,6 +78,33 @@
       })();
       running = operation;
       try { await operation; } finally { if (running === operation) running = null; if (!stopped) emit(); }
+      return getSnapshot();
+    }
+    async function searchTitle(title) {
+      active(); if (!state.enabled) throw new Error("请先开启知网解析。");
+      if (running || mutationRun) throw new Error("知网操作正在进行，请稍候。");
+      const ticket = ++epoch;
+      previewURL = null;
+      notify({ checking: true, state: "search_required", message: "正在打开知网标题搜索…", canImport: false, record: null, metadata: null, lastCheckedAt: null, references: emptyReferences() });
+      const operation = Promise.resolve().then(async () => {
+        let copied = false;
+        try {
+          if (typeof Zotero.Utilities?.Internal?.copyTextToClipboard === "function") { await Zotero.Utilities.Internal.copyTextToClipboard(title); copied = true; }
+        } catch (_) {}
+        if (stopped || ticket !== epoch) throw abort();
+        await Zotero.launchURL(cnki.searchURL(title));
+        if (stopped || ticket !== epoch) throw abort();
+        notify({ state: "search_required", message: copied
+          ? "标题已复制，已打开知网官网。请粘贴搜索并选择正确文章，再将详情链接填回此处；尚未解析或导入文献。"
+          : "已打开知网官网。请搜索此标题并选择正确文章，再将详情链接填回此处；尚未解析或导入文献。" });
+        return getSnapshot();
+      });
+      running = operation;
+      try { await operation; }
+      catch (error) {
+        if (error.name !== "AbortError" && !stopped && ticket === epoch) notify({ state: "error", message: "知网搜索页面未能打开，请稍后重试。" });
+        throw error.name === "AbortError" ? error : new Error("知网搜索页面未能打开，请稍后重试。");
+      } finally { if (running === operation) running = null; if (!stopped && ticket === epoch) notify({ checking: false }); }
       return getSnapshot();
     }
     function libraryContext() {
@@ -109,11 +139,12 @@
     }
     function fieldValues(data, record) {
       return { title: data.title, DOI: data.doi, abstractNote: data.abstract, publicationTitle: data.journal, date: data.date,
-        volume: data.volume, issue: data.issue, pages: data.pages, ISSN: data.issn, ISBN: data.isbn, url: record?.url || data.url || "", libraryCatalog: "中国知网 (CNKI)" };
+        university: data.itemType === "thesis" ? data.university : "", volume: data.volume, issue: data.issue, pages: data.pages, ISSN: data.issn, ISBN: data.isbn, url: record?.url || data.url || "", libraryCatalog: "中国知网 (CNKI)" };
     }
     function fill(item, data, record) {
       let changed = false; const extraLines = [];
       for (const [field, value] of Object.entries(fieldValues(data, record))) {
+        if (field === "university" && item.itemType !== "thesis") continue;
         if (!value || item.getField(field)) continue;
         const fieldID = Zotero.ItemFields?.getID?.(field);
         if (fieldID && Zotero.ItemFields?.isValidForType && !Zotero.ItemFields.isValidForType(fieldID, item.itemTypeID)) { if (field === "DOI") extraLines.push("DOI: " + value); continue; }
@@ -143,7 +174,7 @@
       return operation.finally(() => { if (mutationRun === operation) mutationRun = null; if (!stopped) emit(); });
     }
     return {
-      getSnapshot,
+      getSnapshot, normalizeInput,
       saveSettings({ enabled }) { active(); if (typeof enabled !== "boolean") throw new Error("知网设置无效。"); if (running || mutationRun) throw new Error("请等待知网操作完成后再修改设置。"); Services.prefs.setBoolPref(PREF, enabled); notify({ enabled, canImport: enabled && state.canImport }); return getSnapshot(); },
       async openLogin() {
         active(); if (running || mutationRun) throw new Error("知网操作正在进行，请稍候。");
@@ -157,12 +188,16 @@
         try { await operation; } finally { if (running === operation) running = null; if (!stopped) emit(); }
         return getSnapshot();
       },
-      inspectURL(url) { if (!cnki.pageURL(url)) throw new Error("请输入知网文献详情页链接。"); return inspect(url); },
+      inspectURL(value) {
+        const input = normalizeInput(value);
+        if (!input) throw new Error("请输入有效 DOI、知网官方文章链接或完整标题。");
+        return input.kind === "title" ? searchTitle(input.title) : inspect(input.url || input.value);
+      },
       async verify() {
-        active(); const ticket = epoch, candidates = selected(); let sample = candidates.find(item => cnki.fromItem(item) || cnki.pageURL(item));
-        if (!sample) sample = (await search("url", "contains", "cnki.")).find(item => cnki.fromItem(item) || cnki.pageURL(item));
+        active(); const ticket = epoch, candidates = selected(); let sample = candidates.find(hasArticleInput);
+        if (!sample) sample = (await search("url", "contains", "cnki.")).find(hasArticleInput);
         active(); if (ticket !== epoch) throw abort();
-        if (!sample) { notify({ state: "no_sample", message: "请先选择带知网详情页的条目，或粘贴知网详情页链接。", canImport: false, record: null, metadata: null }); return getSnapshot(); }
+        if (!sample) { notify({ state: "no_sample", message: "请先选择带 DOI 或知网文章链接的条目，或输入 DOI、知网官方文章链接或完整标题。", canImport: false, record: null, metadata: null }); return getSnapshot(); }
         return inspect(sample);
       },
       importPreview() {
@@ -186,7 +221,7 @@
           const summary = { selected: ids.length, updated: 0, unchanged: 0, skipped: 0, failed: 0, message: "" };
           try { for (const id of ids) {
             check(); const item = await Zotero.Items.getAsync(id); check();
-            if (!item || item.deleted || !(cnki.fromItem(item) || cnki.pageURL(item)) || !Zotero.Libraries.get(item.libraryID)?.editable || isProtected(item)) { summary.skipped++; continue; }
+            if (!item || item.deleted || !hasArticleInput(item) || !Zotero.Libraries.get(item.libraryID)?.editable || isProtected(item)) { summary.skipped++; continue; }
             const original = fingerprint(item), originalRecord = cnki.fromItem(item);
             try {
               const result = await publisher.inspectCNKI(item, { isCancelled: () => { try { check(); return false; } catch (_) { return true; } } });

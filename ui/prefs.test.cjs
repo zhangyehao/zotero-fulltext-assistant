@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const vm = require("node:vm");
 const path = require("node:path");
 const { parseHTML } = require("linkedom");
+const cnkiParser = require("../src/cnki.js");
 const source = fs.readFileSync(path.join(__dirname, "preferences.xhtml"), "utf8");
 const script = fs.readFileSync(path.join(__dirname, "prefs.js"), "utf8");
 const i18nContext = {};
@@ -1734,16 +1735,21 @@ async function siteControls(mode = "request") {
       cnki: { enabled: true, sessionRemembered: false, checking: false, state: "idle", canImport: false, canEnrich: true, record: null, metadata: null } };
     let emit, rejectSave = false, resolveInspect;
     const record = { id: "CJFD:SYNTHETIC202601001", dbcode: "CJFD", dbname: "CJFDLAST2026", filename: "SYNTHETIC202601001", url: "https://kns.cnki.net/kcms2/article/abstract?v=synthetic" };
-    const metadata = { title: "<img src=x onerror=bad> 中文文献标题", doi: "", authors: ["张三", "<b>李四</b>"], journal: "测试期刊", date: "2026-01-01", abstract: "<script>unsafe()</script>原始摘要" };
+    const metadata = { title: "<img src=x onerror=bad> 中文文献标题", doi: "", authors: ["张三", "<b>李四</b>"], journal: "测试期刊", university: "测试大学 <em>原样保留</em>", date: "2026-01-01", abstract: "<script>unsafe()</script>原始摘要" };
     const api = {
       getSnapshot: () => structuredClone(state), subscribe: fn => { emit = fn;return () => {}; }, localize: target => i18n.apply(target, state.settings.language),
       copyText: async value => actions.push(["copy", value]),
+      normalizeCNKIInput: value => cnkiParser.normalizeInput(value),
       saveCNKISettings: async value => { actions.push(["cnkiSettings", { ...value }]);if (rejectSave) throw new Error("知网操作未完成，请重试。");Object.assign(state.cnki, value);emit();return structuredClone(state.cnki); },
       openCNKILogin: async () => { actions.push(["cnkiLogin"]); },
       resetCNKISession: async () => { actions.push(["cnkiReset"]);state.cnki.sessionRemembered = false;emit(); },
       verifyCNKI: async () => { actions.push(["cnkiVerify"]);Object.assign(state.cnki, { state: "no_sample", message: "没有可验证的知网样本", record: null, metadata: null, canImport: false });emit();return structuredClone(state.cnki); },
       inspectCNKIURL: async url => {
         actions.push(["cnkiInspect", url]);state.cnki.checking = true;emit();
+        if (cnkiParser.normalizeInput(url)?.kind === "title") {
+          Object.assign(state.cnki, { state: "search_required", checking: false, record: null, metadata: null, canImport: false, references: { state: "idle", items: [], total: null }, message: "标题已复制，已打开知网官网。请粘贴搜索并选择正确文章，再将详情链接填回此处；尚未解析或导入文献。" });
+          emit();return structuredClone(state.cnki);
+        }
         await new Promise(resolve => { resolveInspect = resolve; });
         Object.assign(state.cnki, { state: "human_verification", checking: false, message: "需要网站验证", record, metadata, canImport: true, lastCheckedAt: "2026-11-15T08:30:00Z" });emit();return structuredClone(state.cnki);
       },
@@ -1777,6 +1783,21 @@ async function siteControls(mode = "request") {
     assert.equal(node("fta-pref-cnki-action-status").dataset.error, "true");rejectSave = false;
     assert.equal(node("fta-pref-cnki-verify").disabled, true, "source-dependent actions are unavailable while CNKI is disabled");
     node("fta-pref-cnki-enabled").checked = true;node("fta-pref-cnki-enabled").dispatchEvent(new pane.window.Event("change"));await flush();
+    assert.equal(node("fta-pref-cnki-url").getAttribute("type"), "text", "DOI and title inputs are not rejected by native URL validation");
+    const beforeInvalid = actions.length;
+    type("https://unrelated.example/article");assert.equal(node("fta-pref-cnki-inspect").disabled, true);assert.equal(node("fta-pref-cnki-input-error").hidden, false);submitURL();assert.equal(actions.length, beforeInvalid);
+    const title = "复杂中文题名的生物学机制与分子研究";
+    type(title);assert.equal(node("fta-pref-cnki-inspect").textContent, "搜索标题");assert.equal(node("fta-pref-cnki-inspect").disabled, false);
+    state.settings.language = "zh-TW";emit();assert.equal(node("fta-pref-cnki-inspect").textContent, "搜尋標題");
+    state.settings.language = "en";emit();assert.equal(node("fta-pref-cnki-inspect").textContent, "Search title");assert.match(node("fta-pref-cnki-url").placeholder, /DOI.*official CNKI.*full title/);assert.equal(node("fta-pref-cnki-url").value, title);
+    submitURL();await flush();assert.deepEqual(actions.at(-1), ["cnkiInspect", title]);assert.equal(node("fta-pref-cnki-state").textContent, "Select the article on the official website");
+    assert.match(node("fta-pref-cnki-action-status").textContent, /No article has been parsed or imported yet/);assert.equal(node("fta-pref-cnki-preview").hidden, true);assert.equal(node("fta-pref-cnki-import").disabled, true);
+    assert.equal(actions.some(action => action[0] === "cnkiImport"), false);
+    type("10.1234/cnki.fixture");assert.equal(node("fta-pref-cnki-inspect").textContent, "Parse article");submitURL();await flush();
+    type("10.1234/new-draft");resolveInspect();await flush();
+    assert.equal(node("fta-pref-cnki-url").value, "10.1234/new-draft");assert.equal(node("fta-pref-cnki-import").disabled, true, "a late preview cannot authorize importing after the draft changes");
+    assert.equal(node("fta-pref-cnki-preview-stale").hidden, false);assert.match(node("fta-pref-cnki-action-status").textContent, /input has changed/);
+    state.settings.language = "zh-CN";emit();
     const url = "https://kns.cnki.net/kcms2/article/abstract?dbcode=CJFD&filename=SYNTHETIC202601001";
     type(url);submitURL();await flush();
     assert.deepEqual(actions.at(-1), ["cnkiInspect", url]);
@@ -1787,16 +1808,18 @@ async function siteControls(mode = "request") {
     assert.equal(node("fta-pref-cnki-state").textContent, "需要网站验证");
     assert.equal(node("fta-pref-cnki-import").disabled, false, "readable metadata can be imported while PDF access requires website verification");
     assert.equal(actions.some(action => action[0] === "cnkiImport"), false, "parsing does not create an item");
-    assert.equal(node("fta-pref-cnki-metadata").querySelector("img,script,b"), null);
+    assert.equal(node("fta-pref-cnki-metadata").querySelector("img,script,b,em"), null);
     assert.match(node("fta-pref-cnki-metadata").textContent, /<img src=x onerror=bad>/);
     assert.match(node("fta-pref-cnki-metadata").textContent, /<b>李四<\/b>/);
+    assert.match(node("fta-pref-cnki-metadata").textContent, /授予单位.*测试大学 <em>原样保留<\/em>/);
+    state.cnki.state = "access_check_required";emit();assert.equal(node("fta-pref-cnki-state").textContent, "需核验下载权限");assert.doesNotMatch(node("fta-pref-cnki-state").textContent, /购买/);state.cnki.state = "human_verification";emit();
     const previewID = [...node("fta-pref-cnki-metadata").querySelectorAll("button")].find(button => button.getAttribute("aria-label") === "复制知网标识");
     previewID.click();await flush();assert.deepEqual(actions.at(-1), ["copy", record.id]);
     type(url + "&draft=retained");state.settings.language = "en";emit();node("fta-pref-tab-messages").click();node("fta-pref-tab-settings").click();
     assert.equal(node("fta-pref-cnki-url").value, url + "&draft=retained");
     assert.equal(node("fta-pref-cnki-import").disabled, true, "an edited URL cannot silently import the previous preview");
     assert.equal(node("fta-pref-cnki-preview-stale").hidden, false);
-    assert.match(node("fta-pref-cnki-preview-stale").textContent, /link has changed/);
+    assert.match(node("fta-pref-cnki-preview-stale").textContent, /input has changed/);
     assert.equal(node("fta-pref-cnki-heading").textContent, "CNKI");
     assert.match(node("fta-pref-cnki-session").textContent, /Saving the CNKI session is enabled.*needs verification/);
     assert.match(node("fta-pref-cnki-metadata").textContent, /中文文献标题/, "source metadata stays raw when the UI language changes");

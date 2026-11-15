@@ -8,7 +8,7 @@ const record = CNKI.normalizeRecord(URL_A);
 const data = { title:'研究不同环境条件下中文文献识别的实验方法',doi:'10.1234/cnki.fixture',authors:['王明','张林'],journal:'测试学报',date:'2024',abstract:'测试摘要',itemType:'journalArticle',keywords:[] };
 const deferred = () => { let resolve; const promise = new Promise(done => resolve = done); return { promise, resolve }; };
 function env(options={}) {
-  const prefs=new Map(),items=new Map(),calls=[],opens=[],hosts=[],selected=[];let nextID=1,saveCount=0;
+  const prefs=new Map(),items=new Map(),calls=[],opens=[],launches=[],copied=[],hosts=[],selected=[];let nextID=1,saveCount=0;
   const libraries=new Map([[1,{editable:true}],[2,{editable:false}]]);let selectedLibrary=1;
   class Item {
     constructor(type='journalArticle'){this.itemType=type;this.itemTypeID=1;this.fields={};this.creators=[];this.libraryID=1;this.key='K'+nextID;this.deleted=false;}
@@ -18,11 +18,13 @@ function env(options={}) {
     async saveTx(){await options.save?.(this);if(!this.id)this.id=nextID++;items.set(this.id,this);saveCount++;}
   }
   const Zotero={Item,Libraries:{userLibraryID:1,get:id=>libraries.get(id)},Items:{getAsync:async id=>items.get(id)},getActiveZoteroPane:()=>({getSelectedItems:()=>selected,getSelectedLibraryID:()=>selectedLibrary,getSelectedCollection:()=>({id:5,libraryID:1})})};
+  Zotero.launchURL=async url=>{await options.launch?.(url);launches.push(url);};
+  Zotero.Utilities={Internal:{copyTextToClipboard:async text=>{await options.copy?.(text);copied.push(text);}}};
   Zotero.Search=class{addCondition(field,operator,value){this.field=field;this.operator=operator;this.value=value;}async search(){return [...items.values()].filter(item=>(!this.libraryID||item.libraryID===this.libraryID)&&(this.operator==='is'?item.getField(this.field).toLowerCase()===this.value.toLowerCase():item.getField(this.field).toLowerCase().includes(this.value.toLowerCase()))).map(item=>item.id);}};
   const publisher={async inspectCNKI(input,opts){calls.push({input,opts});return options.inspect?options.inspect(input,opts):{status:'pdf_available',record,metadata:data};}};
   const publisherSession={getStatus:()=>({hosts:[...hosts]}),async grantHosts(values){await options.grant?.();hosts.push(...values);},async forgetHosts(values,settings){calls.push({reset:values,settings});hosts.length=0;}};
   const api=create({Zotero,Services:{prefs:{getBoolPref:(key,fallback)=>prefs.get(key)??fallback,setBoolPref:(key,value)=>prefs.set(key,value)}},cnki:CNKI,publisher,publisherSession,publisherWindow:{open:value=>opens.push(value),closePurpose:value=>calls.push({close:value})},isProtected:options.isProtected,beforeReset:options.beforeReset});
-  return {api,prefs,items,calls,opens,hosts,selected,libraries,Zotero,selectLibrary:id=>selectedLibrary=id,get saveCount(){return saveCount;},async add(fields={},libraryID=1){const item=new Item();item.fields={...fields};item.libraryID=libraryID;await item.saveTx();return item;}};
+  return {api,prefs,items,calls,opens,launches,copied,hosts,selected,libraries,Zotero,selectLibrary:id=>selectedLibrary=id,get saveCount(){return saveCount;},async add(fields={},libraryID=1){const item=new Item();item.fields={...fields};item.libraryID=libraryID;await item.saveTx();return item;}};
 }
 test('preview is read-only, safe and distinct from authenticated PDF access',async()=>{
   const e=env();const snapshot=await e.api.inspectURL(URL_A+'&v=private');assert.equal(snapshot.state,'metadata_ready');assert.equal(snapshot.canImport,true);assert.equal(snapshot.checking,false);assert.equal(snapshot.sessionRemembered,false);assert.equal(e.saveCount,0);assert.equal(snapshot.record.url.includes('private'),false);
@@ -70,7 +72,79 @@ test('shutdown waits for a committed metadata save and prevents new operations',
   const gate=deferred(),e=env({save:async()=>gate.promise});await e.api.inspectURL(URL_A);const operation=e.api.importPreview();await new Promise(done=>setImmediate(done));let done=false;const stopping=e.api.destroy().then(()=>done=true);assert.equal(done,false);gate.resolve();assert.equal((await operation).imported,true);await stopping;assert.equal(e.saveCount,1);await assert.rejects(e.api.inspectURL(URL_A),{name:'AbortError'});
 });
 test('disabled CNKI and non-article URLs make no network calls',async()=>{
-  const e=env();assert.throws(()=>e.api.inspectURL('https://example.com/'),/详情页/);e.api.saveSettings({enabled:false});await assert.rejects(e.api.inspectURL(URL_A),/开启/);assert.equal(e.calls.length,0);await e.api.destroy();
+  const e=env();assert.throws(()=>e.api.inspectURL('https://example.com/'),/有效 DOI/);e.api.saveSettings({enabled:false});await assert.rejects(e.api.inspectURL(URL_A),/开启/);assert.equal(e.calls.length,0);await e.api.destroy();
+});
+
+test('unified input sends normalized DOI or official article URL to the same preview API',async()=>{
+  const e=env();
+  for(const value of [' DOI: 10.1234/CNKI.Fixture ','https://doi.org/10.1234/CNKI.Fixture','https://link.cnki.net/doi/10.1234/CNKI.Fixture','https://link.oversea.cnki.net/doi/10.1234/CNKI.Fixture','https://www.chndoi.org/Resolution/Handler?doi=10.1234%2FCNKI.Fixture']){
+    assert.equal(e.api.normalizeInput(value).kind,'doi');const result=await e.api.inspectURL(value);
+    assert.equal(e.calls.at(-1).input,CNKI.normalizeInput(value).url);assert.equal(result.canImport,true);assert.equal(e.saveCount,0);
+  }
+  await e.api.inspectURL(URL_A);assert.equal(e.calls.at(-1).input,URL_A);assert.equal(e.launches.length,0);
+  await e.api.fetchReferences();assert.equal(e.calls.at(-1).opts.includeReferences,true);assert.equal(e.calls.at(-1).input,URL_A);
+  await e.api.destroy();
+});
+
+test('title search clears stale preview and requires the user to select a website result',async()=>{
+  const title='复杂中文题名的生物学机制与分子研究';
+  const e=env();await e.api.inspectURL(URL_A);assert.equal(e.api.getSnapshot().canImport,true);
+  const before=e.calls.length,snapshot=await e.api.inspectURL(title);
+  assert.equal(snapshot.state,'search_required');assert.equal(snapshot.checking,false);assert.equal(snapshot.canImport,false);
+  assert.equal(snapshot.record,null);assert.equal(snapshot.metadata,null);assert.equal(snapshot.lastCheckedAt,null);assert.equal(snapshot.references.items.length,0);
+  assert.match(snapshot.message,/标题已复制/);assert.match(snapshot.message,/尚未解析或导入/);
+  assert.deepEqual(e.copied,[title]);assert.deepEqual(e.launches,[CNKI.searchURL(title)]);assert.equal(e.calls.length,before);assert.equal(e.saveCount,0);
+  assert.throws(()=>e.api.importPreview(),/先解析/);await assert.rejects(e.api.fetchReferences(),/先解析/);
+  await e.api.destroy();
+});
+
+test('title handoff reports clipboard and launch failures accurately without restoring old metadata',async()=>{
+  const title='复杂中文题名的生物学机制与分子研究',e=env({copy:async()=>{throw new Error('clipboard unavailable');}});
+  const snapshot=await e.api.inspectURL(title);assert.equal(snapshot.state,'search_required');assert.doesNotMatch(snapshot.message,/已复制/);assert.equal(e.launches.length,1);await e.api.destroy();
+  const failed=env({launch:async()=>{throw new Error('browser unavailable');}});await failed.api.inspectURL(URL_A);
+  await assert.rejects(failed.api.inspectURL(title),/搜索页面未能打开/);assert.equal(failed.api.getSnapshot().state,'error');assert.equal(failed.api.getSnapshot().canImport,false);assert.equal(failed.api.getSnapshot().record,null);await failed.api.destroy();
+});
+
+test('reset cancels a pending title handoff before opening the website',async()=>{
+  const gate=deferred(),e=env({copy:async()=>gate.promise});
+  const pending=e.api.inspectURL('复杂中文题名的生物学机制与分子研究');await new Promise(done=>setImmediate(done));
+  assert.equal(e.api.getSnapshot().checking,true);const reset=e.api.resetSession();gate.resolve();
+  await assert.rejects(pending,{name:'AbortError'});await reset;assert.equal(e.launches.length,0);assert.equal(e.api.getSnapshot().state,'idle');assert.equal(e.saveCount,0);await e.api.destroy();
+});
+
+test('selected DOI-only items can be verified and enriched without a preexisting CNKI URL',async()=>{
+  const e=env(),item=await e.add({DOI:data.doi,title:data.title});e.selected.push(item);
+  assert.equal((await e.api.verify()).state,'metadata_ready');assert.equal(e.calls.at(-1).input,item);
+  assert.equal((await e.api.enrichSelected()).updated,1);assert.equal(item.getField('url'),URL_A);assert.match(item.getField('extra'),/CNKI:/);assert.equal(e.launches.length,0);await e.api.destroy();
+});
+
+test('selected official resolver URL-only items are eligible without a separate DOI field',async()=>{
+  for(const url of ['https://doi.org/10.1234/cnki.fixture','https://link.cnki.net/doi/10.1234/cnki.fixture','https://link.oversea.cnki.net/doi/10.1234/cnki.fixture','https://www.chndoi.org/Resolution/Handler?doi=10.1234%2Fcnki.fixture']){
+    const e=env(),item=await e.add({url,title:data.title});e.selected.push(item);
+    assert.equal((await e.api.verify()).state,'metadata_ready');assert.equal(e.calls.at(-1).input,item);
+    assert.equal((await e.api.enrichSelected()).updated,1);assert.equal(item.getField('DOI'),data.doi);assert.equal(item.getField('url'),url);assert.match(item.getField('extra'),/CNKI:/);await e.api.destroy();
+  }
+});
+
+test('thesis university is preserved in preview and fills only empty thesis fields',async()=>{
+  const e=env({inspect:async()=>({status:'metadata_only',record,metadata:{...data,itemType:'thesis',university:'测试大学'}})});
+  const preview=await e.api.inspectURL(URL_A);assert.equal(preview.metadata.university,'测试大学');
+  const imported=await e.api.importPreview(),item=e.items.get(imported.itemID);assert.equal(item.itemType,'thesis');assert.equal(item.getField('university'),'测试大学');
+  item.setField('university','用户已保存的学校');assert.equal((await e.api.enrichSelected([item])).updated,0);assert.equal(item.getField('university'),'用户已保存的学校');
+  item.setField('university','');assert.equal((await e.api.enrichSelected([item])).updated,1);assert.equal(item.getField('university'),'测试大学');
+  const journal=await e.add({url:URL_A,title:data.title});await e.api.enrichSelected([journal]);assert.equal(journal.getField('university'),'');await e.api.destroy();
+});
+
+test('download access checks do not imply a required purchase or successful PDF download',async()=>{
+  const e=env({inspect:async()=>({status:'access_check_required',record,metadata:data})});const s=await e.api.inspectURL(URL_A);
+  assert.equal(s.state,'access_check_required');assert.equal(s.canImport,true);assert.match(s.message,/核验下载权限/);assert.doesNotMatch(s.message,/购买|已下载|已获取/);assert.equal(e.saveCount,0);await e.api.destroy();
+});
+
+test('CNKI login grants exact reader resolver and access hosts while retaining scoped reset',async()=>{
+  const e=env();await e.api.openLogin();
+  for(const host of ['ix.cnki.net','x.cnki.net','link.cnki.net','link.oversea.cnki.net','bar.cnki.net'])assert(e.hosts.includes(host),host);
+  assert.equal(e.hosts.some(host=>host.includes('*')||host.includes('chndoi.org')||host.includes('doi.org')),false);
+  await e.api.resetSession();assert.deepEqual(e.calls.find(call=>call.reset).reset,['cnki.net','cnki.com.cn']);await e.api.destroy();
 });
 test('references are fetched explicitly, remain partial and import only selected reliable titles',async()=>{
   const references={status:'partial',totalCount:50,partial:true,complete:false,references:[{id:'r1',title:'可确认的参考文献标题',authors:['李明'],year:'2021',doi:'10.2345/reference',canImport:true,raw:'李明. 可确认的参考文献标题.'},{id:'r2',raw:'没有可靠题名的整条引文',canImport:false,title:''}]};

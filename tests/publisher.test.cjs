@@ -49,6 +49,76 @@ const cnkiMarkup=(body='')=>html('<h1>'+cnkiTitle+'</h1>'+body);
 const cnkiAnchor='<a name="pdfDown" href="'+cnkiPDF+'">PDF下载</a>';
 const cnkiSetup=options=>setup({url:cnkiURL,title:cnkiTitle,cnki:CNKI,...options});
 
+const thesisDOI='10.1234/d.cnki.example.2026.000001';
+const thesisDOIURL='https://doi.org/'+thesisDOI;
+const thesisRegistry='https://www.chndoi.org/Resolution/Handler?doi='+thesisDOI;
+const thesisLink='https://link.cnki.net/doi/'+thesisDOI;
+const thesisOpaque='https://kns.cnki.net/kcms2/article/abstract?v=private-test-route';
+const thesisStable='https://kns.cnki.net/KCMS/detail/detail.aspx?dbcode=CDFD&filename=SYNTHETIC2026.NH';
+function registryHTML({paperDOI=thesisDOI,title=cnkiTitle,links=[thesisLink]}={}) {
+ return html('<div class="feedbackresult"><div class="fbHd">多重解析地址选择页面</div><div class="fbBd"><table><tr><td><label>题名：</label>'+title+'</td></tr><tr><td><label>作者：</label>合成作者</td></tr><tr><td><label>DOI码：</label>'+paperDOI+'</td></tr><tr><td><ul>'+links.map(url=>'<li><a href="'+url+'">'+url+'</a></li>').join('')+'</ul></td></tr></table></div></div>');
+}
+function thesisPages(body=cnkiAnchor) {
+ return {
+  [thesisDOIURL]:{status:302,headers:{Location:thesisRegistry}},
+  [thesisRegistry]:registryHTML(),
+  [thesisLink]:{status:302,headers:{Location:thesisOpaque}},
+  [thesisOpaque]:cnkiMarkup('<input id="param-filename" value="SYNTHETIC2026.nh"><input id="paramdbcode" value="CDFD">'+body),
+ };
+}
+test('a bare CNKI DOI resolves the official multiple-choice page without importing or requesting its PDF',async()=>{
+ const env=setup({cnki:CNKI,pages:thesisPages()});
+ const result=await env.publisher.inspectCNKI(thesisDOI,{render:false});
+ assert.equal(result.status,'pdf_available');assert.equal(result.record.id,'CNKI:CDFD:SYNTHETIC2026.NH');
+ assert.equal(result.metadata.itemType,'thesis');assert.equal(result.metadata.doi,thesisDOI);assert.equal(result.articleURL,thesisStable);
+ assert.deepEqual(env.requests.map(row=>row.url),[thesisDOIURL,thesisRegistry,thesisLink,thesisOpaque]);
+ assert(env.requests.slice(0,3).every(row=>row.options.anon===true));assert.notEqual(env.requests[3].options.anon,true);
+ const {candidates,...publicMetadata}=result;
+ assert.equal(env.imports.length,0);assert.equal(JSON.stringify(publicMetadata).includes('private-test-route'),false);
+});
+test('DOI-only batch acquisition uses CNKI identity and verifies actual PDF before import',async()=>{
+ const env=setup({url:'',doi:thesisDOI,title:cnkiTitle,cnki:CNKI,pages:{...thesisPages(),[cnkiPDF]:{bytes:pdf(),type:'application/pdf'}},pdfIdentity:{async inspect(_file,target){assert.equal(target.doi,thesisDOI);return {status:'match'};}}});
+ const result=await env.publisher.acquire(env.item);
+ assert.equal(result.source,'cnki');assert.equal(result.cnkiRecord.id,'CNKI:CDFD:SYNTHETIC2026.NH');assert.equal(result.sourceURL,thesisStable);assert.equal(env.imports.length,1);
+});
+test('official DOI routing rejects a conflicting registered title before fetching a CNKI article',async()=>{
+ const env=setup({url:'',doi:thesisDOI,title:'完全不同的目标论文题名',cnki:CNKI,pages:thesisPages()});
+ const result=await env.publisher.inspectCNKI(env.item,{render:false});
+ assert.equal(result.status,'article_mismatch');assert(!env.requests.some(row=>row.url===thesisOpaque));assert.equal(env.imports.length,0);
+});
+test('a resolver cannot change DOI or redirect to an arbitrary website',async()=>{
+ for(const destination of ['https://link.cnki.net/doi/10.1234/other','https://external.test/metadata','https://pay.cnki.net/order']){
+  const env=setup({cnki:CNKI,pages:{[thesisDOIURL]:{status:302,headers:{Location:destination}}}});
+  const result=await env.publisher.inspectCNKI(thesisDOI,{render:false});
+  assert(['article_mismatch','unsupported_url'].includes(result.status));assert.equal(env.requests.length,1);assert.equal(env.imports.length,0);
+ }
+});
+test('a mismatching DOI registration page does not supply a title or guessed downstream route',async()=>{
+ const env=setup({cnki:CNKI,pages:{...thesisPages(),[thesisRegistry]:registryHTML({paperDOI:'10.1234/other'})}});
+ const result=await env.publisher.inspectCNKI(thesisDOI,{render:false});
+ assert.equal(result.status,'metadata_unavailable');assert.equal(result.record,null);assert.equal(env.requests.length,2);
+});
+test('an exact DOI registration cannot overwrite a conflicting landing-page DOI',async()=>{
+ const env=setup({cnki:CNKI,pages:{...thesisPages(),[thesisOpaque]:cnkiMarkup('<input id="param-filename" value="SYNTHETIC2026.nh"><input id="paramdbcode" value="CDFD"><div id="DOI">10.1234/conflicting</div>'+cnkiAnchor)}});
+ const result=await env.publisher.inspectCNKI(thesisDOI,{render:false});assert.equal(result.status,'article_mismatch');assert.equal(env.imports.length,0);
+});
+test('the thesis authorization/order link is a browser handoff, not an automatic purchase or a CAJ file',async()=>{
+ const order='https://bar.cnki.net/bar/download/order?id=private-order-key';
+ const env=setup({url:'',doi:thesisDOI,title:cnkiTitle,cnki:CNKI,pages:thesisPages('<a id="cajDown" name="cajDown" href="'+order+'">PDF下载</a>')});
+ const preview=await env.publisher.inspectCNKI(env.item,{render:false});assert.equal(preview.status,'pdf_available');assert.equal(preview.cajAvailable,false);
+ const result=await env.publisher.acquire(env.item);assert.equal(result.cnkiStatus,'access_check_required');assert.equal(result.state,'needs_login');assert.notEqual(result.accessReason,'purchase');
+ assert(!env.requests.some(row=>row.url===order));assert.equal(env.imports.length,0);assert.equal(JSON.stringify(result).includes('private-order-key'),false);
+});
+test('closing or changing the item during DOI resolution cannot bind late metadata to it',async()=>{
+ let env;const pages=thesisPages();pages[thesisRegistry]=()=>{const prior=env.item.getField;env.item.getField=name=>name==='title'?'已修改的题名':prior(name);return registryHTML();};
+ env=setup({url:'',doi:thesisDOI,title:cnkiTitle,cnki:CNKI,pages});
+ await assert.rejects(env.publisher.inspectCNKI(env.item),{name:'AbortError'});assert.equal(env.imports.length,0);
+});
+test('CNKI DOI resolver is not requested when this source is disabled',async()=>{
+ const env=setup({cnki:CNKI,cnkiSettings:{enabled:false},pages:thesisPages()});
+ assert.equal((await env.publisher.inspectCNKI(thesisDOI)).status,'disabled');assert.equal(env.requests.length,0);
+});
+
 test('CNKI DOI-less PDF retains its unique record, shared identity check, and only a stable source URL',async()=>{
  let identityTarget;
  const env=cnkiSetup({pages:{[cnkiURL]:cnkiMarkup(cnkiAnchor),[cnkiPDF]:{bytes:pdf(),type:'application/pdf'}},pdfIdentity:{async inspect(_file,target){identityTarget=target;return {status:'match'};}}});

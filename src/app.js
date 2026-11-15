@@ -584,6 +584,7 @@ function create({Zotero,Services,IOUtils,PathUtils,rootURI,pluginID,version,pick
     saveCNKISettings(value){return cnkiController.saveSettings(value);},
     openCNKILogin(){return cnkiController.openLogin();},
     verifyCNKI(){return cnkiController.verify();},
+    normalizeCNKIInput(value){return cnkiController.normalizeInput(value);},
     inspectCNKIURL(url){return cnkiController.inspectURL(url);},
     importCNKIPreview(){return cnkiController.importPreview();},
     enrichSelectedCNKI(items){return cnkiController.enrichSelected(items);},
