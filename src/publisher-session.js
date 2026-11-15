@@ -140,13 +140,47 @@
         return getStatus();
       } finally { clearing = false; }
     }
+    async function forgetHosts(values, { clearCookies = false } = {}) {
+      active(); await initialize();
+      const removed = [...new Set((Array.isArray(values) ? values : []).map(normalizeHost).filter(Boolean))];
+      if (!removed.length) return getStatus();
+      const selected = host => removed.some(value => host === value || host.endsWith("." + value));
+      clearing = true; generation++; ticket++;
+      try {
+        await writes.catch(() => {});
+        const revoke = [...new Set([...removed, ...hosts.filter(selected)])];
+        const targets = new Map();
+        if (clearCookies) {
+          if (typeof Services.cookies.remove !== "function") throw new Error("无法重置此网站的登录，请在知网页面退出登录。");
+          for (const host of revoke) for (const cookie of Services.cookies.getCookiesFromHost(host, { userContextId: 0, privateBrowsingId: 0 })) {
+            const domain = String(cookie.host || "").replace(/^\./, "").toLowerCase();
+            if (!selected(domain) || (cookie.originAttributes?.userContextId || 0) !== 0
+                || (cookie.originAttributes?.privateBrowsingId || 0) !== 0 || cookie.originAttributes?.partitionKey
+                || cookie.originAttributes?.firstPartyDomain) continue;
+            targets.set([cookie.host, cookie.path, cookie.name].join("\n"), cookie);
+          }
+        }
+        // Revoke restoration before deleting cookies: an interrupted deletion
+        // must never cause the old encrypted CNKI session to be revived.
+        hosts = hosts.filter(host => !selected(host));
+        Services.prefs.setStringPref(HOSTS_PREF, JSON.stringify(hosts));
+        const retained = cookies().filter(cookie => cookie.isSession && unexpired(cookie)).slice(0, MAX_COOKIES).map(record);
+        const value = retained.length ? { version: 1, savedAt: new Date().toISOString(), cookies: retained } : null;
+        await write(value); savedAt = value?.savedAt || null; hasBackup = !!value; storageError = null;
+        for (const cookie of targets.values()) Services.cookies.remove(cookie.host, cookie.name, cookie.path, { userContextId: 0, privateBrowsingId: 0 });
+        return getStatus();
+      } catch (_) {
+        storageError = "网站登录重置未完全完成，请重试；其他机构会话保持原有范围。";
+        throw new Error(storageError);
+      } finally { clearing = false; }
+    }
     async function destroy() {
       if (destroyed) return;
       ticket++;
       if (observerAdded) Services.obs.removeObserver(observer, "cookie-changed"); observerAdded = false;
       try { await flush(); } finally { destroyed = true; }
     }
-    return { initialize, grantHosts, flush, getStatus, clear, destroy };
+    return { initialize, grantHosts, flush, getStatus, clear, forgetHosts, destroy };
   }
   scope.FulltextPublisherSession = Object.freeze({ create, normalizeHost, matchesHost });
 })(globalThis);

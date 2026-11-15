@@ -183,6 +183,26 @@
 @media(max-width:480px){#fta-preferences .fta-source-diagnostic-row{grid-template-columns:1fr;gap:3px}}
 
 /* Lists are paged without discarding the complete task/message collection. */
+#fta-preferences .fta-cnki-settings{margin-top:22px;padding-top:18px;border-top:1px solid var(--fta-border)}
+#fta-preferences .fta-cnki-settings .fta-section-heading{align-items:center;gap:10px;flex-wrap:wrap}
+#fta-preferences .fta-cnki-settings .fta-section-heading h3{margin:0}
+#fta-preferences .fta-cnki-url-form{margin-top:18px}
+#fta-preferences .fta-cnki-url-form>label{display:block;margin-bottom:6px;font-weight:500}
+#fta-preferences .fta-cnki-preview{margin:14px 0;padding:14px;border:1px solid var(--fta-border);border-radius:8px;background:light-dark(#f7f9fb,#293340)}
+#fta-preferences .fta-cnki-preview h4{margin:0 0 10px}
+#fta-preferences .fta-cnki-preview dl{display:grid;grid-template-columns:minmax(70px,100px) minmax(0,1fr);gap:9px 12px;margin:0 0 12px}
+#fta-preferences .fta-cnki-preview dt{color:var(--fta-muted)}
+#fta-preferences .fta-cnki-preview dd{margin:0;min-width:0;overflow-wrap:anywhere;white-space:pre-wrap}
+#fta-preferences .fta-cnki-enrich{margin-top:18px;padding-top:14px;border-top:1px solid var(--fta-border)}
+#fta-preferences .fta-cnki-references{margin-top:18px;padding-top:14px;border-top:1px solid var(--fta-border)}
+#fta-preferences .fta-cnki-references .fta-section-heading h4{margin:0}
+#fta-preferences .fta-cnki-reference-list{margin:12px 0}
+#fta-preferences .fta-cnki-reference-row{padding:10px 0;border-top:1px solid var(--fta-border);min-width:0}
+#fta-preferences .fta-cnki-reference-label{display:flex;align-items:flex-start;gap:8px;overflow-wrap:anywhere}
+#fta-preferences .fta-cnki-reference-label input{flex:none;margin-top:5px}
+#fta-preferences .fta-cnki-reference-meta{margin:4px 0 0 24px;color:var(--fta-muted);font-size:.9em;overflow-wrap:anywhere}
+#fta-preferences .fta-cnki-reference-meta>.fta-note{display:block}
+@media(max-width:480px){#fta-preferences .fta-cnki-preview dl{grid-template-columns:1fr;gap:4px}#fta-preferences .fta-cnki-preview dd{margin-bottom:8px}}
 #fta-preferences .fta-sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 #fta-preferences .fta-list-toolbar{display:flex;align-items:center;gap:10px;margin:15px 0;min-width:0}
 #fta-preferences .fta-list-toolbar .fta-search{flex:1;min-width:100px}

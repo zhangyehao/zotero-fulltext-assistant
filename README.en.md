@@ -10,7 +10,7 @@
 
 Fulltext Assistant tries open full-text sources and APIs before publisher pages. When a site requires manual sign-in or verification, download through your usual default browser; the plugin checks the PDF and attaches it to the original item. For remaining items, you can explicitly request help on AbleSci (科研通), wait for a response, verify the file, and accept it. Install one Zotero plugin; no browser extension is required.
 
-The interface supports **Simplified Chinese (default), Traditional Chinese, and English**. This README describes **1.0.0**. This version's native acceptance ran on **Windows / Zotero 10.0.8**; earlier releases also have 10.0.7 records. The installation manifest permits **`10.0.7–10.0.*`**. macOS, Linux, Zotero 7/8/9, and 10.1+ are outside the verified support range. A permitted version is not a claim that every version in that range has been tested. Verification is recorded separately for each release. Supporting guides are currently in Simplified Chinese.
+The interface supports **Simplified Chinese (default), Traditional Chinese, and English**. This README describes the features in **1.1.0**; installable versions are those published in stable Releases. Released version 1.0.0 was accepted on **Windows / Zotero 10.0.8**; earlier releases also have 10.0.7 records. The installation manifest permits **`10.0.7–10.0.*`**. macOS, Linux, Zotero 7/8/9, and 10.1+ are outside the verified support range. A permitted version is not a claim that every version in that range has been tested. Verification is recorded separately for each release. Supporting guides are currently in Simplified Chinese.
 
 ## What it does
 
@@ -19,6 +19,7 @@ The interface supports **Simplified Chinese (default), Traditional Chinese, and 
 | Retrieve full text for a whole collection | Skip items with a usable local PDF before creating tasks; queue the rest and allow more batches to be appended. |
 | An open full text is available | Try Zotero OA, OpenAlex, PMC / Europe PMC, CORE, and Semantic Scholar; verify candidate PDFs before attaching them. |
 | A publisher page offers a PDF | After open sources, try the item URL, DOI landing page, and valid sessions inside Zotero. |
+| A CNKI item or article URL | Preview page metadata and fill empty fields; an explicit article URL can identify a paper without a DOI and provide a PDF candidate where access permits. |
 | Use another download source | Configure up to eight HTTPS templates containing `{doi}`, separated by semicolons or new lines; retrieve anonymously and verify the file. |
 | Update the plugin | A compact header shows the check button, update status, and version; expand release details to read notes, explicitly install, or configure native automatic updates. |
 | Your usual browser has institutional access | Complete sign-in, verification, and the download yourself; the plugin watches configured folders and imports matching new PDFs. |
@@ -56,7 +57,7 @@ This screenshot is from a blank 0.8.0 demonstration library and contains no user
 | Page | Contents |
 | --- | --- |
 | Tasks | Batch progress, next actions, PDF review, completed history, and linking existing requests. |
-| Settings | Full-text sources, API keys, manuscript-version preferences, OpenAlex / CORE content allowances, interface language, download folders, and institutional sessions. |
+| Settings | Full-text sources, API keys, manuscript-version preferences, OpenAlex / CORE content allowances, CNKI, interface language, download folders, and institutional sessions. |
 | AbleSci settings | Sign-in, balance and check-in status, bounty, site-minimum option, polling interval, automatic download, and locally recorded spending. |
 | Messages | AbleSci messages, refresh action, and last-refresh time. |
 
@@ -83,6 +84,16 @@ Candidates can be downloaded and verified as each configured source returns them
 API queries and these candidate downloads use an anonymous web session; they do not inherit Edge, AbleSci, or institutional login cookies. An authenticated API receives only its own configured key. The later publisher-retrieval path is separate and can use a valid session saved inside Zotero. Use a task's **Source check details** to distinguish API discovery, candidate-file access, and identity-verification failures. Access restrictions or rate limits do not by themselves mean a service must be purchased.
 
 API keys are stored separately in Zotero's login manager. Saving an empty key field keeps the existing key; explicitly select its removal to delete it. Keys are not stored in task history or logs. See the [full-text source guide](docs/fulltext-sources.md) for configuration and original service documentation.
+
+## CNKI papers
+
+Use **Settings → CNKI** for the source toggle, web sign-in, session reset, and access verification. CNKI is enabled by default. Parse an article URL and preview its metadata before explicitly importing a new item, or fill empty fields on selected existing items. Import checks for duplicates. Papers without a DOI can use CNKI article identifiers. If only a Chinese title is available, open the official search page and choose the correct article yourself; the plugin does not assume the first result matches.
+
+Full-text retrieval uses the existing batch queue. When the page offers a PDF and the current Zotero session has access, the plugin attempts the link and verifies the file. Metadata alone is not acquired full text, and CAJ files are not renamed or treated as PDFs. CNKI uses Zotero's publisher-session mechanism without reading Edge cookies. The existing download-folder checks remain available for files obtained in your default browser. Public metadata pages have been checked; PDF downloads using the user's institutional CNKI access have not been verified. Actual access and session validity remain subject to the website.
+
+Use **Extract references** below the article preview to read visible direct references and an explicitly declared list on the same site. Results distinguish partial lists, unknown totals, sign-in requirements, and access restrictions. Nothing is selected by default. After review, import up to 50 selected references as separate library items; raw citations without a reliable title cannot be imported directly. Complete lists are not guaranteed, and citing papers or second-level references are excluded. One real list request returned “检索降级” (degraded search service) without references; this is not shown as zero references. Imported metadata can then use the normal batch queue to retrieve PDFs.
+
+CNKI's research platform has official APIs that require a developer application and approved interface permissions. This version does not embed unauthorized API credentials or promise universal free PDFs. The implementation is independent and does not require Reference or Jasminum. See the [CNKI guide](docs/cnki.md) for operations, official documentation, and limitations.
 
 ## Downloads and verification
 

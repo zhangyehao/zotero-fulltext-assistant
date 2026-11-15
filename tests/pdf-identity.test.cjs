@@ -227,6 +227,74 @@ test('a sufficiently long Chinese title can establish identity', async () => {
   const r = await inspect(title + '\n摘要：研究正文', { title });
   assert.equal(r.status, 'match');
 });
+
+const CHINESE_TITLE='基于深度学习的医学图像分析方法及临床应用研究';
+const OTHER_CHINESE_TITLE='气候变化背景下森林生态系统保护与恢复机制研究';
+
+test('Chinese body headings fence off cited titles and DOIs without requiring a colon or Latin word boundary',async()=>{
+  for(const heading of ['摘要','摘 要','摘要：研究正文','摘要 研究正文','摘\u3000要','内容摘要','內 容 摘 要','【摘要】','[摘 要]','引言','引 言','1 引言','1.1 引言','1引言','一、引言','前言','关键词','關鍵詞']){
+    for(const cited of [CHINESE_TITLE,'https://doi.org/'+DOI]){
+      const r=await inspect(OTHER_CHINESE_TITLE+'\n张三 李四\n'+heading+'\n'+cited+'\n本文介绍其他研究。',{doi:DOI,title:CHINESE_TITLE});
+      assert.notEqual(r.status,'match',heading+' / '+cited);assert.deepEqual(r.detectedDOIs,[],heading);
+      assert.equal(r.matchedBy,'');
+    }
+  }
+});
+
+test('Chinese title words merely starting with a section label are not mistaken for body headings',async()=>{
+  for(const title of ['摘要自动生成算法在医学研究文献分析中的应用','引言部分结构特征在中文学术论文分析中的研究']){
+    const r=await inspect(title+'\n张三 李四\n摘要\n本文介绍方法。',{title});
+    assert.equal(r.status,'match');assert.equal(r.matchedBy,'title');
+  }
+});
+
+test('complete Chinese front titles tolerate only Han layout spaces and bounded line wraps',async()=>{
+  const variants=[CHINESE_TITLE,CHINESE_TITLE.slice(0,11)+'\n'+CHINESE_TITLE.slice(11),CHINESE_TITLE.slice(0,8)+'\n'+CHINESE_TITLE.slice(8,16)+'\n'+CHINESE_TITLE.slice(16),[...CHINESE_TITLE].join(' '),[...CHINESE_TITLE].join('\u3000')];
+  for(const text of variants){
+    const r=await inspect(text+'\n张三 李四\n摘要\n本文介绍方法。',{title:CHINESE_TITLE});
+    assert.equal(r.status,'match',text);assert.equal(r.matchedBy,'title');assert.equal(r.titleSimilarity,1);
+  }
+  const spacedTarget=await inspect(CHINESE_TITLE+'\n摘要\n正文。',{title:variants[3]});assert.equal(spacedTarget.status,'match');
+});
+
+test('short Chinese titles remain insufficient without DOI and near or reordered titles never auto-match',async()=>{
+  for(const title of ['医学图像研究','一二三四五六七八九十甲乙丙丁戊']){
+    let extractions=0;const r=await create({extractText:async()=>{extractions++;return title+'\n摘要\n正文。';}}).inspect('fixture.pdf',{title});
+    assert.equal(r.status,'unknown');assert.equal(r.reason,'target_missing');assert.equal(extractions,0);
+  }
+  for(const text of [CHINESE_TITLE.replace('医学','教学'),CHINESE_TITLE.replace('医学图像','图像医学'),'本文讨论'+CHINESE_TITLE+'及其他工作']){
+    const r=await inspect(text+'\n摘要\n正文。',{title:CHINESE_TITLE});assert.equal(r.status,'unknown');assert.equal(r.matchedBy,'');
+  }
+  const mixed='甲型AB受体在神经系统发育与功能调控过程中的机制研究';
+  assert.equal((await inspect(mixed.replace('AB','A B')+'\n摘要\n正文。',{title:mixed})).status,'unknown','Latin word boundaries remain significant');
+  assert.equal((await inspect('医学图像研究\nDOI: '+DOI+'\n摘要\n正文。',{doi:DOI,title:'医学图像研究'})).matchedBy,'doi');
+});
+
+test('Chinese reference headings exclude spaced and traditional reference sections',async()=>{
+  for(const heading of ['参考文献','参考 文献','参 考 文 献','參考文獻','參 考 文 獻','【参考文献】','[參考文獻]']){
+    const r=await inspect(OTHER_CHINESE_TITLE+'\n'+heading+'\n'+CHINESE_TITLE+'\nDOI: '+DOI,{doi:DOI,title:CHINESE_TITLE});
+    assert.equal(r.status,'unknown',heading);assert.deepEqual(r.detectedDOIs,[],heading);assert.equal(r.matchedBy,'');
+  }
+});
+
+test('Chinese geometric line wraps match only inside a bounded front title block',async()=>{
+  const recognized=recognizedPage([
+    {text:CHINESE_TITLE.slice(0,11),font:18,y:80},{text:CHINESE_TITLE.slice(11),font:18,y:103},
+    {text:'张三 李四',font:10,y:130},{text:'摘 要',font:10,y:155},{text:'本文介绍研究背景与实验方法。'.repeat(4),font:10,y:175},
+  ]);
+  const r=await inspectGeometry('',recognized,{title:CHINESE_TITLE});assert.equal(r.status,'match');assert.equal(r.matchedBy,'title');assert.equal(r.titleSimilarity,1);
+  const cited=recognizedPage([{text:OTHER_CHINESE_TITLE,font:18,y:80},{text:'摘要',font:10,y:115},{text:CHINESE_TITLE,font:18,y:145},{text:'研究正文。'.repeat(10),font:10,y:175}]);
+  assert.equal((await inspectGeometry('',cited,{title:CHINESE_TITLE})).status,'unknown');
+});
+
+test('Chinese normalization cannot override reliable conflicting DOI or geometric title evidence',async()=>{
+  const wrapped=CHINESE_TITLE.slice(0,11)+'\n'+CHINESE_TITLE.slice(11);
+  const conflict=await inspect(wrapped+'\nDOI: 10.1234/other\n摘要\n正文。',{doi:DOI,title:CHINESE_TITLE});
+  assert.equal(conflict.status,'unknown');assert.equal(conflict.reason,'conflicting_identity');assert.equal(conflict.evidence.identityConflict,true);
+  const geometry=recognizedPage([{text:OTHER_CHINESE_TITLE,font:18,y:80},{text:'张三 李四',font:10,y:110},{text:'DOI: '+DOI,font:10,y:130},{text:'摘要',font:10,y:150},{text:'研究正文。'.repeat(10),font:10,y:170}]);
+  const sameDOI=await inspectGeometry('',geometry,{doi:DOI,title:CHINESE_TITLE});assert.equal(sameDOI.status,'unknown');assert.equal(sameDOI.reason,'conflicting_identity');
+  const otherDOI=await inspect(OTHER_CHINESE_TITLE+'\nDOI: 10.1234/other\n摘要\n正文。',{doi:DOI,title:CHINESE_TITLE});assert.equal(otherDOI.status,'mismatch');
+});
 test('Zotero item fields are supported without any Item writes', async () => {
   const item = { getField: field => ({ DOI, title: TITLE }[field] || '') };
   const r = await inspect('DOI: ' + DOI + '\nAbstract\nResearch.', item);

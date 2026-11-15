@@ -10,6 +10,11 @@
   const MAX_FIRST_PAGE = 32000;
   const MAX_TITLE_REGION = 2500;
   const MAX_PAGES = 2;
+  const CJK_SPACE = "[^\\S\\r\\n]";
+  const CJK_SECTION_PREFIX = "(?:^|\\n)" + CJK_SPACE + "*(?:(?:\\d+(?:\\.\\d+)*[.)、．]?|[一二三四五六七八九十]+[、．.])" + CJK_SPACE + "*)?(?:[\\[【［]" + CJK_SPACE + "*)?";
+  const CJK_SECTION_END = "(?:" + CJK_SPACE + "*[\\]】］]|(?=" + CJK_SPACE + "|[:：\\n]|$))";
+  const CJK_BODY_HEADING = new RegExp(CJK_SECTION_PREFIX + "(?:(?:[内內]" + CJK_SPACE + "*容" + CJK_SPACE + "*)?摘" + CJK_SPACE + "*要|引" + CJK_SPACE + "*言|前" + CJK_SPACE + "*言|[关關]" + CJK_SPACE + "*[键鍵]" + CJK_SPACE + "*[词詞])" + CJK_SECTION_END, "m");
+  const CJK_REFERENCE_HEADING = new RegExp(CJK_SECTION_PREFIX + "[参參]" + CJK_SPACE + "*考" + CJK_SPACE + "*文" + CJK_SPACE + "*[献獻]" + CJK_SECTION_END, "m");
 
   function clean(value, limit = 320) {
     return String(value || "").normalize("NFKC").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, limit);
@@ -32,6 +37,9 @@
     // tolerate that orthographic loss; DOI identity remains exact.
     return String(value || "").normalize("NFKD").replace(/([\p{Script=Latin}])\p{M}+/gu, "$1").replace(/<[^>]*>/g, " ")
       .replace(/\u00ad/g, "").replace(/([\p{L}])[\-\u2010\u2011][ \t]*\n[ \t]*(?=[\p{L}])/gu, "$1")
+      // PDF layout often separates every Han character or wraps a title in the
+      // middle of a word. Preserve Latin/numeric word boundaries and character order.
+      .replace(/(?<=\p{Script=Han})\s+(?=\p{Script=Han})/gu, "")
       .toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim().replace(/\s+/g, " ");
   }
   function strongTitle(value) {
@@ -52,12 +60,16 @@
       .replace(/[\u00ad\u200b\u2060\ufeff]/g, "").replace(/[\u2010\u2011]/g, "-");
   }
   function referenceStart(text) {
-    const heading = /(?:^|\n)[ \t]*(?:\d+[.)]?[ \t]+)?(?:references|bibliography|literature cited|references and notes|参考文献)[ \t]*[:.]?[ \t]*(?:\n|$|(?=\d+[.)\]]))/im.exec(text);
-    return heading ? heading.index : text.length;
+    const heading = /(?:^|\n)[ \t]*(?:\d+[.)]?[ \t]+)?(?:references|bibliography|literature cited|references and notes)[ \t]*[:.]?[ \t]*(?:\n|$|(?=\d+[.)\]]))/im.exec(text);
+    const chinese = CJK_REFERENCE_HEADING.exec(text);
+    return Math.min(heading ? heading.index : text.length, chinese ? chinese.index : text.length);
   }
   function bodyStart(text) {
-    const heading = /(?:^|\n)[ \t]*(?:\d+[.)]?[ \t]+)?(?:(?:abstract|introduction|summary|background|keywords|摘要|引言)(?:\b|[：:])|(?:graphical abstract|highlights|authors|correspondence|in brief)(?:[ \t]*[:：]|[ \t]*[.\-–—]?[ \t]*(?=\n|$)))/im.exec(text);
-    return heading ? heading.index : text.length;
+    const heading = /(?:^|\n)[ \t]*(?:\d+[.)]?[ \t]+)?(?:(?:abstract|introduction|summary|background|keywords)(?:\b|[：:])|(?:graphical abstract|highlights|authors|correspondence|in brief)(?:[ \t]*[:：]|[ \t]*[.\-–—]?[ \t]*(?=\n|$)))/im.exec(text);
+    // JavaScript's word boundary is Latin-oriented: an uncolonized “摘要” line
+    // otherwise leaves abstract citations eligible as apparent front titles/DOIs.
+    const chinese = CJK_BODY_HEADING.exec(text);
+    return Math.min(heading ? heading.index : text.length, chinese ? chinese.index : text.length);
   }
   function citationLike(value) {
     return /^\s*(?:\[\d{1,3}\]|\d{1,3}[.)])\s*\S/.test(value)

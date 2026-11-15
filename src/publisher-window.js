@@ -25,7 +25,7 @@
     const windows = new Set();
     let destroyed = false;
     return {
-      open({ url, taskId = null, app = null }) {
+      open({ url, taskId = null, app = null, purpose = null }) {
         if (destroyed) throw new Error("出版社窗口管理器已停止。");
         const checked = httpURL(url);
         for (const entry of windows) {
@@ -34,10 +34,11 @@
         }
         const args = { url: checked, taskId, app, publisherSession }; args.wrappedJSObject = args;
         const win = Zotero.getMainWindow().openDialog(WINDOW_URL, "", "chrome,centerscreen,resizable,dialog=no,width=1160,height=850", args);
-        const entry = { win, url: checked, taskId }; windows.add(entry);
+        const entry = { win, url: checked, taskId, purpose }; windows.add(entry);
         onChromeDocumentEvent(win, "unload", () => windows.delete(entry), true);
         return win;
       },
+      closePurpose(purpose) { for (const entry of windows) if (entry.purpose === purpose) { if (!entry.win.closed) entry.win.close(); windows.delete(entry); } },
       destroy() { destroyed = true; for (const {win} of windows) if (!win.closed) win.close(); windows.clear(); },
     };
   }

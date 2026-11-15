@@ -4,14 +4,16 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const {parseHTML} = require('linkedom');
+const CNKI = require('../src/cnki.js');
+const CNKIReferences = require('../src/cnki-references.js');
 const source = fs.readFileSync(path.join(__dirname,'../src/publisher.js'),'utf8');
 const pdf = () => new TextEncoder().encode('%PDF-1.7\n' + '0'.repeat(1200) + '\n%%EOF\n');
 const html = body => '<!doctype html><html><head></head><body>' + body + '</body></html>';
 
-function setup({url='https://publisher.test/article/one',doi='',pages={},rendered={},oa=[],sources,pdfIdentity,sourceSettings={}}={}) {
-  const files=new Map(),attachments=[],requests=[],imports=[],progress=[],hidden=[];
+function setup({url='https://publisher.test/article/one',doi='',title='',extra='',pages={},rendered={},oa=[],sources,pdfIdentity,sourceSettings={},cnki,cnkiReferences,cnkiSettings={enabled:true},blockingObserver=true}={}) {
+  const files=new Map(),attachments=[],requests=[],imports=[],progress=[],hidden=[],blockers=[];
   let nextID=100,tempID=0,renderedOnce=false,active=0,maxActive=0;
-  const item={id:1,libraryID:1,isRegularItem:()=>true,getField(name){return {url,DOI:doi}[name]||'';},getAttachments(){return attachments.map(value=>value.id);}};
+  const item={id:1,libraryID:1,isRegularItem:()=>true,getField(name){return {url,DOI:doi,title,extra}[name]||'';},getAttachments(){return attachments.map(value=>value.id);}};
   const IOUtils={async exists(file){return files.has(file);},async stat(file){if(!files.has(file))throw new Error('Missing fixture file');return {type:'regular',size:files.get(file).length,lastModified:1};},async read(file,{offset=0,maxBytes}={}){if(!files.has(file))throw new Error('Missing fixture file');return files.get(file).slice(offset,maxBytes===undefined?undefined:offset+maxBytes);},async write(file,bytes){files.set(file,bytes);},async remove(file){files.delete(file);}};
   const Zotero={Promise:{delay(ms){return new Promise(resolve=>setTimeout(resolve,Math.min(ms,5)));}},Items:{async getAsync(id){return attachments.find(value=>value.id===id);}},HTTP:{async request(method,address,options){
     requests.push({method,url:address,options});active++;maxActive=Math.max(maxActive,active);
@@ -24,16 +26,191 @@ function setup({url='https://publisher.test/article/one',doi='',pages={},rendere
     } finally {active--;}
   }},Attachments:{async createTemporaryStorageDirectory(){return {path:'/tmp/publisher-'+(++tempID)};},async importFromFile(options){imports.push(options);assert.equal(options.parentItemID,1);assert.equal(options.libraryID,1);assert.equal(options.contentType,'application/pdf');assert(files.has(options.file));const attachment={id:++nextID,attachmentContentType:'application/pdf',async getFilePathAsync(){return '/storage/'+this.id+'.pdf';},setField(){},async saveTx(){}};files.set('/storage/'+attachment.id+'.pdf',files.get(options.file));attachments.push(attachment);return attachment;},getFileResolvers(_item,methods){assert.deepEqual(Array.from(methods),['oa']);return [async()=>oa];}}};
   class HiddenBrowser {
-    constructor(options){this.options=options;this.destroyed=false;hidden.push(this);}
-    async load(address){renderedOnce=true;this.currentURI={spec:address};return true;}
+    constructor(options){this.options=options;this.destroyed=false;this._createdPromise=Promise.resolve();hidden.push(this);}
+    async load(address){if(CNKI.isCNKIURL(address))assert(blockers.some(value=>value.browser===this));renderedOnce=true;this.currentURI={spec:address};return true;}
     async getPageData(props){assert.deepEqual(Array.from(props),['documentHTML']);return {documentHTML:rendered[this.currentURI.spec]||html('No file')};}
     destroy(){this.destroyed=true;}
   }
+  class BlockingObserver {
+    constructor(options){this.options=options;this.disposed=false;blockers.push(this);}
+    register(browser){this.browser=browser;}
+    dispose(){this.disposed=true;}
+  }
   const scope={URL,Promise,Date,JSON,Set,Map,Uint8Array,ArrayBuffer,TextDecoder,TextEncoder};
   vm.runInNewContext(source,scope);
-  const publisher=scope.FulltextPublisher.create({Zotero,Services:{},IOUtils,PathUtils:path.posix,parseHTML,HiddenBrowser,sources,pdfIdentity,getSourceSettings:()=>sourceSettings});
-  return {publisher,api:scope.FulltextPublisher,item,Zotero,IOUtils,files,attachments,requests,imports,hidden,progress,onProgress:info=>progress.push(info),maxActive:()=>maxActive};
+  const publisher=scope.FulltextPublisher.create({Zotero,Services:{},IOUtils,PathUtils:path.posix,parseHTML,HiddenBrowser,BlockingObserver:blockingObserver?BlockingObserver:undefined,sources,pdfIdentity,cnki,cnkiReferences,getCNKISettings:()=>cnkiSettings,getSourceSettings:()=>sourceSettings});
+  return {publisher,api:scope.FulltextPublisher,item,Zotero,IOUtils,files,attachments,requests,imports,hidden,blockers,progress,onProgress:info=>progress.push(info),maxActive:()=>maxActive};
 }
+
+const cnkiURL='https://kns.cnki.net/KCMS/detail/detail.aspx?dbcode=CJFD&filename=TEST202401001';
+const cnkiTitle='合成知网文章的完整题名';
+const cnkiPDF='https://download.cnki.net/current?opaque=transient-signed-value';
+const cnkiMarkup=(body='')=>html('<h1>'+cnkiTitle+'</h1>'+body);
+const cnkiAnchor='<a name="pdfDown" href="'+cnkiPDF+'">PDF下载</a>';
+const cnkiSetup=options=>setup({url:cnkiURL,title:cnkiTitle,cnki:CNKI,...options});
+
+test('CNKI DOI-less PDF retains its unique record, shared identity check, and only a stable source URL',async()=>{
+ let identityTarget;
+ const env=cnkiSetup({pages:{[cnkiURL]:cnkiMarkup(cnkiAnchor),[cnkiPDF]:{bytes:pdf(),type:'application/pdf'}},pdfIdentity:{async inspect(_file,target){identityTarget=target;return {status:'match'};}}});
+ const result=await env.publisher.acquire(env.item,{onProgress:env.onProgress});
+ assert.equal(result.source,'cnki');assert.equal(result.discoveryProvider,'cnki');assert.equal(result.pdfHost,'download.cnki.net');assert.equal(result.sourceURL,cnkiURL);
+ assert.equal(result.cnkiRecord.id,'CNKI:CJFD:TEST202401001');assert.equal(result.metadata.title,cnkiTitle);assert.equal(result.fulltextVersion,'unknown');assert.equal(identityTarget.doi,'');assert.equal(identityTarget.cnkiRecord.id,result.cnkiRecord.id);
+ assert.equal(env.imports.length,1);assert.equal(JSON.stringify(result).includes('transient-signed-value'),false);assert.equal(JSON.stringify(env.progress).includes('transient-signed-value'),false);
+ assert(env.requests.every(row=>row.options.followRedirects===false&&!('userContextId' in row.options)&&!row.options.anon&&!row.options.headers.Cookie&&!row.options.headers.Authorization));
+});
+test('CNKI unknown PDF identity keeps one hash-bound review path instead of importing',async()=>{
+ const env=cnkiSetup({pages:{[cnkiURL]:cnkiMarkup(cnkiAnchor),[cnkiPDF]:{bytes:pdf(),type:'application/pdf'}},pdfIdentity:{async inspect(){return {status:'unknown'};}}});
+ const result=await env.publisher.acquire(env.item);
+ assert.equal(result.needsReview,true);assert.equal(result.paper.cnkiRecord.id,'CNKI:CJFD:TEST202401001');assert.equal(result.sourceURL,cnkiURL);assert.equal(result.pdfHost,'download.cnki.net');assert.equal(env.imports.length,0);
+});
+test('CNKI opaque URL review binds the original item while retaining the discovered hidden record as provenance',async()=>{
+ const opaque='https://kns.cnki.net/kcms2/article/abstract?v=temporary-article-token';
+ const markup=cnkiMarkup('<input id="hiddbcode" value="CJFD"><input id="hidfilename" value="TEST202401001">'+cnkiAnchor);
+ const env=cnkiSetup({url:opaque,pages:{[opaque]:markup,[cnkiPDF]:{bytes:pdf(),type:'application/pdf'}},pdfIdentity:{async inspect(){return {status:'unknown'};}}});
+ const result=await env.publisher.acquire(env.item);assert.equal(result.needsReview,true);assert.equal(result.paper.doi,'');assert.equal(result.paper.cnkiRecord,null);assert.equal(result.cnkiRecord.id,'CNKI:CJFD:TEST202401001');assert.equal(result.sourceURL,cnkiURL);assert.equal(env.imports.length,0);assert.equal(JSON.stringify(result).includes('temporary-article-token'),false);
+});
+test('CNKI opaque URL changes during unknown PDF inspection cancel before returning a review candidate',async()=>{
+ const opaque='https://kns.cnki.net/kcms2/article/abstract?v=temporary-article-token';
+ const markup=cnkiMarkup('<input id="hiddbcode" value="CJFD"><input id="hidfilename" value="TEST202401001">'+cnkiAnchor);
+ let env;
+ env=cnkiSetup({url:opaque,pages:{[opaque]:markup,[cnkiPDF]:{bytes:pdf(),type:'application/pdf'}},pdfIdentity:{async inspect(){const previous=env.item.getField;env.item.getField=name=>name==='url'?opaque.replace('temporary-article-token','different-article-token'):previous(name);return {status:'unknown'};}}});
+ await assert.rejects(env.publisher.acquire(env.item),{name:'AbortError'});assert.equal(env.imports.length,0);
+});
+test('CNKI cannot silently import when the PDF identity service is unavailable',async()=>{
+ const env=cnkiSetup({pages:{[cnkiURL]:cnkiMarkup(cnkiAnchor),[cnkiPDF]:{bytes:pdf(),type:'application/pdf'}}});
+ const result=await env.publisher.acquire(env.item);assert.equal(result.needsReview,true);assert.equal(env.imports.length,0);
+});
+test('CNKI wrong-paper PDF is rejected and another ordinary source can still succeed',async()=>{
+ const oaURL='https://repository.test/verified.pdf';
+ const env=cnkiSetup({doi:'10.1234/paper',pages:{[cnkiURL]:cnkiMarkup(cnkiAnchor),[cnkiPDF]:{bytes:pdf(),type:'application/pdf'},[oaURL]:{bytes:pdf(),type:'application/pdf'}},oa:[{url:oaURL}],pdfIdentity:{calls:0,async inspect(){return {status:++this.calls===1?'mismatch':'match'};}}});
+ const result=await env.publisher.acquire(env.item);assert.equal(result.source,'open_access');assert.equal(env.imports.length,1);assert.equal(result.cnkiRecord.id,'CNKI:CJFD:TEST202401001');assert.equal(env.requests[0].url,cnkiURL);
+});
+test('CNKI CAJ and purchase-only pages stay separate and never invoke their endpoints',async()=>{
+ for(const [body,status] of [['<a name="cajDown" href="https://download.cnki.net/full.caj">CAJ下载</a>','caj_only'],['<a id="ty_pdf" href="https://pay.cnki.net/zscsdoc/download?dtype=pdf">PDF下载</a>','purchase_required']]){
+  const env=cnkiSetup({pages:{[cnkiURL]:cnkiMarkup(body)}});const result=await env.publisher.acquire(env.item);
+  assert.equal(result.cnkiStatus,status);assert.equal(env.requests.length,1);assert.equal(env.hidden.length,0);assert.equal(env.imports.length,0);
+ }
+});
+test('CNKI metadata probe is read-only, follows explicit same-site redirects, and stops before login',async()=>{
+ const opaque='https://kns.cnki.net/kcms2/article/abstract?v=transient';
+ const env=cnkiSetup({pages:{[cnkiURL]:{status:302,headers:{Location:opaque}},[opaque]:cnkiMarkup('<input id="hiddbcode" value="CJFD"><input id="hidfilename" value="TEST202401001">'+cnkiAnchor)}});
+ const inspected=await env.publisher.inspectCNKI(env.item);assert.equal(inspected.status,'pdf_available');assert.equal(inspected.articleURL,cnkiURL);assert.equal(env.imports.length,0);assert.equal(env.requests.length,2);
+ const login=cnkiSetup({pages:{[cnkiURL]:{status:302,headers:{Location:'https://login.cnki.net/login/?returnUrl=private'}}}});
+ const result=await login.publisher.inspectCNKI(login.item);assert.equal(result.status,'login_required');assert.equal(login.requests.length,1);assert.equal(login.hidden.length,0);
+});
+test('CNKI native missing redirect headers do not throw and purchase/offsite redirects are never fetched',async()=>{
+ for(const [destination,status] of [['https://pay.cnki.net/order?id=private','purchase_required'],['https://attacker.example/file.pdf','unsafe_redirect']]){
+  const env=cnkiSetup({pages:{[cnkiURL]:cnkiMarkup(cnkiAnchor),[cnkiPDF]:{status:302,getResponseHeader(name){if(name==='Location')return destination;throw new Error('NS_ERROR_NOT_AVAILABLE');}}}});
+  const result=await env.publisher.acquire(env.item);assert.equal(result.cnkiStatus,status);assert.equal(env.requests.length,2);assert.equal(env.imports.length,0);assert.equal(JSON.stringify(result).includes('private'),false);
+ }
+});
+test('CNKI unexpected transparent redirect is rejected before accepting any PDF bytes',async()=>{
+ const env=cnkiSetup({pages:{[cnkiURL]:cnkiMarkup(cnkiAnchor),[cnkiPDF]:{url:'https://attacker.example/other.pdf',bytes:pdf(),type:'application/pdf'}},pdfIdentity:{async inspect(){throw new Error('must not inspect');}}});
+ const result=await env.publisher.acquire(env.item);assert.equal(result.cnkiStatus,'unsafe_redirect');assert.equal(env.imports.length,0);
+});
+test('CNKI download HTML login/captcha and genuine CAJ bytes are never imported as PDF',async()=>{
+ for(const [response,status] of [[{body:html('<p>请先登录</p>'),type:'text/html'},'login_required'],[{body:html('<p>请输入验证码</p>'),type:'text/html'},'human_verification'],[{bytes:new TextEncoder().encode('CAJ\0binary'),type:'application/caj'},'caj_only']]){
+  const env=cnkiSetup({pages:{[cnkiURL]:cnkiMarkup(cnkiAnchor),[cnkiPDF]:response}});const result=await env.publisher.acquire(env.item);assert.equal(result.cnkiStatus,status);assert.equal(env.imports.length,0);
+ }
+});
+test('CNKI switch off suppresses direct pages without disabling other sources',async()=>{
+ const oaURL='https://repository.test/paper.pdf';
+ const env=cnkiSetup({doi:'10.1234/one',cnkiSettings:{enabled:false},pages:{[oaURL]:{bytes:pdf(),type:'application/pdf'}},oa:[{url:oaURL}]});
+ assert.equal((await env.publisher.inspectCNKI(env.item)).status,'disabled');
+ const result=await env.publisher.acquire(env.item);assert.equal(result.source,'open_access');assert.deepEqual(env.requests.map(row=>row.url),[oaURL]);
+});
+test('CNKI item identity edits and disabling the source during identity inspection prevent import',async()=>{
+ for(const change of ['record','setting']){
+  const config={enabled:true};let env;
+  env=cnkiSetup({cnkiSettings:config,pages:{[cnkiURL]:cnkiMarkup(cnkiAnchor),[cnkiPDF]:{bytes:pdf(),type:'application/pdf'}},pdfIdentity:{async inspect(){if(change==='record'){const previous=env.item.getField;env.item.getField=name=>name==='url'?cnkiURL.replace('TEST202401001','OTHER'):previous(name);}else config.enabled=false;return {status:'match'};}}});
+  await assert.rejects(env.publisher.acquire(env.item),{name:'AbortError'});assert.equal(env.imports.length,0);
+ }
+});
+test('CNKI metadata probe can render an ungated detail page and always destroys the browser',async()=>{
+ const env=cnkiSetup({pages:{[cnkiURL]:html('<div id="app"></div>')},rendered:{[cnkiURL]:cnkiMarkup(cnkiAnchor)}});
+ const result=await env.publisher.inspectCNKI(env.item);assert.equal(result.status,'pdf_available');assert.equal(env.hidden.length,1);assert.equal(env.hidden[0].destroyed,true);assert.equal(env.imports.length,0);
+ assert.equal(env.blockers[0].disposed,true);
+ const block=url=>env.blockers[0].options.shouldBlock({spec:url});
+ for(const address of ['https://pay.cnki.net/order','https://login.cnki.net/login','https://external.test/app.js','https://download.cnki.net/download/file','https://www.cnki.com.cn/cnkispace/cjfd/references/ref.html?fileName=0123456789ABCDEF'])assert.equal(block(address),true);
+ assert.equal(block('https://kns.cnki.net/static/app.js'),false);assert.equal(block(cnkiURL),false);
+});
+test('CNKI rendering is skipped if its native request guard cannot be loaded',async()=>{
+ const env=cnkiSetup({blockingObserver:false,pages:{[cnkiURL]:cnkiMarkup()},rendered:{[cnkiURL]:cnkiMarkup(cnkiAnchor)}});
+ const result=await env.publisher.inspectCNKI(env.item);assert.equal(result.status,'metadata_only');assert.equal(env.hidden[0].currentURI,undefined);assert.equal(env.hidden[0].destroyed,true);
+});
+test('CNKI download redirects cannot switch an explicit document identifier',async()=>{
+ const wrong='https://download.cnki.net/file?filename=OTHER';
+ const env=cnkiSetup({pages:{[cnkiURL]:cnkiMarkup(cnkiAnchor),[cnkiPDF]:{status:302,headers:{Location:wrong}},[wrong]:{bytes:pdf(),type:'application/pdf'}}});
+ const result=await env.publisher.acquire(env.item);assert.equal(result.cnkiStatus,'article_mismatch');assert.equal(env.imports.length,0);assert.equal(env.requests.length,2);
+});
+test('CNKI metadata refuses conflicting item bindings without a request and notices edits during a request',async()=>{
+ const bad=cnkiSetup({extra:'CNKI: CNKI:CJFD:OTHER'});
+ assert.equal((await bad.publisher.inspectCNKI(bad.item)).status,'article_mismatch');assert.equal(bad.requests.length,0);
+ let env;
+ env=cnkiSetup({pages:{[cnkiURL]:()=>{const prior=env.item.getField;env.item.getField=name=>name==='title'?'Changed title':prior(name);return cnkiMarkup(cnkiAnchor);}}});
+ await assert.rejects(env.publisher.inspectCNKI(env.item),{name:'AbortError'});assert.equal(env.imports.length,0);
+});
+test('CNKI cancellation aborts its active HTTP request before any render or import',async()=>{
+ let cancelled=false,cancelCalled=false,release;
+ const env=cnkiSetup({pages:{[cnkiURL]:({options})=>new Promise(resolve=>{release=()=>resolve(cnkiMarkup(cnkiAnchor));options.cancellerReceiver(()=>{cancelCalled=true;release();});})}});
+ const operation=env.publisher.inspectCNKI(env.item,{isCancelled:()=>cancelled});
+ await new Promise(resolve=>setTimeout(resolve,10));cancelled=true;
+ await assert.rejects(operation,{name:'AbortError'});assert.equal(cancelCalled,true);assert.equal(env.hidden.length,0);assert.equal(env.imports.length,0);
+});
+test('CNKI visible challenge is cached until explicit retry clears the site gate',async()=>{
+ let challenge=true;
+ const env=cnkiSetup({pages:{[cnkiURL]:()=>challenge?cnkiMarkup('<p>请输入验证码</p>'):cnkiMarkup(cnkiAnchor)}});
+ assert.equal((await env.publisher.inspectCNKI(env.item)).status,'human_verification');challenge=false;
+ assert.equal((await env.publisher.inspectCNKI(env.item)).status,'human_verification');assert.equal(env.requests.length,1);
+ env.publisher.clearAccessGate(cnkiURL);assert.equal((await env.publisher.inspectCNKI(env.item)).status,'pdf_available');assert.equal(env.requests.length,2);
+});
+const cnkiPublicURL='https://www.cnki.com.cn/Article/CJFDTOTAL-TEST202401001.htm';
+const cnkiRefsURL='https://www.cnki.com.cn/cnkispace/cjfd/references/ref.html?fileName=0123456789ABCDEF';
+const cnkiRefDeclaration='<script>$.get("/cnkispace/cjfd/references/ref.html",{fileName:"0123456789ABCDEF"},function(data){data.refarticles.references;});</script>';
+const cnkiReferenceList={error:200,refarticles:{references:{cjfdList:[{articleName:'另一篇明确的参考文献题名',author:'张三;李四',year:'2022',fileName:'REF202201001'}]}}};
+test('CNKI ordinary metadata inspection parses page-declared references without requesting their endpoint',async()=>{
+ const env=cnkiSetup({url:cnkiPublicURL,cnkiReferences:CNKIReferences,pages:{[cnkiPublicURL]:cnkiMarkup(cnkiAnchor+cnkiRefDeclaration)}});
+ const result=await env.publisher.inspectCNKI(env.item);assert.equal(result.status,'pdf_available');assert.equal(result.references.status,'page_declared');assert.deepEqual(env.requests.map(row=>row.url),[cnkiPublicURL]);
+});
+test('CNKI requested references follow only one page-declared GET and retain partial provenance',async()=>{
+ const env=cnkiSetup({url:cnkiPublicURL,cnkiReferences:CNKIReferences,pages:{[cnkiPublicURL]:cnkiMarkup(cnkiAnchor+cnkiRefDeclaration),[cnkiRefsURL]:{type:'application/json',body:JSON.stringify(cnkiReferenceList)}}});
+ const result=await env.publisher.inspectCNKI(env.item,{includeReferences:true});
+ assert.equal(result.status,'pdf_available');assert.equal(result.references.visibleCount,1);assert.equal(result.references.complete,false);assert.equal(result.references.totalCount,null);assert.equal(result.references.references[0].title,'另一篇明确的参考文献题名');assert.equal(result.references.references[0].record.id,'CNKI:CJFD:REF202201001');
+ assert.deepEqual(env.requests.map(row=>row.url),[cnkiPublicURL,cnkiRefsURL]);assert.equal(env.imports.length,0);assert.equal(env.hidden.length,0);
+});
+test('CNKI degraded reference response does not claim an empty or complete bibliography or repeat its request',async()=>{
+ const markup=cnkiMarkup(cnkiRefDeclaration);
+ const env=cnkiSetup({url:cnkiPublicURL,cnkiReferences:CNKIReferences,pages:{[cnkiPublicURL]:markup,[cnkiRefsURL]:{type:'application/json',body:JSON.stringify({error:200,msg:'检索降级',refarticles:null})}},rendered:{[cnkiPublicURL]:markup}});
+ const result=await env.publisher.inspectCNKI(env.item,{includeReferences:true});assert.equal(result.references.totalCount,null);assert.equal(result.references.complete,false);assert.notEqual(result.references.status,'empty');assert(result.references.diagnostics.some(row=>row.code==='service_degraded'));assert.equal(env.requests.filter(row=>row.url===cnkiRefsURL).length,1);
+});
+test('CNKI references reject offsite redirects and wrong article pages without importing or following',async()=>{
+ const env=cnkiSetup({url:cnkiPublicURL,cnkiReferences:CNKIReferences,pages:{[cnkiPublicURL]:cnkiMarkup(cnkiAnchor+cnkiRefDeclaration),[cnkiRefsURL]:{status:302,headers:{Location:'https://external.test/references'}}}});
+ const result=await env.publisher.inspectCNKI(env.item,{includeReferences:true});assert.equal(result.status,'pdf_available');assert(result.references.diagnostics.some(row=>row.code==='unsafe_redirect'));assert.equal(env.requests.length,2);
+ const mismatch=cnkiSetup({url:cnkiPublicURL,title:'Different title',cnkiReferences:CNKIReferences,pages:{[cnkiPublicURL]:cnkiMarkup(cnkiAnchor+cnkiRefDeclaration)}});
+ const wrong=await mismatch.publisher.inspectCNKI(mismatch.item,{includeReferences:true});assert.equal(wrong.status,'article_mismatch');assert.equal(wrong.references,undefined);assert.equal(mismatch.requests.length,1);
+});
+test('CNKI reference-only login gates retain public rows and do not turn the main article into a login page',async()=>{
+ const refs='<section id="references"><ol><li><span class="reference-title">可公开读取的引用题名</span></li></ol><p>请先登录后查看其他参考文献</p></section>';
+ const env=cnkiSetup({url:cnkiPublicURL,cnkiReferences:CNKIReferences,pages:{[cnkiPublicURL]:cnkiMarkup(cnkiAnchor+refs+cnkiRefDeclaration)}});
+ const result=await env.publisher.inspectCNKI(env.item,{includeReferences:true});assert.equal(result.status,'pdf_available');assert.equal(result.references.status,'login_required');assert.equal(result.references.visibleCount,1);assert.equal(env.requests.length,1);
+});
+test('CNKI reference JSON endpoint returning HTML verification preserves the gate without a retry',async()=>{
+ const env=cnkiSetup({url:cnkiPublicURL,cnkiReferences:CNKIReferences,pages:{[cnkiPublicURL]:cnkiMarkup(cnkiAnchor+cnkiRefDeclaration),[cnkiRefsURL]:html('<h1>安全验证</h1><p>请输入验证码</p>')}});
+ const result=await env.publisher.inspectCNKI(env.item,{includeReferences:true});assert.equal(result.status,'pdf_available');assert.equal(result.references.status,'human_verification');assert.equal(result.references.totalCount,null);assert.equal(env.requests.length,2);assert.equal(env.hidden.length,0);
+});
+test('CNKI no-URL metadata probe supplies search handoff without network or guessed first result',async()=>{
+ const env=cnkiSetup({url:''});const result=await env.publisher.inspectCNKI(env.item);assert.equal(result.status,'needs_url');assert.equal(result.searchURL,CNKI.searchURL(cnkiTitle));assert.equal(env.requests.length,0);assert.equal(result.record,null);
+});
+test('a DOI redirect to CNKI uses the CNKI parser instead of generic purchase discovery',async()=>{
+ const start='https://doi.org/10.1234/one';
+ const env=setup({url:'',doi:'10.1234/one',title:cnkiTitle,cnki:CNKI,pages:{[start]:{status:302,headers:{Location:cnkiURL}},[cnkiURL]:cnkiMarkup('<a id="ty_pdf" href="https://pay.cnki.net/order">PDF下载</a>')}});
+ const result=await env.publisher.acquire(env.item);assert.equal(result.cnkiStatus,'purchase_required');assert.deepEqual(env.requests.map(row=>row.url),[start,cnkiURL]);assert.equal(env.imports.length,0);
+});
+test('an external API download redirect cannot fetch a CNKI payment endpoint',async()=>{
+ const address='https://repository.test/fulltext',sources=sourceFixture([{url:address,source:'openalex',kind:'pdf'}]);
+ const env=setup({doi:'10.1234/one',sources,cnki:CNKI,sourceSettings:{enabled:{publisher:false}},pages:{[address]:{status:302,headers:{Location:'https://pay.cnki.net/order'}}}});
+ const result=await env.publisher.acquire(env.item);assert.equal(result.state,'not_found');assert.deepEqual(env.requests.map(row=>row.url),[address]);assert.equal(env.imports.length,0);
+});
 
 test('HTTP citation_pdf_url yields a verified PDF attached to the original item',async()=>{
   const env=setup({pages:{'https://publisher.test/article/one':html('<meta name="citation_pdf_url" content="/files/one.pdf">'),'https://publisher.test/files/one.pdf':{bytes:pdf(),type:'application/pdf'}}});

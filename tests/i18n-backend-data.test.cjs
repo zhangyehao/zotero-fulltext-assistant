@@ -14,6 +14,31 @@ function create({ backendFirst = true } = {}) {
   return scope;
 }
 
+test('publisher and CNKI controller status, progress and error messages are translated', () => {
+  const { FulltextI18n: i18n } = create();
+  // These modules use double-quoted message literals. Their catalog value is
+  // citation metadata, not plugin UI, and must remain unchanged in every locale.
+  const metadata = new Set(['中国知网 (CNKI)']);
+  const missing = [];
+  for (const file of ['publisher.js', 'cnki-controller.js']) {
+    const source = fs.readFileSync(path.join(__dirname, '../src', file), 'utf8');
+    const messages = new Set([...source.matchAll(/"(?:[^"\\]|\\.)*"/g)]
+      .filter(match => han.test(match[0])).map(match => JSON.parse(match[0]))
+      .filter(value => !metadata.has(value)));
+    assert(messages.size >= 20, file + ': expected the authored message catalog');
+    for (const message of messages) {
+      if (han.test(i18n.translate(message, 'en'))) missing.push(file + ': ' + message);
+      assert.equal(i18n.translate(message, 'zh-CN'), message);
+      assert(i18n.translate(message, 'zh-TW').trim(), message);
+    }
+  }
+  assert.deepEqual(missing, []);
+  for (const value of metadata) {
+    assert.equal(i18n.translate(value, 'en'), value);
+    assert.equal(i18n.translate(value, 'zh-TW'), value);
+  }
+});
+
 test('backend catalog has unique static trilingual rows and preserves every placeholder', () => {
   assert(rows.length >= 400);
   assert(Object.isFrozen(rows));

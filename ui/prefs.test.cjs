@@ -1725,6 +1725,138 @@ async function siteControls(mode = "request") {
     assert.equal(node("fta-pref-key-openalex").value, "pending-update-secret");
     isolated.FulltextPreferences.destroy();assert.equal(node("fta-pref-key-openalex").value, "", "unmount clears secret drafts");
   }
+  // CNKI settings keep session evidence distinct from permissions, preserve
+  // URL drafts, and require an explicit import of the currently parsed preview.
+  {
+    const pane = parseHTML("<html><body>" + markup + "</body></html>");
+    const node = id => pane.document.getElementById(id), actions = [];
+    const state = { version: "1.1.0", settings: { language: "zh-CN" }, session: { status: "signed_out" }, tasks: [], messages: [],
+      cnki: { enabled: true, sessionRemembered: false, checking: false, state: "idle", canImport: false, canEnrich: true, record: null, metadata: null } };
+    let emit, rejectSave = false, resolveInspect;
+    const record = { id: "CJFD:SYNTHETIC202601001", dbcode: "CJFD", dbname: "CJFDLAST2026", filename: "SYNTHETIC202601001", url: "https://kns.cnki.net/kcms2/article/abstract?v=synthetic" };
+    const metadata = { title: "<img src=x onerror=bad> 中文文献标题", doi: "", authors: ["张三", "<b>李四</b>"], journal: "测试期刊", date: "2026-01-01", abstract: "<script>unsafe()</script>原始摘要" };
+    const api = {
+      getSnapshot: () => structuredClone(state), subscribe: fn => { emit = fn;return () => {}; }, localize: target => i18n.apply(target, state.settings.language),
+      copyText: async value => actions.push(["copy", value]),
+      saveCNKISettings: async value => { actions.push(["cnkiSettings", { ...value }]);if (rejectSave) throw new Error("知网操作未完成，请重试。");Object.assign(state.cnki, value);emit();return structuredClone(state.cnki); },
+      openCNKILogin: async () => { actions.push(["cnkiLogin"]); },
+      resetCNKISession: async () => { actions.push(["cnkiReset"]);state.cnki.sessionRemembered = false;emit(); },
+      verifyCNKI: async () => { actions.push(["cnkiVerify"]);Object.assign(state.cnki, { state: "no_sample", message: "没有可验证的知网样本", record: null, metadata: null, canImport: false });emit();return structuredClone(state.cnki); },
+      inspectCNKIURL: async url => {
+        actions.push(["cnkiInspect", url]);state.cnki.checking = true;emit();
+        await new Promise(resolve => { resolveInspect = resolve; });
+        Object.assign(state.cnki, { state: "human_verification", checking: false, message: "需要网站验证", record, metadata, canImport: true, lastCheckedAt: "2026-11-15T08:30:00Z" });emit();return structuredClone(state.cnki);
+      },
+      importCNKIPreview: async () => { actions.push(["cnkiImport"]);return { imported: false, existing: true, itemID: 7, title: metadata.title, message: "文库中已有这篇文献，未重复导入。" }; },
+      fetchCNKIReferences: async () => {
+        actions.push(["cnkiReferences"]);
+        state.cnki.references = { state: "partial", total: 60, message: "已读取部分参考文献", items: Array.from({ length: 53 }, (_, index) => ({ id: "ref-" + index, title: index === 0 ? "尚未验证访问" : index === 1 ? "<img src=x onerror=bad> 引文" : index === 52 ? "" : "Reference " + index, raw: index === 52 ? "<script>unsafe()</script>未解析引文" : "", canImport: index < 51, authors: ["Author " + index], year: "2026", doi: index < 52 ? "10.1234/ref" + index : "" })) };emit();return structuredClone(state.cnki);
+      },
+      importCNKIReferences: async ids => { actions.push(["cnkiImportReferences", [...ids]]);return { imported: 2, existing: 1, skipped: 46, failed: 1, message: "参考文献导入已结束，请查看结果。" }; },
+      enrichSelectedCNKI: async () => { actions.push(["cnkiEnrich"]);const result = { selected: 3, updated: 1, unchanged: 1, skipped: 1, failed: 0, message: "已选择 3 项：补全 1 项，未更改 1 项，跳过 1 项，失败 0 项。" };state.cnki.summary = result;emit();return result; }
+    };
+    pane.window.Zotero = { FulltextAssistant: api };
+    const isolated = { window: pane.window, document: pane.document, Zotero: pane.window.Zotero, URL, Date };
+    vm.runInNewContext(script, isolated);await flush();
+    const type = value => { node("fta-pref-cnki-url").value = value;node("fta-pref-cnki-url").dispatchEvent(new pane.window.Event("input")); };
+    const submitURL = () => node("fta-pref-cnki-url-form").dispatchEvent(new pane.window.Event("submit", { cancelable: true }));
+    assert.equal(node("fta-pref-tabs").querySelectorAll('[role="tab"]').length, 4, "CNKI uses the existing settings tab");
+    assert.ok(node("fta-pref-panel-settings").contains(node("fta-pref-cnki")));
+    assert.deepEqual(actions, [], "mounting settings performs no website request or import");
+    assert.equal(node("fta-pref-cnki-enabled").checked, true);
+    assert.equal(node("fta-pref-cnki-inspect").disabled, true);
+    assert.equal(node("fta-pref-cnki-import").disabled, true);
+    node("fta-pref-tab-settings").click();
+    state.cnki.sessionRemembered = true;emit();
+    assert.match(node("fta-pref-cnki-session").textContent, /会话.*仍需验证/);
+    assert.equal(node("fta-pref-cnki-state").textContent, "尚未验证访问", "allowing session persistence does not assert that cookies, login or PDF permission exist");
+    node("fta-pref-cnki-enabled").checked = false;node("fta-pref-cnki-enabled").dispatchEvent(new pane.window.Event("change"));await flush();
+    assert.deepEqual(actions.at(-1), ["cnkiSettings", { enabled: false }]);assert.equal(state.cnki.enabled, false);
+    rejectSave = true;node("fta-pref-cnki-enabled").checked = true;node("fta-pref-cnki-enabled").dispatchEvent(new pane.window.Event("change"));await flush();
+    assert.equal(node("fta-pref-cnki-enabled").checked, false, "failed saves restore the persisted source toggle");
+    assert.equal(node("fta-pref-cnki-action-status").dataset.error, "true");rejectSave = false;
+    assert.equal(node("fta-pref-cnki-verify").disabled, true, "source-dependent actions are unavailable while CNKI is disabled");
+    node("fta-pref-cnki-enabled").checked = true;node("fta-pref-cnki-enabled").dispatchEvent(new pane.window.Event("change"));await flush();
+    const url = "https://kns.cnki.net/kcms2/article/abstract?dbcode=CJFD&filename=SYNTHETIC202601001";
+    type(url);submitURL();await flush();
+    assert.deepEqual(actions.at(-1), ["cnkiInspect", url]);
+    for (const id of ["enabled", "url", "login", "verify", "reset", "inspect", "import", "enrich"]) assert.equal(node("fta-pref-cnki-" + id).disabled, true, id + " is disabled during an active CNKI action");
+    const pendingCalls = actions.length;node("fta-pref-cnki-import").click();submitURL();assert.equal(actions.length, pendingCalls, "busy controls cannot trigger duplicate mutations");
+    resolveInspect();await flush();
+    assert.equal(node("fta-pref-cnki-preview").hidden, false);
+    assert.equal(node("fta-pref-cnki-state").textContent, "需要网站验证");
+    assert.equal(node("fta-pref-cnki-import").disabled, false, "readable metadata can be imported while PDF access requires website verification");
+    assert.equal(actions.some(action => action[0] === "cnkiImport"), false, "parsing does not create an item");
+    assert.equal(node("fta-pref-cnki-metadata").querySelector("img,script,b"), null);
+    assert.match(node("fta-pref-cnki-metadata").textContent, /<img src=x onerror=bad>/);
+    assert.match(node("fta-pref-cnki-metadata").textContent, /<b>李四<\/b>/);
+    const previewID = [...node("fta-pref-cnki-metadata").querySelectorAll("button")].find(button => button.getAttribute("aria-label") === "复制知网标识");
+    previewID.click();await flush();assert.deepEqual(actions.at(-1), ["copy", record.id]);
+    type(url + "&draft=retained");state.settings.language = "en";emit();node("fta-pref-tab-messages").click();node("fta-pref-tab-settings").click();
+    assert.equal(node("fta-pref-cnki-url").value, url + "&draft=retained");
+    assert.equal(node("fta-pref-cnki-import").disabled, true, "an edited URL cannot silently import the previous preview");
+    assert.equal(node("fta-pref-cnki-preview-stale").hidden, false);
+    assert.match(node("fta-pref-cnki-preview-stale").textContent, /link has changed/);
+    assert.equal(node("fta-pref-cnki-heading").textContent, "CNKI");
+    assert.match(node("fta-pref-cnki-session").textContent, /Saving the CNKI session is enabled.*needs verification/);
+    assert.match(node("fta-pref-cnki-metadata").textContent, /中文文献标题/, "source metadata stays raw when the UI language changes");
+    submitURL();await flush();resolveInspect();await flush();node("fta-pref-cnki-import").click();await flush();
+    assert.deepEqual(actions.at(-1), ["cnkiImport"]);
+    assert.equal(node("fta-pref-cnki-action-status").textContent, "This article already exists in the library. No duplicate was imported.", "the dedupe result remains visible without claiming a new item was created");
+    node("fta-pref-cnki-fetch-references").click();await flush();assert.deepEqual(actions.at(-1), ["cnkiReferences"]);
+    const references = () => [...node("fta-pref-cnki-reference-list").querySelectorAll("input[type=checkbox]")];
+    assert.equal(references().length, 25, "reference rendering is paged even when extraction yields more entries");
+    assert.equal(references().some(checkbox => checkbox.checked), false, "references are never selected for import by default");
+    assert.equal(node("fta-pref-cnki-import-references").disabled, true);
+    assert.match(node("fta-pref-cnki-reference-state").textContent, /Some references retrieved.*53 of 60/);
+    assert.match(node("fta-pref-cnki-reference-list").textContent, /尚未验证访问/, "reference titles are not translated as UI text");
+    assert.equal(node("fta-pref-cnki-reference-list").querySelector("img,script"), null);
+    const chooseReference = (checkbox, selected) => { checkbox.checked = selected;checkbox.dispatchEvent(new pane.window.Event("change")); };
+    references().forEach(checkbox => chooseReference(checkbox, true));
+    const selectedNode = references()[0];state.cnki.message = "需要网站验证";emit();assert.equal(references()[0], selectedNode, "unrelated CNKI status changes preserve reference controls");
+    node("fta-pref-cnki-reference-next").click();references().forEach(checkbox => chooseReference(checkbox, true));
+    assert.equal(node("fta-pref-cnki-reference-selection").textContent, "50 of 50 selected");
+    node("fta-pref-cnki-reference-next").click();assert.equal(references().length, 3);
+    assert.equal(references().every(checkbox => checkbox.disabled), true, "selection limit and unreliable title both prevent extra imports");
+    assert.match(node("fta-pref-cnki-reference-list").textContent, /Title unverified; import unavailable/);
+    assert.match(node("fta-pref-cnki-reference-list").textContent, /<script>unsafe\(\)<\/script>/);
+    node("fta-pref-cnki-reference-previous").click();chooseReference(references()[0], false);
+    node("fta-pref-cnki-reference-next").click();assert.equal(references()[0].disabled, false);assert.equal(references()[1].disabled, true, "a display title alone cannot override a false canImport flag");assert.equal(references()[2].disabled, true);
+    chooseReference(references()[0], true);
+    state.cnki.references.state = "loading";emit();assert.equal(node("fta-pref-cnki-import-references").disabled, true);
+    assert.equal(node("fta-pref-cnki-fetch-references").disabled, true);
+    state.cnki.references.state = "partial";emit();node("fta-pref-cnki-import-references").click();await flush();
+    assert.equal(actions.at(-1)[0], "cnkiImportReferences");assert.equal(actions.at(-1)[1].length, 50);
+    assert.equal(actions.at(-1)[1].includes("ref-25"), false);assert.equal(actions.at(-1)[1].includes("ref-50"), true);assert.equal(actions.at(-1)[1].includes("ref-52"), false);
+    assert.match(node("fta-pref-cnki-action-status").textContent, /2 new, 1 existing, 46 skipped, 1 failed/);
+    assert.equal(node("fta-pref-cnki-import-references").disabled, true, "completed reference import clears selections without claiming every item succeeded");
+    assert.equal(node("fta-pref-cnki-reference-selection").textContent, "0 of 50 selected");
+    api.importCNKIReferences = async () => ({ imported: 1, existing: 0, skipped: 0, failed: 0, cancelled: true, message: "操作已取消，已保存的条目保留。" });
+    chooseReference(references()[0], true);node("fta-pref-cnki-import-references").click();await flush();
+    assert.match(node("fta-pref-cnki-action-status").textContent, /operation was cancelled.*Saved items are retained.*1 new/, "cancelled imports still report committed items");
+    api.fetchCNKIReferences = async () => { state.cnki.references = { state: "error", items: [], total: null, message: "参考文献提取失败，请核对原文页面后重试。" };emit();return structuredClone(state.cnki); };
+    node("fta-pref-cnki-fetch-references").click();await flush();assert.equal(node("fta-pref-cnki-action-status").dataset.error, "true");
+    assert.match(node("fta-pref-cnki-action-status").textContent, /Reference extraction failed/, "a reference error inside the snapshot is not reported as successful article parsing");
+    node("fta-pref-cnki-enrich").click();await flush();assert.deepEqual(actions.at(-1), ["cnkiEnrich"]);
+    assert.equal(node("fta-pref-cnki-summary").hidden, false);assert.match(node("fta-pref-cnki-summary").textContent, /3/);
+    state.cnki.summary.cancelled = true;emit();assert.match(node("fta-pref-cnki-summary").textContent, /operation was cancelled.*3 items selected: 1 completed/, "cancelled enrichment preserves its committed counts");
+    state.cnki.canEnrich = false;emit();assert.equal(node("fta-pref-cnki-enrich").disabled, true);
+    state.settings.language = "zh-TW";emit();assert.equal(node("fta-pref-cnki-heading").textContent, "知網");assert.equal(node("fta-pref-cnki-import").textContent, "匯入為新條目");
+    state.tasks = [{ id: "cnki-no-doi", itemID: 80, title: "无 DOI 的知网文献", doi: "", cnkiRecord: record, state: "imported", attachmentID: 81, source: "cnki", discoveryProvider: "cnki", completedAt: "2026-11-15T08:00:00Z" }];
+    node("fta-pref-tab-tasks").click();node("fta-pref-task-filters").querySelector('[data-filter="all"]').click();emit();
+    const taskID = node("fta-pref-task-list").querySelector(".fta-cnki-copy");assert.ok(taskID);taskID.click();await flush();assert.deepEqual(actions.at(-1), ["copy", record.id]);
+    assert.match(node("fta-pref-task-list").textContent, /發現來源：知網/);
+    node("fta-pref-task-search").value = record.id;node("fta-pref-task-search").dispatchEvent(new pane.window.Event("input"));await new Promise(resolve => setTimeout(resolve, 150));
+    assert.equal(node("fta-pref-task-list").children.length, 1, "no-DOI tasks remain searchable by CNKI identifier");
+    node("fta-pref-tab-settings").click();node("fta-pref-cnki-login").click();await flush();assert.deepEqual(actions.at(-1), ["cnkiLogin"]);
+    node("fta-pref-cnki-reset").click();await flush();assert.deepEqual(actions.at(-1), ["cnkiReset"]);assert.equal(state.cnki.sessionRemembered, false);
+    assert.equal(node("fta-pref-cnki-url").value, url + "&draft=retained", "reset does not erase an unsaved URL");
+    node("fta-pref-cnki-verify").click();await flush();assert.deepEqual(actions.at(-1), ["cnkiVerify"]);
+    assert.equal(node("fta-pref-cnki-state").textContent, "沒有可驗證的知網樣本");assert.equal(node("fta-pref-cnki-preview").hidden, true);
+    api.verifyCNKI = async () => { state.cnki.state = "error";state.cnki.message = "知网操作未完成，请重试。";emit();return structuredClone(state.cnki); };
+    node("fta-pref-cnki-verify").click();await flush();assert.equal(node("fta-pref-cnki-action-status").dataset.error, "true", "resolved error snapshots are not presented as successful checks");
+    isolated.FulltextPreferences.destroy();
+  }
   // A complete large history stays searchable while only one bounded page is
   // mounted. Background notifications must not replace unchanged controls.
   {
@@ -1897,5 +2029,5 @@ async function siteControls(mode = "request") {
   assert.match(checkInSite.get("ft-status").textContent, /View the balance and reward in AbleSci settings/);
   checkInSite.setLanguage("zh-TW");await flush();assert.equal(checkInSite.get("ft-read").textContent, "刷新簽到狀態");
   checkInSite.close();assert.equal(checkInSite.languageSubscriptions(), 0);
-  console.log("Preferences tests passed: batch scopes and exclusive filters, completed history, three-language UI and browser chrome, preserved drafts and metadata, title/DOI copy, download diagnosis and explicit review, institutional confirmation/undo, source credentials and quota consent, template validation, native update controls, existing task workflows and cleanup.");
+  console.log("Preferences tests passed: batch scopes and exclusive filters, completed history, three-language UI and browser chrome, preserved drafts and metadata, title/DOI copy, download diagnosis and explicit review, institutional confirmation/undo, source credentials and quota consent, template validation, native update controls, CNKI metadata preview/import and explicit paged reference selection, existing task workflows and cleanup.");
 })().catch(error => { console.error(error); process.exitCode = 1; });

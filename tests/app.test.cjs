@@ -40,7 +40,7 @@ function environment({acquire,initialTasks,initialQueue,initialAccessHistory,ini
   const Services={prefs:{getIntPref(key,fallback){return prefs.get(key)??fallback;},getBoolPref(key,fallback){return prefs.get(key)??fallback;},getStringPref(key,fallback){return prefs.get(key)??fallback;},setIntPref(key,value){prefs.set(key,value);},setBoolPref(key,value){prefs.set(key,value);},setStringPref(key,value){prefs.set(key,value);}},prompt:{alert(){}}};
   const pdf=new TextEncoder().encode('%PDF-1.7\n'+'0'.repeat(1200)+'\n%%EOF\n');
   const Zotero={DataDirectory:{dir:'C:\\isolated'},Items:{async getAsync(id){return items.get(id);}},Libraries:{get(){return {editable:true,filesEditable:true};}},MenuManager:{registerMenu(value){menus.set(value.menuID,value);return value.menuID;},unregisterMenu(id){menus.delete(id);}},PreferencePanes:{async register(value){return value.id;}},Utilities:{Internal:{openPreferences(){}}},getMainWindow(){return {openDialog(){return {closed:false,close(){this.closed=true;},focus(){}};}};},logError(error){errors.push(error);},Promise:{delay(ms){return new Promise(resolve=>setTimeout(resolve,Math.min(ms,5)));}},HTTP:{async request(method,url){httpCalls.push({method,url});return {status:200,response:pdf.buffer,responseURL:url,getResponseHeader(){return 'application/pdf';}};}},Attachments:{async createTemporaryStorageDirectory(){return {path:'C:\\isolated\\publisher-temp'};},async importFromFile(options){importCount++;imports.push(options);return {id:900,setField(){},async saveTx(){}};},getFileBaseNameFromItem(){return 'fixture-paper';},getFileResolvers(){oaCalls++;return [];}}};
-  const scope={URL,URLSearchParams,Promise,Date:AppDate,JSON,Set,Map,Uint8Array,ArrayBuffer,TextDecoder,TextEncoder,crypto:webcrypto,FulltextSources:sourceModule,FulltextUpdate:updateModule,FulltextSourceUsage:require("../src/source-usage.js"),FulltextTaskModel:MODEL,FulltextPublisherWindow:{create(){return {open(){},destroy(){}};}},setInterval(callback,ms){timers.push({callback,ms});return timers.length;},clearInterval(){},FulltextCredentials:{create(){return credentials;}},FulltextSession:{create(){return session;}},FulltextAbleSci:{create(){return adapter;}}};
+  const scope={URL,URLSearchParams,TextEncoder,Promise,Date:AppDate,JSON,Set,Map,Uint8Array,ArrayBuffer,TextDecoder,TextEncoder,crypto:webcrypto,FulltextSources:sourceModule,FulltextUpdate:updateModule,FulltextSourceUsage:require("../src/source-usage.js"),FulltextCNKI:require('../src/cnki.js'),FulltextTaskModel:MODEL,FulltextPublisherWindow:{create(){return {open(){},destroy(){}};}},setInterval(callback,ms){timers.push({callback,ms});return timers.length;},clearInterval(){},FulltextCredentials:{create(){return credentials;}},FulltextSession:{create(){return session;}},FulltextAbleSci:{create(){return adapter;}}};
   vm.runInNewContext(publisherSource,scope);
   vm.runInNewContext(publisherWindowSource,scope);
   vm.runInNewContext(downloadWatchSource,scope);
@@ -1197,11 +1197,11 @@ test('context menu has one branded submenu, live points, and selection-aware act
   const registration=env.menus.get('fulltext-assistant');assert.equal(registration.target,'main/library/item');
   assert.equal(registration.menus.length,1);const parent=registration.menus[0];
   assert.equal(parent.menuType,'submenu');assert.equal(parent.icon,'file:///fixture/assets/icon-16.png');
-  assert.deepEqual(Array.from(parent.menus,entry=>entry.menuType),['menuitem','menuitem','separator','menuitem']);
+  assert.deepEqual(Array.from(parent.menus,entry=>entry.menuType),['menuitem','menuitem','menuitem','menuitem','separator','menuitem']);
   const context={items:[],label:'',enabled:null,menuElem:{setAttribute(name,value){if(name==='label')context.label=value;}},setEnabled(value){context.enabled=!!value;}};
   parent.onShowing(null,context);assert.equal(context.label,'全文助手');assert.equal(context.enabled,true);
   parent.menus[0].onShowing(null,context);assert.equal(context.label,'批量获取全文');assert.equal(context.enabled,false);
-  parent.menus[3].onShowing(null,context);assert.equal(context.label,'任务与设置');assert.equal(context.enabled,true);
+  parent.menus[5].onShowing(null,context);assert.equal(context.label,'任务与设置');assert.equal(context.enabled,true);
   context.items=[item(1)];parent.menus[0].onShowing(null,context);assert.equal(context.enabled,true);
   parent.menus[1].onShowing(null,context);assert.match(context.label,/10 积分/);
   await env.app.saveSettings({points:27});parent.menus[1].onShowing(null,context);assert.match(context.label,/27 积分/);
@@ -1876,4 +1876,15 @@ test('a PDF added during manual import is recorded as existing without attributi
   const write=env.IOUtils.write;env.IOUtils.write=async(...args)=>{await write(...args);env.installAttachment({id:950});};
   await env.app.start();await env.app.importLocalPDF(task.id);const done=env.app.getSnapshot().tasks[0];
   assert.equal(done.source,'existing');assert.equal(done.attachmentID,950);assert.equal(done.discoveryProvider,'');assert.equal(done.pdfHost,'');assert.equal(done.assistReceipt,null);assert.equal(env.importCount,0);await env.app.stop();
+});
+test('opaque CNKI detail review binds the original URL by digest and survives restart without exposing it',async()=>{
+  let articleURL='https://kns.cnki.net/kcms2/article/abstract?v=PRIVATE_OPAQUE_VALUE';
+  const CNKI=require('../src/cnki.js'),record=CNKI.normalizeRecord('https://kns.cnki.net/KCMS/detail/detail.aspx?dbcode=CJFD&filename=TEST202401001');
+  let env;env=environment({acquire:async()=>({needsReview:true,reviewBytes:env.pdf,source:'cnki',discoveryProvider:'cnki',cnkiRecord:record,paper:{doi:'',title:'无标识中文论文的完整测试题名用于人工核对',cnkiRecord:null},sourceURL:record.url}),pdfIdentity:{async inspect(){return {status:'unknown',message:'needs review'};}}});
+  const parent=item(81);parent.getField=field=>field==='url'?articleURL:field==='title'?'无标识中文论文的完整测试题名用于人工核对':'';env.addItem(parent);
+  await env.app.start();await env.app.captureItems([parent]);await until(()=>env.app.getSnapshot().tasks[0]?.state==='manual_review');
+  const task=env.app.getSnapshot().tasks[0];assert.equal(task.cnkiRecord.id,record.id);assert.equal(task.sourceReview.cnkiRecord,null);assert.match(task.sourceReview.cnkiURLHash,/^[a-f0-9]{64}$/);assert.doesNotMatch(env.files.get(queuePath),/PRIVATE_OPAQUE_VALUE/);
+  await env.app.stop();const restored=environment({initialQueue:MODEL.deserializeQueue(env.files.get(queuePath)),pdfIdentity:{async inspect(){return {status:'unknown'};}}});restored.addItem(parent);
+  for(const [path,bytes] of env.files)if(path.endsWith('review-'+task.id+'.pdf'))restored.files.set(path,bytes);
+  await restored.app.start();articleURL='https://kns.cnki.net/kcms2/article/abstract?v=DIFFERENT_ARTICLE';await assert.rejects(restored.app.confirmDownloadedPDF(task.id),/已改变/);assert.equal(restored.importCount,0);await restored.app.stop();
 });

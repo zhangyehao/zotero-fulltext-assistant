@@ -22,6 +22,10 @@
     let accountDirty = false;
     let sourceSettingsDirty = false;
     let sourceCredentialsDirty = false;
+    let cnkiPreviewDirty = false;
+    let cnkiPreviewKey = "";
+    let cnkiReferenceKey = "", cnkiReferenceRecord = "", cnkiReferencePage = 0;
+    const selectedCNKIReferences = new Set();
     let autoUpdateSaving = false;
     let checkInStartupError = "";
     let destroyed = false;
@@ -58,7 +62,7 @@
     };
     const accountLabels = { authenticated: "已登录", logged_in: "已登录", signed_out: "未登录", logged_out: "未登录", pending_login: "需要登录", expired: "登录已过期", checking: "正在登录", logging_in: "正在登录", captcha: "需要验证", error: "登录失败", unknown: "待验证", unverified: "待验证" };
     const filterLabels = { unfinished: "未完成", all: "全部历史", success: "已获取", login: "需网页登录", fallback: "待兜底", active: "进行中" };
-    const sourceLabels = { publisher: "出版社网页", rendered_publisher: "出版社网页", open_access: "开放获取", existing: "已有附件", ablesci: "科研通", local_file: "本地 PDF", edge_browser: "Edge 浏览器", browser_download: "浏览器下载", openalex: "OpenAlex", pmc: "PubMed Central", core: "CORE", semanticScholar: "Semantic Scholar", custom: "自定义来源" };
+    const sourceLabels = { publisher: "出版社网页", rendered_publisher: "出版社网页", open_access: "开放获取", existing: "已有附件", ablesci: "科研通", local_file: "本地 PDF", edge_browser: "Edge 浏览器", browser_download: "浏览器下载", openalex: "OpenAlex", pmc: "PubMed Central", core: "CORE", semanticScholar: "Semantic Scholar", custom: "自定义来源", cnki: "知网" };
     const sourceProviderIDs = ["publisher", "openAccess", "openalex", "pmc", "core", "semanticScholar", "custom"];
     const sourceKeyIDs = ["openalex", "core", "semanticScholar"];
     const sourceSettingIDs = [...sourceProviderIDs.map(id => "fta-pref-source-" + id), "fta-pref-source-version", "fta-pref-source-templates", "fta-pref-openalex-content", "fta-pref-openalex-limit", "fta-pref-core-content", "fta-pref-core-limit"];
@@ -82,7 +86,7 @@
     const currentTasks = () => Array.isArray(snapshot.tasks) ? snapshot.tasks : [];
     const searchTerms = value => String(value || "").normalize("NFKC").trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
     const includesTerms = (terms, values) => { const text = values.filter(Boolean).join(" ").normalize("NFKC").toLocaleLowerCase();return terms.every(term => text.includes(term)); };
-    const matchesTaskSearch = task => includesTerms(searchTerms(taskQuery), [titleText(task.title), task.doi, task.requestID, task.discoveryProvider, task.pdfHost]);
+    const matchesTaskSearch = task => includesTerms(searchTerms(taskQuery), [titleText(task.title), task.doi, task.cnkiRecord?.id, task.requestID, task.discoveryProvider, task.pdfHost]);
     function reconcileRows(list, rows) {
       // Move only changed rows. Unchanged controls retain focus, selection and
       // scroll anchoring while background progress updates other records.
@@ -265,6 +269,109 @@
         clear.disabled = busy || typeof app.saveSourceCredentials !== "function" || !saved;
       }
       $("fta-pref-save-source-keys").disabled = busy || typeof app.saveSourceCredentials !== "function";
+    }
+    function renderCNKI() {
+      const info = snapshot.cnki || {}, working = busy || info.checking === true;
+      const state = info.checking ? "checking" : info.state || "idle";
+      const labels = { idle: "尚未验证访问", checking: "正在检查知网…", metadata_ready: "已读取元数据", login_required: "需要知网登录", human_verification: "需要网站验证", purchase_required: "网站要求购买", access_denied: "没有文献访问权限", caj_only: "仅有 CAJ 文件", not_found: "未找到知网文献", error: "知网检查未完成", no_sample: "没有可验证的知网样本" };
+      $("fta-pref-cnki").setAttribute("aria-busy", String(working));
+      $("fta-pref-cnki-state").textContent = labels[state] || "尚未验证访问";
+      $("fta-pref-cnki-state").dataset.tone = state === "error" ? "error" : ["login_required", "human_verification", "purchase_required", "access_denied", "caj_only"].includes(state) ? "warning" : "";
+      $("fta-pref-cnki-enabled").checked = info.enabled !== false;
+      $("fta-pref-cnki-enabled").disabled = working || typeof app.saveCNKISettings !== "function";
+      $("fta-pref-cnki-session").textContent = info.sessionRemembered === true ? "已允许保存知网会话；当前访问权限仍需验证。" : "尚未开启知网会话保存。";
+      $("fta-pref-cnki-message").textContent = String(info.message || "");
+      $("fta-pref-cnki-message").hidden = !info.message;
+      $("fta-pref-cnki-message").dataset.error = String(state === "error");
+      $("fta-pref-cnki-checked").textContent = info.lastCheckedAt ? "最近检查 " + dateText(info.lastCheckedAt, true) : "";
+      $("fta-pref-cnki-checked").hidden = !info.lastCheckedAt;
+      const methods = { login: "openCNKILogin", reset: "resetCNKISession", verify: "verifyCNKI", inspect: "inspectCNKIURL", import: "importCNKIPreview", enrich: "enrichSelectedCNKI" };
+      for (const [id, method] of Object.entries(methods)) $("fta-pref-cnki-" + id).disabled = working || typeof app[method] !== "function";
+      for (const id of ["verify", "inspect", "import", "enrich"]) $("fta-pref-cnki-" + id).disabled ||= info.enabled === false;
+      $("fta-pref-cnki-url").disabled = working || typeof app.inspectCNKIURL !== "function";
+      $("fta-pref-cnki-inspect").disabled ||= !String($("fta-pref-cnki-url").value || "").trim();
+      $("fta-pref-cnki-import").disabled ||= info.canImport !== true || !info.record?.id || !info.metadata?.title || cnkiPreviewDirty;
+      $("fta-pref-cnki-enrich").disabled ||= info.canEnrich === false;
+      $("fta-pref-cnki-preview-stale").hidden = !cnkiPreviewDirty;
+      const metadata = info.metadata || {}, record = info.record || {};
+      const hasPreview = Boolean(metadata.title || record.id);
+      $("fta-pref-cnki-preview").hidden = !hasPreview;
+      const key = JSON.stringify([metadata, record, snapshot.settings?.language]);
+      if (key !== cnkiPreviewKey) {
+        cnkiPreviewKey = key;
+        const list = $("fta-pref-cnki-metadata");list.textContent = "";
+        const authors = Array.isArray(metadata.authors) ? metadata.authors.filter(value => typeof value === "string").join(" · ") : "";
+        const fields = [["题名", titleText(metadata.title)], ["作者", authors], ["期刊", metadata.journal], ["发表日期", metadata.date], ["DOI", metadata.doi], ["知网标识", record.id], ["摘要", metadata.abstract]];
+        for (const [label, value] of fields) {
+          if (!value) continue;
+          list.append(make("dt", "", label));
+          const detail = make("dd");
+          if (label === "知网标识" || label === "DOI") detail.append(copyControl(String(value), label === "DOI" ? "复制 DOI" : "复制知网标识"));
+          else detail.append(raw(make("span", "", value)));
+          list.append(detail);
+        }
+      }
+      const summary = info.summary;
+      $("fta-pref-cnki-summary").textContent = summary && ["selected", "updated", "unchanged", "skipped", "failed"].every(field => Number.isSafeInteger(summary[field]) && summary[field] >= 0)
+        ? (summary.cancelled ? "操作已取消，已保存的条目保留。" : "") + "已选择 " + summary.selected + " 项：补全 " + summary.updated + " 项，未更改 " + summary.unchanged + " 项，跳过 " + summary.skipped + " 项，失败 " + summary.failed + " 项。" : String(summary?.message || "");
+      $("fta-pref-cnki-summary").hidden = !$("fta-pref-cnki-summary").textContent;
+      $("fta-pref-cnki-summary").dataset.error = String(summary?.failed > 0);
+      renderCNKIReferences();
+    }
+    const cnkiReferenceItems = () => Array.isArray(snapshot.cnki?.references?.items) ? snapshot.cnki.references.items : [];
+    const canImportCNKIReference = item => typeof item?.id === "string" && Boolean(item.id) && typeof item.title === "string" && Boolean(item.title.trim()) && item.canImport === true;
+    function renderCNKIReferenceSelection() {
+      const info = snapshot.cnki || {}, loading = info.references?.state === "loading";
+      const disabled = busy || info.checking === true || loading || info.enabled === false || cnkiPreviewDirty;
+      $("fta-pref-cnki-import-references").disabled = disabled || !selectedCNKIReferences.size || typeof app.importCNKIReferences !== "function";
+      $("fta-pref-cnki-reference-selection").textContent = "已选择 " + selectedCNKIReferences.size + " / 50 项";
+      for (const checkbox of $("fta-pref-cnki-reference-list").querySelectorAll("input[type=checkbox]")) {
+        checkbox.disabled = disabled || checkbox.dataset.importable !== "true" || !checkbox.checked && selectedCNKIReferences.size >= 50;
+      }
+    }
+    function renderCNKIReferences() {
+      const info = snapshot.cnki || {}, refs = info.references || {}, items = cnkiReferenceItems();
+      const recordID = String(info.record?.id || "");
+      if (recordID !== cnkiReferenceRecord) { cnkiReferenceRecord = recordID;selectedCNKIReferences.clear();cnkiReferencePage = 0; }
+      const eligible = new Set(items.filter(canImportCNKIReference).map(item => item.id));
+      for (const id of selectedCNKIReferences) if (!eligible.has(id)) selectedCNKIReferences.delete(id);
+      const working = busy || info.checking === true || refs.state === "loading";
+      $("fta-pref-cnki-fetch-references").disabled = working || cnkiPreviewDirty || !recordID || info.enabled === false || typeof app.fetchCNKIReferences !== "function";
+      const labels = { idle: "尚未提取参考文献", loading: "正在提取参考文献…", ready: "参考文献已读取", partial: "已读取部分参考文献", login_required: "需要知网登录", human_verification: "需要网站验证", access_denied: "没有文献访问权限", unavailable: "此页面未提供可读取的参考文献", error: "参考文献提取未完成" };
+      const count = Number.isSafeInteger(refs.total) && refs.total >= items.length ? "已显示 " + items.length + " / " + refs.total + " 条参考文献" : "已读取 " + items.length + " 条参考文献";
+      $("fta-pref-cnki-reference-state").textContent = (labels[refs.state] || labels.idle) + (items.length || refs.total === 0 ? " · " + count : "");
+      $("fta-pref-cnki-reference-message").textContent = String(refs.message || "");
+      $("fta-pref-cnki-reference-message").hidden = !refs.message;
+      $("fta-pref-cnki-reference-message").dataset.error = String(refs.state === "error");
+      const pages = Math.max(1, Math.ceil(items.length / 25));cnkiReferencePage = Math.max(0, Math.min(cnkiReferencePage, pages - 1));
+      $("fta-pref-cnki-reference-pagination").hidden = pages < 2;
+      $("fta-pref-cnki-reference-previous").disabled = working || cnkiReferencePage === 0;
+      $("fta-pref-cnki-reference-next").disabled = working || cnkiReferencePage + 1 >= pages;
+      $("fta-pref-cnki-reference-page-status").textContent = "第 " + (cnkiReferencePage + 1) + "/" + pages + " 页 · " + (items.length ? cnkiReferencePage * 25 + 1 : 0) + "–" + Math.min(items.length, (cnkiReferencePage + 1) * 25) + " / " + items.length + " 项";
+      const key = JSON.stringify([recordID, refs, snapshot.settings?.language, cnkiReferencePage]);
+      if (key !== cnkiReferenceKey) {
+        cnkiReferenceKey = key;
+        const list = $("fta-pref-cnki-reference-list");list.textContent = "";
+        for (const item of items.slice(cnkiReferencePage * 25, (cnkiReferencePage + 1) * 25)) {
+          const row = make("div", "fta-cnki-reference-row"), label = make("label", "fta-cnki-reference-label"), checkbox = make("input");
+          checkbox.type = "checkbox";checkbox.checked = selectedCNKIReferences.has(item.id);checkbox.dataset.importable = String(canImportCNKIReference(item));
+          checkbox.setAttribute("aria-label", "选择参考文献：" + (item.title || item.raw || item.id));
+          checkbox.addEventListener("change", () => {
+            if (checkbox.disabled) return;
+            if (checkbox.checked && selectedCNKIReferences.size < 50) selectedCNKIReferences.add(item.id);
+            else { selectedCNKIReferences.delete(item.id);checkbox.checked = false; }
+            renderCNKIReferenceSelection();localize();
+          });
+          label.append(checkbox, raw(make("span", "", item.title || item.raw || item.id)));row.append(label);
+          const metadata = make("div", "fta-cnki-reference-meta");
+          const authors = (Array.isArray(item.authors) ? item.authors.filter(value => typeof value === "string").join(" · ") : typeof item.authors === "string" ? item.authors : "") || String(item.authorText || "");
+          const detail = [authors, item.year].filter(Boolean).join(" · ");if (detail) metadata.append(raw(make("span", "", detail)));
+          if (item.doi) { if (detail) metadata.append(document.createTextNode(" · "));metadata.append(copyControl(String(item.doi), "复制 DOI")); }
+          if (!canImportCNKIReference(item)) metadata.append(make("span", "fta-note", "题名待核实，暂不可导入"));
+          row.append(metadata);list.append(row);
+        }
+      }
+      renderCNKIReferenceSelection();
     }
     function sourceSettingsInput() {
       const limitText = String($("fta-pref-openalex-limit").value || "").trim();
@@ -465,7 +572,7 @@
       const queuePositions = new Map(tasks.filter(task => task.state === "queued").map((task, index) => [task.id, index + 1]));
       const matching = tasks.filter(task => matchesFilter(task, taskFilter));
       const terms = searchTerms(taskQuery);
-      const visible = terms.length ? matching.filter(task => includesTerms(terms, [titleText(task.title), task.doi, task.requestID, task.discoveryProvider, task.pdfHost])) : matching;
+      const visible = terms.length ? matching.filter(task => includesTerms(terms, [titleText(task.title), task.doi, task.cnkiRecord?.id, task.requestID, task.discoveryProvider, task.pdfHost])) : matching;
       if (taskFilter === "success" || taskFilter === "all") visible.sort((a, b) => String(b.completedAt || b.importedAt || b.updatedAt || "").localeCompare(String(a.completedAt || a.importedAt || a.updatedAt || "")));
       if (bindingState && !visible.some(task => task.id === bindingState.taskId && task.state === "available" && !task.itemID)) bindingState = null;
       const eligibleIDs = new Set(visible.filter(canAssist).map(task => task.id));
@@ -576,10 +683,11 @@
         const pointsLabel = hasRequest || task.source === "ablesci" ? knownPoints ? task.assistReceipt?.adoption === "accepted" ? "已支出 " + task.requestedPoints + " 积分" : "悬赏 " + task.requestedPoints + " 积分（待采纳）" : "积分待核实" : "";
         const fulltextVersionLabels = { published: "全文版本：出版版", accepted: "全文版本：作者接受稿", submitted: "全文版本：预印本", unknown: "全文版本：版本未核实" };
         const versionLabel = acquired && (task.fulltextVersion || ["openalex", "pmc", "core", "semanticScholar", "custom"].includes(task.source)) ? fulltextVersionLabels[task.fulltextVersion] || fulltextVersionLabels.unknown : "";
-        const meta = (acquired ? [completedDate ? "完成 " + completedDate : "完成日期未记录", ...sourceText(task), versionLabel, task.source === "ablesci" ? pointsLabel : "", route, task.doi] : [task.doi, task.requestID ? "求助 " + task.requestID : "", pointsLabel, route ? "来源：科研通" : "", route, task.lastCheckedAt ? "最近检查 " + dateText(task.lastCheckedAt) : ""]).filter(Boolean);
+        const articleID = task.doi || task.cnkiRecord?.id || "";
+        const meta = (acquired ? [completedDate ? "完成 " + completedDate : "完成日期未记录", ...sourceText(task), versionLabel, task.source === "ablesci" ? pointsLabel : "", route, articleID] : [articleID, task.requestID ? "求助 " + task.requestID : "", pointsLabel, route ? "来源：科研通" : "", route, task.lastCheckedAt ? "最近检查 " + dateText(task.lastCheckedAt) : ""]).filter(Boolean);
         if (meta.length) {
           const metadata = make("div", "fta-row-meta");
-          meta.forEach((part, index) => { if (index) metadata.append(document.createTextNode(" · "));metadata.append(part === task.doi ? copyControl(task.doi, "复制 DOI", "fta-doi-copy") : make("span", "", part)); });
+          meta.forEach((part, index) => { if (index) metadata.append(document.createTextNode(" · "));metadata.append(part === articleID ? copyControl(articleID, task.doi ? "复制 DOI" : "复制知网标识", task.doi ? "fta-doi-copy" : "fta-cnki-copy") : make("span", "", part)); });
           row.append(metadata);
         }
         const note = unboundAvailable ? "应助文件已就绪，但此任务仅跟踪求助，尚未关联 Zotero 文献。请先关联文献，才能下载到文库。" : assistPending ? task.assistReceipt.lastError || (task.assistReceipt.needsReconcile ? "PDF 已入库；采纳结果尚未核实，请先核实网站状态。" : task.assistReceipt.adoption === "accepted" ? "应助文件已采纳；仍需将这份文件对应的上传消息标记已读。" : "PDF 已入库；仍需采纳这份应助文件并标记对应上传消息已读。") : acquired ? hasRequest && !task.assistReceipt ? task.lastError || "此任务有关联求助。可核验科研通文件：仅当网站文件与已保存 PDF 完全一致且论文身份匹配时，才记录科研通来源、采纳并处理对应消息。" : "" : task.message || task.lastError || browserNotes[task.state];
@@ -931,6 +1039,7 @@
       renderCaptureSummary();
       renderDirectories();
       renderSourceSettings();
+      renderCNKI();
       renderUpdater();
       renderCheckIn();
       renderActivePage();
@@ -971,6 +1080,54 @@
         selectPage(pageTabs[next].dataset.page, true);
       });
     }
+    function checkedCNKIResult(result) {
+      if (result?.state === "error") throw new Error(result.message || "知网操作未完成，请重试。");
+      return result;
+    }
+    const cnkiActionOptions = { target: "fta-pref-cnki-action-status" };
+    on($("fta-pref-cnki-enabled"), "change", () => {
+      if ($("fta-pref-cnki-enabled").disabled) return;
+      const enabled = $("fta-pref-cnki-enabled").checked === true;
+      run(async () => checkedCNKIResult(await app.saveCNKISettings({ enabled })), "知网来源设置已保存。", false, cnkiActionOptions);
+    });
+    on($("fta-pref-cnki-url"), "input", () => { cnkiPreviewDirty = true;renderCNKI();localize(); });
+    on($("fta-pref-cnki-url-form"), "submit", event => {
+      event.preventDefault();
+      if ($("fta-pref-cnki-inspect").disabled) return;
+      const url = String($("fta-pref-cnki-url").value || "").trim();
+      selectedCNKIReferences.clear();cnkiReferencePage = 0;cnkiReferenceKey = "";
+      run(async () => { const result = checkedCNKIResult(await app.inspectCNKIURL(url));cnkiPreviewDirty = false;return result; }, result => result?.message || "解析已完成，请核对文献预览。", false, cnkiActionOptions);
+    });
+    for (const [id, method, message] of [["login", "openCNKILogin", "已打开知网网页登录。请自行完成登录或验证。"], ["reset", "resetCNKISession", "知网会话已重置。"], ["verify", "verifyCNKI", "知网检查已完成，请查看访问状态。"], ["import", "importCNKIPreview", "知网条目操作已完成，请查看结果。"], ["enrich", "enrichSelectedCNKI", "知网元数据补全已完成，请查看结果。"]]) {
+      on($("fta-pref-cnki-" + id), "click", () => {
+        if ($("fta-pref-cnki-" + id).disabled) return;
+        if (id === "verify" || id === "reset") { selectedCNKIReferences.clear();cnkiReferencePage = 0;cnkiReferenceKey = ""; }
+        run(async () => {
+          const result = checkedCNKIResult(await app[method]());
+          if (id === "verify" || id === "reset") cnkiPreviewDirty = false;
+          return result;
+        }, result => typeof result?.message === "string" && result.message ? result.message : message, false, cnkiActionOptions);
+      });
+    }
+    on($("fta-pref-cnki-fetch-references"), "click", () => {
+      if ($("fta-pref-cnki-fetch-references").disabled) return;
+      selectedCNKIReferences.clear();cnkiReferencePage = 0;cnkiReferenceKey = "";
+      run(async () => { await app.fetchCNKIReferences();return checkedCNKIResult(app.getSnapshot()?.cnki?.references); }, result => result?.message || "参考文献提取已完成，请核对列表。", false, cnkiActionOptions);
+    });
+    on($("fta-pref-cnki-import-references"), "click", () => {
+      if ($("fta-pref-cnki-import-references").disabled) return;
+      const ids = [...selectedCNKIReferences];
+      run(async () => {
+        const result = await app.importCNKIReferences(ids);
+        selectedCNKIReferences.clear();cnkiReferenceKey = "";return result;
+      }, result => result && ["imported", "existing", "skipped", "failed"].every(field => Number.isSafeInteger(result[field]) && result[field] >= 0)
+        ? (result.cancelled ? "操作已取消，已保存的条目保留。" : "") + "参考文献导入：新增 " + result.imported + " 项，已有 " + result.existing + " 项，跳过 " + result.skipped + " 项，失败 " + result.failed + " 项。"
+        : result?.message || "参考文献导入已结束，请查看结果。", false, cnkiActionOptions);
+    });
+    for (const [id, direction] of [["previous", -1], ["next", 1]]) on($("fta-pref-cnki-reference-" + id), "click", () => {
+      if ($("fta-pref-cnki-reference-" + id).disabled) return;
+      cnkiReferencePage += direction;renderCNKIReferences();localize();
+    });
     const sourceChanged = () => {
       if (busy) return;
       sourceSettingsDirty = true;

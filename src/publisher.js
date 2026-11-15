@@ -174,7 +174,7 @@
       challenge: challenge ? (cloudflare ? "cloudflare" : "verification") : null, mismatch: false };
   }
 
-  function create({ Zotero, Services, IOUtils, PathUtils, parseHTML, HiddenBrowser: BrowserClass, publisherSession, pdfIdentity, sources, getSourceSettings = () => ({}) }) {
+  function create({ Zotero, Services, IOUtils, PathUtils, parseHTML, HiddenBrowser: BrowserClass, BlockingObserver: ObserverClass, publisherSession, pdfIdentity, sources, cnki = global.FulltextCNKI, cnkiReferences = global.FulltextCNKIReferences, getCNKISettings = () => ({ enabled: true }), getSourceSettings = () => ({}) }) {
     if (!Zotero || !Services || !IOUtils || !PathUtils || typeof parseHTML !== "function") throw new Error("出版社获取模块缺少运行依赖。");
     const inFlight = new Map();
     const siteQueues = new Map();
@@ -208,6 +208,187 @@
       catch (_) { return new Decoder("utf-8").decode(bytes); }
     };
     const existingPDF = item => findExistingPDF(item, { Zotero, IOUtils });
+    const cnkiEnabled = () => !!cnki && getCNKISettings()?.enabled !== false;
+    function cnkiEmpty(status, title = "") {
+      return { status, record: null, articleURL: null, metadata: null, candidates: [], cajAvailable: false, diagnostics: [], ...(status === "needs_url" ? { searchURL: cnki?.searchURL(title) } : {}) };
+    }
+    async function cnkiBounded(operation, cancel, isCancelled, timeout = 30000) {
+      let finished = false;
+      const start = Date.now();
+      const monitor = (async () => {
+        while (!finished) {
+          if (isCancelled()) { cancel(); throw abort(); }
+          if (Date.now() - start > timeout) { cancel(); const error = new Error("CNKI request timed out"); error.code = "timeout"; throw error; }
+          await Zotero.Promise.delay(150);
+        }
+        return new Promise(() => {});
+      })();
+      try { const result = await Promise.race([operation, monitor]); if (isCancelled()) throw abort(); return result; }
+      finally { finished = true; }
+    }
+    function cnkiRequestGate(address) {
+      const url = httpURL(address);
+      if (!url || !cnki?.isCNKIURL(url) || new URL(url).protocol !== "https:") return "unsafe_redirect";
+      const host = new URL(url).hostname;
+      if (/^(?:pay|mall)\.cnki\.net$/.test(host)) return "purchase_required";
+      if (/^(?:login|passport)\.cnki\.net$/.test(host)) return "login_required";
+      return null;
+    }
+    async function requestCNKI(address, referrer, { isCancelled = () => false, pageOnly = false, expectedRecord, allowURL } = {}) {
+      let current = address;
+      const limit = pageOnly ? MAX_PAGE_BYTES : MAX_PDF_BYTES;
+      for (let hop = 0; hop < 6; hop++) {
+        if (isCancelled()) throw abort();
+        if (!cnkiEnabled()) return { code: "disabled" };
+        const gate = cnkiRequestGate(current);
+        if (gate) return { code: gate };
+        if (allowURL && !allowURL(current)) return { code: "unsafe_redirect" };
+        if (cnki.classifyResponse({ url: current }, { expectedRecord }).status === "article_mismatch") return { code: "article_mismatch" };
+        let cancel = () => {}, exceeded = false;
+        const headers = { Accept: pageOnly ? "text/html,application/xhtml+xml" : "application/pdf,text/html;q=0.9" };
+        if (referrer && !cnkiRequestGate(referrer)) headers.Referer = referrer;
+        const operation = Zotero.HTTP.request("GET", current, {
+          responseType: "arraybuffer", successCodes: false, followRedirects: false, timeout: 30000, headers,
+          debug: false, logBodyLength: 0, errorDelayMax: 0, noRetryOnThrottle: true,
+          // Only normal Zotero publisher cookies apply. No explicit Cookie,
+          // Authorization, AbleSci container or imported browser credential.
+          cancellerReceiver(value) { cancel = value; },
+          requestObserver(xhr) { xhr.addEventListener?.("progress", event => { if (event.loaded > limit) { exceeded = true; xhr.abort(); } }); },
+        });
+        const response = await cnkiBounded(operation, () => cancel(), isCancelled);
+        if (exceeded) return { code: "response_too_large" };
+        const actual = httpURL(response.responseURL) || current;
+        // A native request must not silently follow a redirect before we have
+        // validated its destination, including redirects to purchase pages.
+        if (actual !== httpURL(current)) return { code: "unsafe_redirect" };
+        const status = Number(response.status), location = responseHeader(response, "Location");
+        if ([301,302,303,307,308].includes(status)) {
+          const next = httpURL(location, current);
+          const blocked = cnkiRequestGate(next);
+          if (blocked) return { code: blocked };
+          current = next; continue;
+        }
+        const bytes = asBytes(response.response);
+        if (bytes.length > limit) return { code: "response_too_large" };
+        const type = responseHeader(response, "Content-Type");
+        const classified = cnki.classifyResponse({ status, url: current, contentType: type, bytes }, { expectedRecord });
+        return { code: classified.status, status, bytes, type, url: current };
+      }
+      return { code: "redirect_limit" };
+    }
+    async function inspectCNKI(itemOrURL, { isCancelled = () => false, onProgress = () => {}, render = true, includeReferences = false } = {}) {
+      if (isCancelled()) throw abort();
+      if (!cnkiEnabled()) return cnkiEmpty("disabled");
+      const isItem = !!itemOrURL?.getField;
+      const record = isItem ? cnki.fromItem(itemOrURL) : cnki.normalizeRecord(itemOrURL);
+      const address = cnki.pageURL(itemOrURL) || record?.url;
+      const expected = { expectedRecord: record, expectedDOI: isItem ? itemOrURL.getField("DOI") || itemOrURL.getExtraField?.("DOI") : "",
+        expectedTitle: isItem ? itemOrURL.getField("title") : "" };
+      const itemURL = isItem ? itemOrURL.getField("url") : "";
+      if (isItem && cnki.normalizeRecord(itemURL) && !record) return cnkiEmpty("article_mismatch");
+      const check = () => {
+        if (isCancelled() || !cnkiEnabled() || isItem && ((cnki.fromItem(itemOrURL)?.id || "") !== (record?.id || "")
+          || itemOrURL.getField("url") !== itemURL || itemOrURL.getField("title") !== expected.expectedTitle
+          || (itemOrURL.getField("DOI") || itemOrURL.getExtraField?.("DOI") || "") !== (expected.expectedDOI || ""))) throw abort();
+      };
+      if (!address) return cnkiEmpty("needs_url", expected.expectedTitle);
+      const displayURL = record?.url || null;
+      if (gateFor(address)) return { ...cnkiEmpty("human_verification"), record, articleURL: displayURL };
+      if (publisherSession) await publisherSession.initialize().catch(() => {});
+      check();
+      onProgress({ stage: "discovering", message: "正在读取知网详情与明确的 PDF 入口…", url: displayURL });
+      let result, referencesRequested = false;
+      const parseCNKI = (doc, url) => {
+        const value = cnki.parsePage(doc, url, expected);
+        if (cnkiReferences && !["article_mismatch", "unsupported_url"].includes(value.status)) value.references = cnkiReferences.parse(doc, url);
+        if (value.status === "human_verification") rememberGate(address, "verification");
+        return value;
+      };
+      async function readReferences(value, referrer) {
+        check();
+        if (!includeReferences || !cnkiReferences || referencesRequested || !value.references || value.references.gate
+          || ["human_verification", "login_required", "access_denied"].includes(value.status)) return value;
+        const candidate = value.references.candidates?.find(row => row.method === "GET"
+          && cnkiReferences.candidateURL(row.url, referrer, row.format));
+        if (!candidate) return value;
+        referencesRequested = true;
+        onProgress({ stage: "discovering", message: "正在读取知网页面明确提供的参考文献列表…", url: value.articleURL || displayURL });
+        let extra;
+        try {
+          // fileName in this public endpoint is an opaque page-supplied key,
+          // not a document filename. Validate its exact reference route instead
+          // of comparing that key with the current article's record ID.
+          const response = await requestCNKI(candidate.url, referrer, { isCancelled, pageOnly: true,
+            allowURL: url => !!cnkiReferences.candidateURL(url, referrer, candidate.format) });
+          check();
+          if (!["html_response", "invalid_pdf"].includes(response.code)) {
+            extra = { diagnostics: [{ code: response.code }], ...(["human_verification", "login_required", "access_denied"].includes(response.code) ? { gate: response.code } : {}) };
+          } else {
+            const Decoder = global.TextDecoder || Zotero.getMainWindow()?.TextDecoder;
+            const text = cnki.decodeHTML(response.bytes, response.type, Decoder);
+            extra = candidate.format === "cnki-references-json" && !/^\s*</.test(text)
+              ? cnkiReferences.parseResponse(JSON.parse(text), response.url)
+              : cnkiReferences.parse(parse(text, response.url), response.url);
+          }
+        } catch (error) {
+          if (error.name === "AbortError") throw error;
+          extra = { diagnostics: [{ code: /^[a-z_]+$/.test(error.code || "") ? error.code : "references_unavailable" }] };
+        }
+        const references = cnkiReferences.merge(value.references, extra);
+        if (references.gate === "human_verification") rememberGate(address, "verification");
+        return { ...value, references };
+      }
+      try {
+        const response = await requestCNKI(address, null, { isCancelled, pageOnly: true, expectedRecord: record });
+        check();
+        if (!["html_response", "invalid_pdf"].includes(response.code)) return { ...cnkiEmpty(response.code), record, articleURL: record?.url || null };
+        const Decoder = global.TextDecoder || Zotero.getMainWindow()?.TextDecoder;
+        result = parseCNKI(parse(cnki.decodeHTML(response.bytes, response.type, Decoder), response.url), response.url);
+        result = await readReferences(result, response.url);
+      } catch (error) {
+        if (error.name === "AbortError") throw error;
+        return { ...cnkiEmpty(/^[a-z_]+$/.test(error.code || "") ? error.code : "network_error"), record, articleURL: record?.url || null };
+      }
+      const needsMetadata = ["metadata_only", "record_unavailable", "metadata_unavailable"].includes(result.status);
+      const needsReferences = includeReferences && result.references && !result.references.visibleCount && !result.references.gate && !referencesRequested;
+      if (!render || !needsMetadata && !(needsReferences && result.status === "pdf_available")) return result;
+      check();
+      // Render a detail page only after a non-gated HTTP response. Never run a
+      // browser against login, challenge, purchase or arbitrary search pages.
+      const HiddenBrowser = BrowserClass || ChromeUtils.importESModule("chrome://zotero/content/HiddenBrowser.mjs").HiddenBrowser;
+      const browser = new HiddenBrowser({ allowJavaScript: true });
+      let blocker;
+      try {
+        // Bind Zotero's native observer to this browser before its first load.
+        // Metadata rendering cannot navigate to checkout/login, download a file,
+        // or send traffic to a non-CNKI origin. If this guard is unavailable,
+        // retain the HTTP result instead of running unguarded page scripts.
+        await cnkiBounded(browser._createdPromise, () => browser.destroy(), isCancelled, 5000);
+        check();
+        const BlockingObserver = ObserverClass || ChromeUtils.importESModule("chrome://zotero/content/BlockingObserver.mjs").BlockingObserver;
+        blocker = new BlockingObserver({ shouldBlock(uri) {
+          if (cnkiRequestGate(uri.spec)) return true;
+          // Reference requests are made explicitly and at most once above;
+          // page scripts cannot duplicate them or trigger unrequested reads.
+          return /download|order|purchase|\/pay(?:\/|$)|\/references\/ref\.html/i.test(new URL(uri.spec).pathname);
+        } });
+        blocker.register(browser);
+        onProgress({ stage: "rendering", message: "正在读取知网页面中的文献信息…", url: result.articleURL || displayURL });
+        const loaded = await cnkiBounded(browser.load(address), () => browser.destroy(), isCancelled, 20000);
+        if (!loaded) return result;
+        const data = await cnkiBounded(browser.getPageData(["documentHTML"], { timeout: 15000 }), () => browser.destroy(), isCancelled, 16000);
+        check();
+        const actual = httpURL(browser.currentURI?.spec) || address, blocked = cnkiRequestGate(actual);
+        if (blocked) return { ...cnkiEmpty(blocked), record, articleURL: record?.url || null };
+        if (typeof data.documentHTML !== "string" || data.documentHTML.length * 2 > MAX_PAGE_BYTES) return { ...result, status: "response_too_large", candidates: [] };
+        let rendered = parseCNKI(parse(data.documentHTML, actual), actual);
+        if (rendered.references && result.references) rendered.references = cnkiReferences.merge(result.references, rendered.references);
+        rendered = await readReferences(rendered, actual);
+        if (["metadata_unavailable", "record_unavailable"].includes(rendered.status) && result.record) return { ...result, ...(rendered.references ? { references: rendered.references } : {}) };
+        return rendered;
+      } catch (error) { if (error.name === "AbortError") throw error; return result; }
+      finally { blocker?.dispose(); browser.destroy(); }
+    }
     async function run(item, { onProgress = () => {}, isCancelled = () => false } = {}) {
       if (!item?.id || !item.isRegularItem?.()) throw new Error("请选择已保存的普通文献条目。");
       const check = () => { if (isCancelled()) throw abort(); };
@@ -234,9 +415,18 @@
       const pmcid = String(item.getExtraField?.("PMCID") || item.getField("extra") || "").match(/\bPMC[1-9]\d{0,11}\b/i)?.[0]?.toUpperCase() || "";
       const sourceDiagnostics = [];
       let pendingReview = null;
+      const initialCNKIRecord = cnki?.fromItem(item) || null;
+      const initialItemURL = item.getField("url") || "";
+      let cnkiResult = null;
+      const cnkiInfo = () => cnkiResult ? { cnkiRecord: cnkiResult.record || null, metadata: cnkiResult.metadata || null, cnkiStatus: cnkiResult.status } : {};
+      const checkCNKIItem = () => {
+        check();
+        if ((cnki?.fromItem(item)?.id || "") !== (initialCNKIRecord?.id || "") || (item.getField("url") || "") !== initialItemURL) throw abort();
+      };
       const config = () => getSourceSettings() || {};
       const articleURL = httpURL(item.getField("url"));
-      const starts = [...new Set([articleURL, expectedDOI ? "https://doi.org/" + expectedDOI : null].filter(Boolean))];
+      const starts = [...new Set([articleURL, expectedDOI ? "https://doi.org/" + expectedDOI : null].filter(Boolean))]
+        .filter(url => !cnki?.isCNKIURL(url));
       const triedDownloads = new Set();
       const visitedPages = new Set();
       let needsLogin = false;
@@ -261,8 +451,10 @@
         if (accessEvidence.confidence === "unknown") accessEvidence = { ...evidence("request_restricted", "possible", url), source: "response" };
       }
 
-      async function request(url, referrer) {
+      async function request(url, referrer, redirects = 0) {
         check();
+        if (cnki?.isCNKIURL(url)) { const error = new Error("CNKI route requires its article parser"); error.name = "CNKIRoute"; error.url = url; throw error; }
+        if (redirects > 5) throw new Error("出版社重定向次数过多。");
         const gate = gateFor(url);
         if (gate) { const error = new Error("此站点正在等待人工验证，暂缓重复请求。"); error.name = "PublisherAccessGate"; error.gate = gate; throw error; }
         let cancel = () => {};
@@ -270,7 +462,7 @@
         const headers = { Accept: "application/pdf,text/html;q=0.9,application/xhtml+xml;q=0.8,*/*;q=0.5" };
         if (referrer) headers.Referer = referrer;
         const operation = Zotero.HTTP.request("GET", url, {
-          responseType: "arraybuffer", successCodes: false, timeout: 30000, headers,
+          responseType: "arraybuffer", successCodes: false, followRedirects: false, timeout: 30000, headers,
           debug: false, logBodyLength: 0, errorDelayMax: 0, noRetryOnThrottle: true,
           // Omit userContextId: the publisher window and this request share Zotero's default jar.
           cancellerReceiver(value) { cancel = value; },
@@ -282,9 +474,15 @@
         });
         const response = await cancellable(operation, () => cancel());
         if (exceeded) throw new Error("文件超过 100 MiB 上限。");
+        if ([301,302,303,307,308].includes(Number(response.status))) {
+          const location = httpURL(responseHeader(response, "Location"), url);
+          if (!location) throw new Error("出版社重定向地址无效。");
+          return request(location, referrer, redirects + 1);
+        }
         const bytes = asBytes(response.response);
         if (bytes.length > MAX_PDF_BYTES) throw new Error("文件超过 100 MiB 上限。");
         const result = { response, bytes, url: httpURL(response.responseURL) || url, type: responseHeader(response, "Content-Type") };
+        if (cnki?.isCNKIURL(result.url)) { const error = new Error("CNKI route requires its article parser"); error.name = "CNKIRoute"; error.url = result.url; throw error; }
         if (responseHeader(response, "cf-mitigated") === "challenge") {
           challengeKind = "cloudflare"; needsLogin = true; loginURL ||= result.url; rememberGate(result.url, challengeKind);
           accessEvidence = { ...evidence("human_verification", "explicit", result.url), source: "response" };
@@ -299,6 +497,12 @@
         const discoveryProvider = source === "rendered_publisher" ? "publisher" : source;
         let pdfHost = "";
         try { pdfHost = new URL(sourceURL).hostname.toLowerCase().replace(/\.$/, ""); } catch (_) {}
+        if (source === "cnki") {
+          checkCNKIItem();
+          if (!cnkiEnabled() || !cnkiResult?.record || !cnkiResult.articleURL) return null;
+          // The real download host is provenance; its opaque URL is not history.
+          sourceURL = cnkiResult.articleURL;
+        }
         try {
         const duplicate = await existingPDF(item);
         check();
@@ -310,30 +514,35 @@
         try {
           await IOUtils.write(file, bytes);
           check();
-          if (pdfIdentity) {
+          if (pdfIdentity || source === "cnki") {
             let identity;
-            try { identity = await pdfIdentity.inspect(file, { doi: expectedDOI, title: expectedTitle }, { bytes }); }
+            try { identity = await pdfIdentity.inspect(file, { doi: expectedDOI, title: expectedTitle, ...(source === "cnki" ? { cnkiRecord: cnkiResult.record } : {}) }, { bytes }); }
             catch (_) { identity = { status: "unknown" }; }
             check();
+            if (source === "cnki") { checkCNKIItem(); if (!cnkiEnabled()) throw abort(); }
             if (identity.status === "mismatch") {
               sourceDiagnostics.push({ source, code: "pdf_mismatch", message: "PDF 的 DOI 或标题与目标论文冲突，已拒绝自动入库。" });
               return null;
             }
             if (identity.status !== "match") {
-              pendingReview ||= { needsReview: true, paper: {doi:expectedDOI,title:expectedTitle}, reviewBytes: bytes, source, discoveryProvider, pdfHost, sourceURL, fulltextVersion, publisherURL };
+              // Bind later approval to the item's identity at acquisition start.
+              // A hidden page record may be newly discovered from an opaque URL;
+              // it belongs in provenance, not in the item's preexisting binding.
+              pendingReview ||= { needsReview: true, paper: {doi:expectedDOI,title:expectedTitle,...(source === "cnki" ? {cnkiRecord:initialCNKIRecord} : {})}, reviewBytes: bytes, source, discoveryProvider, pdfHost, sourceURL, fulltextVersion, publisherURL, ...cnkiInfo() };
               sourceDiagnostics.push({ source, code: "pdf_unknown", message: "已取得 PDF，但 DOI 和标题证据不足，需要预览核对。" });
               return null;
             }
           }
           // The item may have been edited while the request or PDF extraction was in flight.
           if (doi(item.getField("DOI") || item.getExtraField?.("DOI")) !== expectedDOI || item.getField("title") !== expectedTitle || item.deleted) throw abort();
+          if (source === "cnki") { checkCNKIItem(); if (!cnkiEnabled()) throw abort(); }
           const lateDuplicate = await existingPDF(item);
           check();
           if (lateDuplicate) return { attachmentID: lateDuplicate, source: "existing", sourceURL: null };
           const attachment = await Zotero.Attachments.importFromFile({ file, parentItemID: item.id, libraryID: item.libraryID, title: "全文", contentType: "application/pdf" });
           // The import has committed. Cancellation now must not misreport it as absent.
           try { attachment.setField("url", sourceURL); await attachment.saveTx(); } catch (_) {}
-          return { attachmentID: attachment.id, source, discoveryProvider, pdfHost, sourceURL, publisherURL, fulltextVersion, sourceDiagnostics };
+          return { attachmentID: attachment.id, source, discoveryProvider, pdfHost, sourceURL, publisherURL, fulltextVersion, sourceDiagnostics, ...cnkiInfo() };
         }
         finally {
           await IOUtils.remove(file, { ignoreAbsent: true }).catch(() => {});
@@ -357,6 +566,7 @@
         for (let hop = 0; hop < 6; hop++) {
           check();
           url = await sources.validateURL(url, { isCancelled });
+          if (cnki?.isCNKIURL(url)) { const error = new Error("CNKI route requires its article parser"); error.name = "CNKIRoute"; error.url = url; throw error; }
           if (seen.has(url)) throw new Error("下载重定向循环。");
           seen.add(url);
           await sources.beforeRequest?.(url, { source: candidate.source, headers, isCancelled });
@@ -390,6 +600,7 @@
       }
       async function trySource(candidate, depth = 0) {
         check();
+        if (cnki?.isCNKIURL(candidate.url)) return cnki.pageURL(candidate.url) ? tryCNKI(candidate.url) : null;
         if (triedDownloads.size >= 24 || triedDownloads.has("api:" + candidate.url)) return null;
         triedDownloads.add("api:" + candidate.url);
         progress("open_access", "正在下载并核对开放全文候选…", candidate.url);
@@ -413,6 +624,7 @@
           }
         } catch (error) {
           if (["AbortError", "AttachmentImportError"].includes(error.name)) throw error;
+          if (error.name === "CNKIRoute") return cnki.pageURL(error.url) ? tryCNKI(error.url) : null;
           sourceDiagnostics.push({ source: candidate.source, code: /^[a-z_]{1,60}$/.test(error.code || "") ? error.code : "download_failed", message: "此来源未完成下载，已继续其他获取方式。" });
         }
         return null;
@@ -445,9 +657,68 @@
         }
         return null;
       }
+      function noteCNKI(status, stableURL) {
+        if (cnkiResult) cnkiResult = { ...cnkiResult, status };
+        sourceDiagnostics.push({ source: "cnki", code: status, message: status === "caj_only" ? "知网仅提供 CAJ，尚未取得可核验的 PDF。"
+          : status === "purchase_required" ? "知网入口需要购买或订阅确认，请在浏览器中自行处理。"
+          : status === "human_verification" ? "知网页面需要人工验证，已停止自动尝试。"
+          : status === "article_mismatch" ? "知网页面的文献标识、DOI 或题名冲突，已拒绝该候选。"
+          : "知网详情或 PDF 未完成获取，可检查浏览器权限或继续其他来源。" });
+        if (["login_required", "access_denied", "purchase_required", "human_verification", "rate_limited"].includes(status)) {
+          needsLogin = true; loginURL ||= stableURL || null;
+          accessReason = status === "purchase_required" ? "purchase" : status === "access_denied" ? "institutional_access" : "login_possible";
+          if (status === "human_verification") { challengeKind = "verification"; if (stableURL) rememberGate(stableURL, challengeKind); }
+          accessEvidence = evidence(status === "human_verification" ? "human_verification" : status === "purchase_required" ? "purchase" : "request_restricted", "explicit", stableURL);
+        }
+      }
+      async function tryCNKI(address) {
+        if (!cnkiEnabled()) return null;
+        checkCNKIItem();
+        const target = address ? { getField: name => name === "url" ? address : item.getField(name), getExtraField: name => item.getExtraField?.(name) } : item;
+        const key = cnki.safeArticleURL(address) || initialCNKIRecord?.id || cnki.pageURL(target);
+        if (key && visitedPages.has("cnki:" + key)) return null;
+        if (key) visitedPages.add("cnki:" + key);
+        const inspected = await inspectCNKI(target, { isCancelled, onProgress });
+        checkCNKIItem();
+        cnkiResult = { record: inspected.record, articleURL: inspected.articleURL, metadata: inspected.metadata, status: inspected.status };
+        if (inspected.articleURL) { publisherURL = inspected.articleURL; lastURL = inspected.articleURL; }
+        if (inspected.status !== "pdf_available") { noteCNKI(inspected.status, inspected.articleURL); return null; }
+        const candidates = inspected.candidates.map(value => ({ ...value, depth: 0 }));
+        for (let index = 0; index < Math.min(MAX_CANDIDATES, candidates.length); index++) {
+          checkCNKIItem();
+          if (!cnkiEnabled()) { noteCNKI("disabled", inspected.articleURL); return null; }
+          const candidate = candidates[index];
+          if (candidate.recordID !== inspected.record.id || triedDownloads.has("cnki:" + candidate.url)) continue;
+          triedDownloads.add("cnki:" + candidate.url);
+          progress("downloading", "正在下载并核对知网页面提供的 PDF…", inspected.articleURL);
+          let response;
+          try { response = await requestCNKI(candidate.url, candidate.referrer, { isCancelled, expectedRecord: inspected.record }); }
+          catch (error) { if (error.name === "AbortError") throw error; noteCNKI("network_error", inspected.articleURL); continue; }
+          checkCNKIItem();
+          if (!cnkiEnabled()) { noteCNKI("disabled", inspected.articleURL); return null; }
+          if (response.code === "pdf") {
+            const found = await importPDF(response.bytes, response.url, "cnki");
+            if (found) return found;
+            continue;
+          }
+          if (response.code === "html_response" && response.bytes.length <= MAX_PAGE_BYTES) {
+            const Decoder = global.TextDecoder || Zotero.getMainWindow()?.TextDecoder;
+            const nested = cnki.parsePage(parse(cnki.decodeHTML(response.bytes, response.type, Decoder), response.url), response.url,
+              { expectedRecord: inspected.record, expectedDOI, expectedTitle });
+            if (candidate.depth < 1 && nested.status === "pdf_available") candidates.push(...nested.candidates.map(value => ({ ...value, depth: 1 })));
+            else noteCNKI(nested.status, inspected.articleURL);
+          } else noteCNKI(response.code, inspected.articleURL);
+          if (["human_verification", "purchase_required", "login_required", "access_denied", "rate_limited", "unsafe_redirect"].includes(cnkiResult.status)) break;
+        }
+        return null;
+      }
       async function tryCandidates(candidates, source, depth = 0) {
         for (const candidate of candidates.slice(0, MAX_CANDIDATES)) {
           check();
+          if (cnki?.isCNKIURL(candidate.url)) {
+            if (cnki.pageURL(candidate.url)) { const found = await tryCNKI(candidate.url); if (found) return found; }
+            continue;
+          }
           // JavaScript rendering can establish publisher cookies. A URL that
           // failed before rendering may be retried once with that new session.
           const attemptKey = source + ":" + candidate.url;
@@ -476,7 +747,11 @@
               }
             }
           }
-          catch (error) { if (["AbortError", "AttachmentImportError"].includes(error.name)) throw error; caughtGate(error); }
+          catch (error) {
+            if (["AbortError", "AttachmentImportError"].includes(error.name)) throw error;
+            if (error.name === "CNKIRoute") { if (cnki.pageURL(error.url)) { const found = await tryCNKI(error.url); if (found) return found; } }
+            else caughtGate(error);
+          }
         }
         return null;
       }
@@ -491,6 +766,7 @@
           if (!loaded) return null;
           let data = await cancellable(browser.getPageData(["documentHTML"], { timeout: 15000 }), () => browser.destroy());
           let pageURL = httpURL(browser.currentURI?.spec) || url;
+          if (cnki?.isCNKIURL(pageURL)) return cnki.pageURL(pageURL) ? tryCNKI(pageURL) : null;
           let result = discover(parse(data.documentHTML, pageURL), pageURL, expectedDOI);
           noteGate(result, pageURL);
           rememberPublisherURL(pageURL, source);
@@ -513,6 +789,7 @@
       }
       async function visitPage(url, source = "publisher") {
         check();
+        if (cnki?.isCNKIURL(url)) return cnki.pageURL(url) ? tryCNKI(url) : null;
         if (visitedPages.has(url)) return null;
         if (cachedGate(url)) return null;
         visitedPages.add(url);
@@ -542,10 +819,19 @@
             }
           }
         }
-        catch (error) { if (["AbortError", "AttachmentImportError"].includes(error.name)) throw error; caughtGate(error); }
+        catch (error) {
+          if (["AbortError", "AttachmentImportError"].includes(error.name)) throw error;
+          if (error.name === "CNKIRoute") return cnki.pageURL(error.url) ? tryCNKI(error.url) : null;
+          caughtGate(error);
+        }
         return renderedPage(renderURL, source === "open_access" ? source : "rendered_publisher");
       }
 
+      check();
+      if (cnkiEnabled() && (initialCNKIRecord || cnki.pageURL(item))) {
+        const found = await tryCNKI();
+        if (found) return found;
+      }
       check();
       if (config().enabled?.openAccess !== false && expectedDOI && typeof Zotero.Attachments.getFileResolvers === "function") {
         progress("open_access", "正在尝试 Zotero 开放获取来源…", null);
@@ -602,7 +888,7 @@
       check();
       if (pendingReview) return { ...pendingReview, sourceDiagnostics: sourceDiagnostics.slice(0, 24) };
       return needsLogin
-        ? { state: "needs_login", sourceDiagnostics: sourceDiagnostics.slice(0, 24), challenge: challengeKind, accessReason, accessEvidence, publisherURL, message: challengeKind === "cloudflare"
+        ? { state: "needs_login", ...cnkiInfo(), sourceDiagnostics: sourceDiagnostics.slice(0, 24), challenge: challengeKind, accessReason, accessEvidence, publisherURL, message: challengeKind === "cloudflare"
           ? "该网站返回 Cloudflare 真人验证，同一站点已暂缓重复请求。请点击“浏览器下载并自动入库”，在日常使用的默认浏览器完成验证并点击 PDF 下载；保存到配置文件夹且确认匹配的新 PDF 会自动入库，也可使用科研通兜底。"
           : challengeKind ? "该网站要求人工验证，同一站点已暂缓重复请求。请点击“浏览器下载并自动入库”，在日常使用的默认浏览器完成验证并点击 PDF 下载；保存到配置文件夹且确认匹配的新 PDF 会自动入库，也可使用科研通兜底。"
           : accessReason === "institutional_access" ? "出版社页面提供机构访问入口，当前 Zotero 会话尚未取得全文。请点击“浏览器下载并自动入库”，在默认浏览器完成机构登录、确认本篇论文的订阅权限并点击 PDF 下载；保存到配置文件夹且确认匹配的新 PDF 会自动入库，也可使用科研通兜底。"
@@ -610,10 +896,11 @@
           : accessReason === "purchase" ? "出版社页面显示购买或订阅入口，当前会话尚未取得全文。如有机构访问权限，请点击“浏览器下载并自动入库”，在默认浏览器完成机构登录、检查订阅并点击 PDF 下载；保存到配置文件夹且确认匹配的新 PDF 会自动入库，也可使用科研通兜底。"
           : accessReason === "preview" ? "当前仅取得 ScienceDirect 论文预览或摘要页，尚未取得全文。请点击“浏览器下载并自动入库”，在默认浏览器完成机构登录、确认全文访问权限并点击 PDF 下载；保存到配置文件夹且确认匹配的新 PDF 会自动入库，也可使用科研通兜底。"
           : "网页提示登录、访问验证或请求限制。请点击“浏览器下载并自动入库”，在默认浏览器完成出版社或机构登录、检查访问权限并点击 PDF 下载；保存到配置文件夹且确认匹配的新 PDF 会自动入库，也可使用科研通兜底。", url: loginURL || lastURL }
-        : { state: "not_found", sourceDiagnostics: sourceDiagnostics.slice(0, 24), accessReason: "automatic_not_found", accessEvidence: evidence("automatic_not_found", "unknown", publisherURL || lastURL), publisherURL,
+        : { state: "not_found", ...cnkiInfo(), sourceDiagnostics: sourceDiagnostics.slice(0, 24), accessReason: "automatic_not_found", accessEvidence: evidence("automatic_not_found", "unknown", publisherURL || lastURL), publisherURL,
           message: "自动查找暂未取得有效 PDF；这不能判断你是否拥有机构访问权限。可先点击“浏览器下载并自动入库”，在日常浏览器查看这篇论文并尝试下载；仍无法获取时可使用科研通兜底。", url: publisherURL || lastURL };
     }
     return {
+      inspectCNKI,
       clearAccessGate(url) { accessGates.delete(siteKey(url)); },
       acquire(item, options) {
         const key = item?.libraryID + ":" + item?.id;

@@ -471,3 +471,9 @@ test('publisher page evidence is sanitized and cleared when the linked paper cha
     assert.equal(restricted.accessEvidence.source,source);assert.equal(restricted.accessEvidence.url,'https://publisher.test/article');
   }
 });
+test('CNKI IDs and provenance survive no-DOI tasks without persisting signed download URLs',()=>{
+  const CNKI=require('../src/cnki.js'),url='https://kns.cnki.net/KCMS/detail/detail.aspx?dbcode=CJFD&filename=TEST202401001&v=PRIVATE',record=CNKI.normalizeRecord(url);
+  const task=model.createTask({itemID:51,libraryID:1,itemKey:'CNKI51',title:'中文文献',cnkiRecord:record,officialURL:url,publisherURL:'https://kns.cnki.net/download?filename=TEST202401001&dflag=pdf&v=SECRET',state:'manual_review',sourceReview:{doi:'',title:'中文文献',sha256:'a'.repeat(64),source:'cnki',discoveryProvider:'cnki',cnkiRecord:record,sourceURL:url}});
+  assert.equal(task.cnkiRecord.id,record.id);assert.equal(task.sourceReview.discoveryProvider,'cnki');assert.equal(task.publisherURL,'');const restored=model.deserializeQueue(model.serializeQueue([task])).tasks[0];assert.deepEqual(restored.cnkiRecord,record);assert.doesNotMatch(JSON.stringify(restored),/PRIVATE|SECRET/);
+  const changed=model.updateTask(task,{cnkiRecord:CNKI.normalizeRecord(url.replace('001','002'))});assert.equal(changed.sourceReview,null);
+});

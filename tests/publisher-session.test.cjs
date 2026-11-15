@@ -14,6 +14,7 @@ function setup({hosts = [], jar = [], backup = null} = {}) {
     logins: {findLogins: () => [...logins], async addLoginAsync(value) {logins.push(value);}, modifyLogin(old, value) {logins.splice(logins.indexOf(old), 1, value);}, removeLogin(value) {logins.splice(logins.indexOf(value), 1);}},
     cookies: {
       getCookiesFromHost(host) {reads.push(host);return jar.filter(value => value.host.replace(/^\./, '') === host || host.endsWith(value.host));},
+      remove(host, name, path, attributes) { const index=jar.findIndex(value=>value.host===host&&value.name===name&&value.path===path&&(value.originAttributes?.userContextId||0)===(attributes.userContextId||0)&&(value.originAttributes?.privateBrowsingId||0)===(attributes.privateBrowsingId||0)&&!value.originAttributes?.partitionKey&&!value.originAttributes?.firstPartyDomain);if(index>=0)jar.splice(index,1); },
       add(host, path, name, value, isSecure, isHttpOnly, isSession, expiry, originAttributes, sameSite, schemeMap, isPartitioned) {const next = {host, path, name, value, isSecure, isHttpOnly, isSession, expiry, originAttributes, sameSite, schemeMap, isPartitioned};adds.push(next);jar.push(next);},
     },
   };
@@ -74,4 +75,38 @@ test('credential failures expose only a sanitized message and no cookie values',
   await assert.rejects(env.session.grantHosts(['www.nature.com']),error=>!error.message.includes('private-session-value'));
   assert.match(env.session.getStatus().error,/加密保存/);assert(!JSON.stringify(env.session.getStatus()).includes('private-session-value'));
   await env.session.destroy().catch(()=>{});assert.equal(env.observers.size,0);
+});
+
+test('scoped CNKI reset removes only matching default-context cookies and restoration grants', async () => {
+  const env=setup({hosts:['kns.cnki.net','login.cnki.net','www.nature.com'],jar:[
+    cookie('.cnki.net','session'),cookie('login.cnki.net','login'),cookie('kns.cnki.net','persistent',{isSession:false}),
+    cookie('.nature.com','institution'),cookie('.cnki.net','private',{originAttributes:{privateBrowsingId:1}}),
+    cookie('.cnki.net','container',{originAttributes:{userContextId:3}}),cookie('.cnki.net','partition',{originAttributes:{partitionKey:'(https,other.test)'}}),
+    cookie('.evilcnki.net','unrelated')
+  ]});
+  await env.session.initialize();await env.session.flush();
+  await env.session.forgetHosts(['cnki.net','cnki.com.cn'],{clearCookies:true});
+  assert.deepEqual(env.jar.map(c=>c.name),['institution','private','container','partition','unrelated']);
+  assert.deepEqual(JSON.parse(env.prefs.get(HOSTS_PREF)),['www.nature.com']);
+  assert.deepEqual(JSON.parse(env.logins[0].password).cookies.map(c=>c.name),['institution']);
+  await env.session.destroy();
+  const restarted=env.create();await restarted.initialize();assert(!env.jar.some(c=>c.name==='session'));
+  await restarted.destroy();
+});
+
+test('interrupted scoped cookie removal cannot restore the revoked site on restart', async () => {
+  const env=setup({hosts:['kns.cnki.net','www.nature.com'],jar:[cookie('.cnki.net','session'),cookie('.nature.com','institution')]});
+  await env.session.initialize();await env.session.flush();
+  env.Services.cookies.remove=()=>{throw new Error('private-session-value');};
+  await assert.rejects(env.session.forgetHosts(['cnki.net'],{clearCookies:true}),error=>!error.message.includes('private-session-value'));
+  assert.deepEqual(JSON.parse(env.prefs.get(HOSTS_PREF)),['www.nature.com']);
+  assert.deepEqual(JSON.parse(env.logins[0].password).cookies.map(c=>c.name),['institution']);
+  env.jar.splice(0,1);await env.session.destroy();
+  const restarted=env.create();await restarted.initialize();assert(!env.jar.some(c=>c.host==='.cnki.net'));await restarted.destroy();
+});
+
+test('scoped forget can revoke backup without deleting active browser cookies', async () => {
+  const env=setup({hosts:['kns.cnki.net'],jar:[cookie('.cnki.net','session')]});
+  await env.session.initialize();await env.session.flush();await env.session.forgetHosts(['cnki.net']);
+  assert.equal(env.jar.length,1);assert.equal(env.logins.length,0);assert.deepEqual(JSON.parse(env.prefs.get(HOSTS_PREF)),[]);await env.session.destroy();
 });

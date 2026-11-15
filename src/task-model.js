@@ -11,6 +11,8 @@
     "browser_waiting", "browser_scanning", "browser_downloading", "manual_waiting", "manual_review",
   ]);
   const stateSet = new Set(STATES);
+  const CNKI = root.FulltextCNKI || (typeof require === "function" ? require("./cnki.js") : null);
+  const cleanCNKIRecord = input => { try { return CNKI?.normalizeRecord(input) || null; } catch (_) { return null; } };
   const secretQueryNames = /^(?:access[_-]?token|refresh[_-]?token|token|api[_-]?key|key|session(?:[_-]?id)?|password|pass|pwd|secret|signature|sig|auth(?:orization)?|cookie|code)$/i;
 
   function text(value, maximum) {
@@ -76,6 +78,9 @@
     try {
       const url = new URL(value.trim());
       if (!/^https?:$/.test(url.protocol) || url.username || url.password) return "";
+      // Only stable bibliographic CNKI URLs survive serialization. Opaque
+      // download, order and signed-session URLs are never task identity.
+      if (CNKI?.isCNKIURL(url.href)) return CNKI.safeArticleURL(url.href) || "";
       for (const name of Array.from(url.searchParams.keys())) {
         if (secretQueryNames.test(name)) url.searchParams.delete(name);
       }
@@ -91,7 +96,7 @@
       .replace(/\b(access[_-]?token|refresh[_-]?token|token|api[_-]?key|session(?:[_-]?id)?|password|pwd|secret|signature)\s*[:=]\s*[^\s&;,]+/gi, "$1=[redacted]");
   }
 
-  const discoveryProviders = new Set(["openalex", "pmc", "core", "semanticScholar", "custom", "open_access", "publisher", "ablesci"]);
+  const discoveryProviders = new Set(["openalex", "pmc", "core", "semanticScholar", "custom", "open_access", "publisher", "ablesci", "cnki"]);
   function cleanDiscoveryProvider(value) { return discoveryProviders.has(value) ? value : ""; }
   function cleanPDFHost(value) {
     if (typeof value !== "string" || value.length > 253 || !/^[a-z0-9.-]+$/i.test(value) || !value.includes(".")) return "";
@@ -219,6 +224,7 @@
       itemKey,
       itemID,
       doi,
+      cnkiRecord: cleanCNKIRecord(input.cnkiRecord),
       title: text(input.title, 2000),
       officialURL: cleanOfficialURL(input.officialURL),
       publisherURL: cleanOfficialURL(input.publisherURL),
@@ -256,9 +262,11 @@
     const sourceReview = input.sourceReview;
     if (task.state === "manual_review" && !task.attachmentID && sourceReview && /^[a-f0-9]{64}$/i.test(sourceReview.sha256 || "")) {
       try {
-        if (normalizeDOI(sourceReview.doi) === task.doi) task.sourceReview = {
+        const record = cleanCNKIRecord(sourceReview.cnkiRecord);
+        if (normalizeDOI(sourceReview.doi) === task.doi && (!record || record.id === task.cnkiRecord?.id)) task.sourceReview = {
           sha256: sourceReview.sha256.toLowerCase(), doi: task.doi, title: text(sourceReview.title, 2000),
           source: text(sourceReview.source, 100), sourceURL: cleanOfficialURL(sourceReview.sourceURL),
+          cnkiRecord: record, cnkiURLHash: /^[a-f0-9]{64}$/i.test(sourceReview.cnkiURLHash || "") ? sourceReview.cnkiURLHash.toLowerCase() : "",
           discoveryProvider: cleanDiscoveryProvider(sourceReview.discoveryProvider), pdfHost: cleanPDFHost(sourceReview.pdfHost),
           fulltextVersion: ["published", "accepted", "submitted"].includes(sourceReview.fulltextVersion) ? sourceReview.fulltextVersion : "unknown",
         };
@@ -352,7 +360,7 @@
     }
     const updated = normalizeTask(merged);
     const identityChanged = ["libraryID", "itemID", "itemKey", "doi", "title", "requestID"]
-      .some(field => updated[field] !== previous[field]);
+      .some(field => updated[field] !== previous[field]) || !!previous.cnkiRecord && (updated.cnkiRecord?.id || "") !== previous.cnkiRecord.id;
     const attachmentChanged = updated.attachmentID !== previous.attachmentID;
     if(["libraryID","itemID","itemKey","doi","title"].some(field=>updated[field]!==previous[field]))updated.doiCheck=null;
     if ((updated.requestID !== previous.requestID || updated.requestedPoints !== previous.requestedPoints) && patch.pointsVerified !== true) updated.pointsVerified = false;
