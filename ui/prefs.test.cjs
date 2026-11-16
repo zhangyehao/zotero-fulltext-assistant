@@ -1741,9 +1741,9 @@ async function siteControls(mode = "request") {
       copyText: async value => actions.push(["copy", value]),
       normalizeCNKIInput: value => cnkiParser.normalizeInput(value),
       saveCNKISettings: async value => { actions.push(["cnkiSettings", { ...value }]);if (rejectSave) throw new Error("知网操作未完成，请重试。");Object.assign(state.cnki, value);emit();return structuredClone(state.cnki); },
-      openCNKILogin: async () => { actions.push(["cnkiLogin"]); },
+      openCNKILogin: async () => { actions.push(["cnkiLogin"]);Object.assign(state.cnki, { state: "idle", lastCheckedAt: null, message: "已打开知网网页登录；会话按网站有效期保存。完成后可检查具体文献的访问情况，打开窗口不代表已验证登录。" });emit();return structuredClone(state.cnki); },
       resetCNKISession: async () => { actions.push(["cnkiReset"]);state.cnki.sessionRemembered = false;emit(); },
-      verifyCNKI: async () => { actions.push(["cnkiVerify"]);Object.assign(state.cnki, { state: "no_sample", message: "没有可验证的知网样本", record: null, metadata: null, canImport: false });emit();return structuredClone(state.cnki); },
+      verifyCNKI: async value => { actions.push(["cnkiVerify", value]);Object.assign(state.cnki, { state: "no_sample", message: "请在下方输入知网文献的 DOI 或详情页链接，或选择明确关联知网的条目；文献访问检查不用于判定账号是否已登录。", record: null, metadata: null, canImport: false });emit();return structuredClone(state.cnki); },
       inspectCNKIURL: async url => {
         actions.push(["cnkiInspect", url]);state.cnki.checking = true;emit();
         if (cnkiParser.normalizeInput(url)?.kind === "title") {
@@ -1774,8 +1774,10 @@ async function siteControls(mode = "request") {
     assert.equal(node("fta-pref-cnki-import").disabled, true);
     node("fta-pref-tab-settings").click();
     state.cnki.sessionRemembered = true;emit();
-    assert.match(node("fta-pref-cnki-session").textContent, /会话.*仍需验证/);
-    assert.equal(node("fta-pref-cnki-state").textContent, "尚未验证访问", "allowing session persistence does not assert that cookies, login or PDF permission exist");
+    assert.match(node("fta-pref-cnki-session").textContent, /会话.*不表示已验证账号登录或文献下载权限/);
+    assert.equal(node("fta-pref-cnki-state").textContent, "尚未检查文献访问", "allowing session persistence does not assert that cookies, login or PDF permission exist");
+    assert.equal(node("fta-pref-cnki-verify").textContent, "检查文献访问");
+    assert.equal(node("fta-pref-cnki-state").getAttribute("aria-label"), "知网文献访问检查状态");
     node("fta-pref-cnki-enabled").checked = false;node("fta-pref-cnki-enabled").dispatchEvent(new pane.window.Event("change"));await flush();
     assert.deepEqual(actions.at(-1), ["cnkiSettings", { enabled: false }]);assert.equal(state.cnki.enabled, false);
     rejectSave = true;node("fta-pref-cnki-enabled").checked = true;node("fta-pref-cnki-enabled").dispatchEvent(new pane.window.Event("change"));await flush();
@@ -1785,7 +1787,7 @@ async function siteControls(mode = "request") {
     node("fta-pref-cnki-enabled").checked = true;node("fta-pref-cnki-enabled").dispatchEvent(new pane.window.Event("change"));await flush();
     assert.equal(node("fta-pref-cnki-url").getAttribute("type"), "text", "DOI and title inputs are not rejected by native URL validation");
     const beforeInvalid = actions.length;
-    type("https://unrelated.example/article");assert.equal(node("fta-pref-cnki-inspect").disabled, true);assert.equal(node("fta-pref-cnki-input-error").hidden, false);submitURL();assert.equal(actions.length, beforeInvalid);
+    type("https://unrelated.example/article");assert.equal(node("fta-pref-cnki-inspect").disabled, true);assert.equal(node("fta-pref-cnki-input-error").hidden, false);assert.equal(node("fta-pref-cnki-verify").disabled, true);node("fta-pref-cnki-verify").click();submitURL();assert.equal(actions.length, beforeInvalid, "invalid explicit input cannot silently check a different library sample");
     const title = "复杂中文题名的生物学机制与分子研究";
     type(title);assert.equal(node("fta-pref-cnki-inspect").textContent, "搜索标题");assert.equal(node("fta-pref-cnki-inspect").disabled, false);
     state.settings.language = "zh-TW";emit();assert.equal(node("fta-pref-cnki-inspect").textContent, "搜尋標題");
@@ -1821,7 +1823,7 @@ async function siteControls(mode = "request") {
     assert.equal(node("fta-pref-cnki-preview-stale").hidden, false);
     assert.match(node("fta-pref-cnki-preview-stale").textContent, /input has changed/);
     assert.equal(node("fta-pref-cnki-heading").textContent, "CNKI");
-    assert.match(node("fta-pref-cnki-session").textContent, /Saving the CNKI session is enabled.*needs verification/);
+    assert.match(node("fta-pref-cnki-session").textContent, /Saving the CNKI session is enabled.*does not confirm account login or article download access/);
     assert.match(node("fta-pref-cnki-metadata").textContent, /中文文献标题/, "source metadata stays raw when the UI language changes");
     submitURL();await flush();resolveInspect();await flush();node("fta-pref-cnki-import").click();await flush();
     assert.deepEqual(actions.at(-1), ["cnkiImport"]);
@@ -1874,10 +1876,59 @@ async function siteControls(mode = "request") {
     node("fta-pref-tab-settings").click();node("fta-pref-cnki-login").click();await flush();assert.deepEqual(actions.at(-1), ["cnkiLogin"]);
     node("fta-pref-cnki-reset").click();await flush();assert.deepEqual(actions.at(-1), ["cnkiReset"]);assert.equal(state.cnki.sessionRemembered, false);
     assert.equal(node("fta-pref-cnki-url").value, url + "&draft=retained", "reset does not erase an unsaved URL");
-    node("fta-pref-cnki-verify").click();await flush();assert.deepEqual(actions.at(-1), ["cnkiVerify"]);
-    assert.equal(node("fta-pref-cnki-state").textContent, "沒有可驗證的知網樣本");assert.equal(node("fta-pref-cnki-preview").hidden, true);
+    node("fta-pref-cnki-verify").click();await flush();assert.deepEqual(actions.at(-1), ["cnkiVerify", url + "&draft=retained"]);
+    assert.equal(node("fta-pref-cnki-state").textContent, "請提供待檢查的知網文獻");assert.equal(node("fta-pref-cnki-preview").hidden, true);
+    assert.match(node("fta-pref-cnki-message").textContent, /不用於判定帳號是否已登入/);
+    type(" ");node("fta-pref-cnki-verify").click();await flush();assert.deepEqual(actions.at(-1), ["cnkiVerify", ""], "empty input delegates sample selection without inventing a DOI");
+    assert.equal(node("fta-pref-cnki-action-status").dataset.error, "false", "no sample asks for an article instead of reporting failed login");
     api.verifyCNKI = async () => { state.cnki.state = "error";state.cnki.message = "知网操作未完成，请重试。";emit();return structuredClone(state.cnki); };
     node("fta-pref-cnki-verify").click();await flush();assert.equal(node("fta-pref-cnki-action-status").dataset.error, "true", "resolved error snapshots are not presented as successful checks");
+    state.settings.language = "en";emit();
+    assert.equal(node("fta-pref-cnki-verify").textContent, "Check article access");
+    const failures = [
+      ["timeout", "Article access check timed out", "知网文献请求超时，请稍后重试；这不能判断账号是否已登录。"],
+      ["network_error", "Could not connect to the article page", "知网文献请求失败，请检查网络后重试；这不能判断账号是否已登录。"],
+      ["http_error", "The article website returned an error", "知网站点暂未正常返回文献页面，请稍后重试；这不能判断账号是否已登录。"],
+      ["rate_limited", "Website rate limit reached", "知网站点暂时限制请求频率，请稍后重试；无需据此重新登录。"],
+      ["unsafe_redirect", "Article page redirect not supported", "知网文献请求跳转到未获允许的地址，已停止检查；请核对知网详情页链接。"],
+      ["response_too_large", "Article page response is too large", "知网页面响应超过检查大小限制，已停止解析；请在网页中查看文献。"],
+      ["redirect_limit", "Too many article page redirects", "知网文献页面跳转次数过多，已停止检查；请提供最终的知网详情页链接。"],
+      ["article_mismatch", "The page does not match the target article", "页面文献与原条目的知网编号、DOI 或标题不一致，未导入。"],
+      ["unsupported_url", "Article link not supported", "此链接或解析后的页面暂不支持知网文献检查；请使用知网文章详情页。这不能判断账号是否已登录。"],
+      ["not_cnki", "This DOI does not resolve to a CNKI article", "此 DOI 指向其他网站，不能用于验证知网文献访问；请提供知网文献的 DOI 或详情页链接。"],
+    ];
+    for (const [failure, label, message] of failures) {
+      api.verifyCNKI = async value => { actions.push(["cnkiVerify", value]);Object.assign(state.cnki, { state: failure, message, lastCheckedAt: "2026-11-16T08:00:00Z" });emit();return structuredClone(state.cnki); };
+      type(" 10.1234/explicit-input ");node("fta-pref-cnki-verify").click();await flush();
+      assert.deepEqual(actions.at(-1), ["cnkiVerify", "10.1234/explicit-input"], "the exact current input is checked rather than an unrelated selected DOI");
+      assert.equal(node("fta-pref-cnki-state").textContent, label);
+      assert.equal(node("fta-pref-cnki-state").dataset.tone, "error");
+      assert.equal(node("fta-pref-cnki-message").dataset.error, "true");
+      assert.equal(node("fta-pref-cnki-action-status").dataset.error, "true", failure + " cannot become a successful check toast");
+      assert.equal(node("fta-pref-cnki-action-status").textContent, i18n.translate(message, "en"));
+      assert.doesNotMatch(node("fta-pref-cnki-action-status").textContent, /[\u4e00-\u9fff]/);
+      assert.match(node("fta-pref-cnki-checked").textContent, /^Last article check /);
+    }
+    node("fta-pref-cnki-login").click();await flush();
+    assert.equal(node("fta-pref-cnki-state").textContent, "Article access not checked", "opening login clears stale article errors without asserting authentication");
+    assert.equal(node("fta-pref-cnki-state").dataset.tone, "");assert.equal(node("fta-pref-cnki-message").dataset.error, "false");
+    assert.equal(node("fta-pref-cnki-checked").hidden, true);
+    assert.match(node("fta-pref-cnki-action-status").textContent, /Opening the window does not confirm login/);
+    assert.equal(node("fta-pref-cnki-url").value, " 10.1234/explicit-input ", "opening login preserves the article draft");
+    let resolveVerify;
+    api.verifyCNKI = async value => {
+      actions.push(["cnkiVerify", value]);state.cnki.checking = true;emit();await new Promise(resolve => { resolveVerify = resolve; });
+      Object.assign(state.cnki, { state: "metadata_ready", checking: false, message: "已解析文献元数据；此页面尚未提供可确认的 PDF 入口。", record, metadata, canImport: true });emit();return structuredClone(state.cnki);
+    };
+    node("fta-pref-cnki-verify").click();await flush();assert.equal(node("fta-pref-cnki-state").textContent, "Checking article access…");
+    type("10.1234/newer-draft");resolveVerify();await flush();
+    assert.equal(node("fta-pref-cnki-import").disabled, true, "a late verification preview cannot authorize importing a different input");
+    assert.equal(node("fta-pref-cnki-preview-stale").hidden, false);
+    assert.match(node("fta-pref-cnki-action-status").textContent, /input has changed/);
+    assert.equal(node("fta-pref-cnki-url").value, "10.1234/newer-draft");
+    state.settings.language = "zh-TW";state.cnki.state = "not_found";state.cnki.message = "此页面未提供足够的文献元数据，请核对详情页链接。";emit();
+    assert.equal(node("fta-pref-cnki-state").textContent, "文獻資訊不足", "an empty reader is not reported as a missing article or failed login");
+    assert.equal(node("fta-pref-cnki-verify").textContent, "檢查文獻存取");
     isolated.FulltextPreferences.destroy();
   }
   // A complete large history stays searchable while only one bounded page is

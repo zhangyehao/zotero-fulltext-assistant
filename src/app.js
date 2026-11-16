@@ -583,7 +583,7 @@ function create({Zotero,Services,IOUtils,PathUtils,rootURI,pluginID,version,pick
     async saveSettings(value){const points=MODEL.validatePoints(value.points??settings.points),seconds=Number(value.pollSeconds??settings.pollSeconds);if(!Number.isInteger(seconds)||seconds<60||seconds>3600)throw new Error("检查间隔应为 60–3600 秒的整数。");const language=value.language??settings.language;if(!["zh-CN","zh-TW","en"].includes(language))throw new Error("不支持此界面语言。");Services.prefs.setStringPref(PREF+"language",language);Services.prefs.setIntPref(PREF+"points",points);Services.prefs.setIntPref(PREF+"pollSeconds",seconds);Services.prefs.setBoolPref(PREF+"autoDownload",value.autoDownload??settings.autoDownload);Services.prefs.setBoolPref(PREF+"acceptSiteMinimum",value.acceptSiteMinimum??settings.acceptSiteMinimum);Services.prefs.setBoolPref(PREF+"checkInReminder",value.checkInReminder??settings.checkInReminder);settings={...settings,points,pollSeconds:seconds,autoDownload:value.autoDownload??settings.autoDownload,acceptSiteMinimum:value.acceptSiteMinimum??settings.acceptSiteMinimum,checkInReminder:value.checkInReminder??settings.checkInReminder,language};emit();},
     saveCNKISettings(value){return cnkiController.saveSettings(value);},
     openCNKILogin(){return cnkiController.openLogin();},
-    verifyCNKI(){return cnkiController.verify();},
+    verifyCNKI(value){return cnkiController.verify(value);},
     normalizeCNKIInput(value){return cnkiController.normalizeInput(value);},
     inspectCNKIURL(url){return cnkiController.inspectURL(url);},
     importCNKIPreview(){return cnkiController.importPreview();},

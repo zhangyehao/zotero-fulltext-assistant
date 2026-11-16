@@ -6,6 +6,18 @@
   "use strict";
   const rows = [
     // CNKI site metadata, session and explicit item operations.
+    ["此链接或解析后的页面暂不支持知网文献检查；请使用知网文章详情页。这不能判断账号是否已登录。","此連結或解析後的頁面暫不支援知網文獻檢查；請使用知網文章詳情頁。這不能判斷帳號是否已登入。","This link or its resolved page is not supported for CNKI article checks. Use the CNKI article details page. This does not determine whether the account is logged in."],
+    ["此 DOI 指向其他网站，不能用于验证知网文献访问；请提供知网文献的 DOI 或详情页链接。","此 DOI 指向其他網站，不能用於驗證知網文獻存取；請提供知網文獻的 DOI 或詳情頁連結。","This DOI resolves to another website and cannot verify CNKI article access. Provide a CNKI article DOI or details-page link."],
+    ["知网文献请求超时，请稍后重试；这不能判断账号是否已登录。","知網文獻請求逾時，請稍後重試；這不能判斷帳號是否已登入。","The CNKI article request timed out. Try again later; this does not determine whether the account is logged in."],
+    ["知网文献请求失败，请检查网络后重试；这不能判断账号是否已登录。","知網文獻請求失敗，請檢查網路後重試；這不能判斷帳號是否已登入。","The CNKI article request failed. Check the network and try again; this does not determine whether the account is logged in."],
+    ["知网站点暂未正常返回文献页面，请稍后重试；这不能判断账号是否已登录。","知網站點暫未正常傳回文獻頁面，請稍後重試；這不能判斷帳號是否已登入。","CNKI did not return the article page normally. Try again later; this does not determine whether the account is logged in."],
+    ["知网站点暂时限制请求频率，请稍后重试；无需据此重新登录。","知網站點暫時限制請求頻率，請稍後重試；無需據此重新登入。","CNKI is temporarily limiting request frequency. Try again later; this does not require logging in again."],
+    ["知网文献请求跳转到未获允许的地址，已停止检查；请核对知网详情页链接。","知網文獻請求重新導向未獲允許的位址，已停止檢查；請核對知網詳情頁連結。","The CNKI article request redirected to an address that is not allowed, so the check stopped. Check the CNKI details-page link."],
+    ["知网页面响应超过检查大小限制，已停止解析；请在网页中查看文献。","知網頁面回應超過檢查大小限制，已停止解析；請在網頁中查看文獻。","The CNKI page response exceeded the check size limit, so parsing stopped. View the article on the website."],
+    ["知网文献页面跳转次数过多，已停止检查；请提供最终的知网详情页链接。","知網文獻頁面重新導向次數過多，已停止檢查；請提供最終的知網詳情頁連結。","The CNKI article page redirected too many times, so the check stopped. Provide the final CNKI details-page link."],
+    ["请在下方输入知网文献的 DOI 或详情页链接，或选择明确关联知网的条目；文献访问检查不用于判定账号是否已登录。","請在下方輸入知網文獻的 DOI 或詳情頁連結，或選擇明確關聯知網的條目；文獻存取檢查不用於判定帳號是否已登入。","Enter a CNKI article DOI or details-page link below, or select an item associated with CNKI. Article access checks do not determine whether the account is logged in."],
+    ["知网文献检查未完成，请稍后重试；这不能判断账号是否已登录。","知網文獻檢查未完成，請稍後重試；這不能判斷帳號是否已登入。","The CNKI article check did not finish. Try again later; this does not determine whether the account is logged in."],
+    ["已打开知网网页登录；会话按网站有效期保存。完成后可检查具体文献的访问情况，打开窗口不代表已验证登录。","已開啟知網網頁登入；工作階段依網站有效期儲存。完成後可檢查具體文獻的存取情況，開啟視窗不代表已驗證登入。","CNKI website login opened; sessions retain the website's expiry. Check access to a specific article after completing login. Opening the window does not confirm login."],
     ["操作已取消，已保存的条目保留。","操作已取消，已儲存的條目保留。","The operation was cancelled. Saved items are retained."],
     ["当前会话没有参考文献列表的访问权限。","目前工作階段沒有參考文獻清單的存取權限。","The current session does not have access to the reference list."],
     ["核对期间原文献的 DOI、标题或知网编号已改变，请重新核对。","核對期間原文獻的 DOI、標題或知網編號已變更，請重新核對。","The original article's DOI, title or CNKI identifier changed during review. Review it again."],

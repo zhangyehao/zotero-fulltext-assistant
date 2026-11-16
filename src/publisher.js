@@ -272,7 +272,14 @@
           const status = Number(response.status);
           if ([301,302,303,307,308].includes(status)) {
             const next = httpURL(responseHeader(response, "Location"), current);
-            if (!next || !(cnki.resolverURL?.(next) || cnki.pageURL(next))) return { code: "unsupported_url" };
+            if (!next) return { code: "unsupported_url" };
+            if (!(cnki.resolverURL?.(next) || cnki.pageURL(next))) {
+              // A valid DOI can resolve to another publisher. This says nothing
+              // about CNKI login. Classify without requesting that destination.
+              const host = new URL(next).hostname;
+              const official = cnki.isCNKIURL(next) || ["doi.org", "www.chndoi.org"].includes(host);
+              return { code: official ? "unsupported_url" : "not_cnki" };
+            }
             queue.unshift(next); continue;
           }
           if (status === 429) return { code: "rate_limited" };
@@ -333,7 +340,7 @@
       }
       return { code: "redirect_limit" };
     }
-    async function inspectCNKI(itemOrURL, { isCancelled = () => false, onProgress = () => {}, render = true, includeReferences = false } = {}) {
+    async function inspectCNKI(itemOrURL, { isCancelled = () => false, onProgress = () => {}, render = true, includeReferences = false, userInitiated = false } = {}) {
       if (isCancelled()) throw abort();
       if (!cnkiEnabled()) return cnkiEmpty("disabled");
       const isItem = !!itemOrURL?.getField;
@@ -367,6 +374,10 @@
       }
       if (!address) return cnkiEmpty("needs_url", expected.expectedTitle);
       const displayURL = record?.url || null;
+      // An explicit retry after website verification must reach the site again.
+      // Resolve DOI routes first so the real article host is cleared, while
+      // background acquisition retains its challenge cooldown.
+      if (userInitiated === true) accessGates.delete(siteKey(address));
       if (gateFor(address)) return { ...cnkiEmpty("human_verification"), record, articleURL: displayURL };
       if (publisherSession) await publisherSession.initialize().catch(() => {});
       check();

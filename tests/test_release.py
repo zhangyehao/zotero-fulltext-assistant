@@ -110,7 +110,7 @@ class BuildTests(unittest.TestCase):
 
     def test_stable_versions_existing_id_and_tested_compatibility(self):
         manifest, version = build.configuration(self.fixture)
-        self.assertEqual(version, "1.1.1")
+        self.assertEqual(version, "1.1.2")
         self.assertEqual(manifest["applications"]["zotero"], {"id": "fulltext-assistant@local.invalid", "update_url": build.UPDATE_URL, "strict_min_version": "10.0.7", "strict_max_version": "10.0.*"})
 
     def test_xpi_preserves_runtime_files_and_excludes_development(self):
@@ -138,7 +138,7 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(len(bundle["assets"]), 5)
         self.assertEqual(bundle["xpi_sha256"], self.result["sha256"])
         update = json.loads((self.output / "updates.json").read_text())["addons"][build.ADDON_ID]["updates"][0]
-        self.assertEqual(update["update_link"], "https://github.com/zhangyehao/zotero-fulltext-assistant/releases/download/v1.1.1/zotero-fulltext-assistant-1.1.1.xpi")
+        self.assertEqual(update["update_link"], "https://github.com/zhangyehao/zotero-fulltext-assistant/releases/download/v1.1.2/zotero-fulltext-assistant-1.1.2.xpi")
         self.assertEqual(update["update_hash"], "sha256:" + self.result["sha256"])
         self.assertEqual(update["applications"]["zotero"], {"strict_min_version": "10.0.7", "strict_max_version": "10.0.*"})
         release.verify_checkout(bundle, self.fixture)

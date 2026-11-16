@@ -86,12 +86,20 @@ test('official DOI routing rejects a conflicting registered title before fetchin
  const result=await env.publisher.inspectCNKI(env.item,{render:false});
  assert.equal(result.status,'article_mismatch');assert(!env.requests.some(row=>row.url===thesisOpaque));assert.equal(env.imports.length,0);
 });
-test('a resolver cannot change DOI or redirect to an arbitrary website',async()=>{
- for(const destination of ['https://link.cnki.net/doi/10.1234/other','https://external.test/metadata','https://pay.cnki.net/order']){
+test('a resolver cannot change DOI and classifies an offsite destination without fetching it',async()=>{
+ for(const [destination,status] of [['https://link.cnki.net/doi/10.1234/other','article_mismatch'],['https://external.test/metadata','not_cnki'],['https://pay.cnki.net/order','unsupported_url']]){
   const env=setup({cnki:CNKI,pages:{[thesisDOIURL]:{status:302,headers:{Location:destination}}}});
   const result=await env.publisher.inspectCNKI(thesisDOI,{render:false});
-  assert(['article_mismatch','unsupported_url'].includes(result.status));assert.equal(env.requests.length,1);assert.equal(env.imports.length,0);
+  assert.equal(result.status,status);assert.equal(env.requests.length,1);assert.equal(env.imports.length,0);
  }
+});
+test('a non-CNKI DOI is not treated as a login failure or invalid DOI',async()=>{
+ const input='10.1234/non-cnki-example',start='https://doi.org/'+input;
+ const env=setup({cnki:CNKI,pages:{[start]:{status:302,headers:{Location:'https://www.biorxiv.org/content/synthetic'}}}});
+ const result=await env.publisher.inspectCNKI(input,{render:false,userInitiated:true});
+ assert.equal(result.status,'not_cnki');assert.equal(result.record,null);assert.equal(result.metadata,null);
+ assert.deepEqual(env.requests.map(row=>row.url),[start]);assert.equal(env.requests[0].options.anon,true);
+ assert.equal(env.hidden.length,0);assert.equal(env.imports.length,0);
 });
 test('a mismatching DOI registration page does not supply a title or guessed downstream route',async()=>{
  const env=setup({cnki:CNKI,pages:{...thesisPages(),[thesisRegistry]:registryHTML({paperDOI:'10.1234/other'})}});
@@ -233,6 +241,17 @@ test('CNKI visible challenge is cached until explicit retry clears the site gate
  assert.equal((await env.publisher.inspectCNKI(env.item)).status,'human_verification');challenge=false;
  assert.equal((await env.publisher.inspectCNKI(env.item)).status,'human_verification');assert.equal(env.requests.length,1);
  env.publisher.clearAccessGate(cnkiURL);assert.equal((await env.publisher.inspectCNKI(env.item)).status,'pdf_available');assert.equal(env.requests.length,2);
+});
+test('explicit CNKI recheck clears only the resolved article gate while background checks retain it',async()=>{
+ let challenge=true;
+ const pages=thesisPages();pages[thesisOpaque]=()=>challenge?cnkiMarkup('<p>请输入验证码</p>'):cnkiMarkup('<input id="param-filename" value="SYNTHETIC2026.nh"><input id="paramdbcode" value="CDFD">'+cnkiAnchor);
+ const env=setup({cnki:CNKI,pages});
+ assert.equal((await env.publisher.inspectCNKI(thesisDOI,{render:false})).status,'human_verification');
+ challenge=false;
+ assert.equal((await env.publisher.inspectCNKI(thesisDOI,{render:false})).status,'human_verification');
+ assert.equal(env.requests.filter(row=>row.url===thesisOpaque).length,1);
+ assert.equal((await env.publisher.inspectCNKI(thesisDOI,{render:false,userInitiated:true})).status,'pdf_available');
+ assert.equal(env.requests.filter(row=>row.url===thesisOpaque).length,2);assert.equal(env.imports.length,0);
 });
 const cnkiPublicURL='https://www.cnki.com.cn/Article/CJFDTOTAL-TEST202401001.htm';
 const cnkiRefsURL='https://www.cnki.com.cn/cnkispace/cjfd/references/ref.html?fileName=0123456789ABCDEF';

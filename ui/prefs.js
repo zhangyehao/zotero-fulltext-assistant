@@ -27,6 +27,7 @@
     let cnkiPreviewKey = "";
     let cnkiReferenceKey = "", cnkiReferenceRecord = "", cnkiReferencePage = 0;
     const selectedCNKIReferences = new Set();
+    const cnkiFailureStates = new Set(["error", "timeout", "network_error", "http_error", "rate_limited", "unsafe_redirect", "response_too_large", "redirect_limit", "article_mismatch", "unsupported_url", "not_cnki"]);
     let autoUpdateSaving = false;
     let checkInStartupError = "";
     let destroyed = false;
@@ -274,17 +275,17 @@
     function renderCNKI() {
       const info = snapshot.cnki || {}, working = busy || info.checking === true;
       const state = info.checking ? "checking" : info.state || "idle";
-      const labels = { idle: "尚未验证访问", checking: "正在检查知网…", metadata_ready: "已读取元数据", search_required: "请在官网选择文章", login_required: "需要知网登录", human_verification: "需要网站验证", purchase_required: "网站要求购买", access_check_required: "需核验下载权限", access_denied: "没有文献访问权限", caj_only: "仅有 CAJ 文件", not_found: "未找到知网文献", error: "知网检查未完成", no_sample: "没有可验证的知网样本" };
+      const labels = { idle: "尚未检查文献访问", checking: "正在检查文献访问…", metadata_ready: "已读取文献题录", search_required: "请在官网选择文章", login_required: "此文献需要知网登录", human_verification: "需要网站验证", purchase_required: "网站要求购买", access_check_required: "需核验下载权限", access_denied: "没有文献访问权限", caj_only: "仅有 CAJ 文件", not_found: "文献信息不足", error: "文献访问检查未完成", no_sample: "请提供待检查的知网文献", timeout: "文献访问检查超时", network_error: "文献页面连接失败", http_error: "文献网站返回错误", rate_limited: "网站限制请求频率", unsafe_redirect: "文献页面跳转不受支持", response_too_large: "文献页面响应过大", redirect_limit: "文献页面跳转过多", article_mismatch: "页面与目标文献不一致", unsupported_url: "不支持此文献链接", not_cnki: "此 DOI 未指向知网文献" };
       $("fta-pref-cnki").setAttribute("aria-busy", String(working));
-      $("fta-pref-cnki-state").textContent = labels[state] || "尚未验证访问";
-      $("fta-pref-cnki-state").dataset.tone = state === "error" ? "error" : ["login_required", "human_verification", "purchase_required", "access_check_required", "access_denied", "caj_only"].includes(state) ? "warning" : "";
+      $("fta-pref-cnki-state").textContent = labels[state] || "尚未检查文献访问";
+      $("fta-pref-cnki-state").dataset.tone = cnkiFailureStates.has(state) ? "error" : ["login_required", "human_verification", "purchase_required", "access_check_required", "access_denied", "caj_only", "not_found"].includes(state) ? "warning" : "";
       $("fta-pref-cnki-enabled").checked = info.enabled !== false;
       $("fta-pref-cnki-enabled").disabled = working || typeof app.saveCNKISettings !== "function";
-      $("fta-pref-cnki-session").textContent = info.sessionRemembered === true ? "已允许保存知网会话；当前访问权限仍需验证。" : "尚未开启知网会话保存。";
+      $("fta-pref-cnki-session").textContent = info.sessionRemembered === true ? "已允许保存知网会话；这不表示已验证账号登录或文献下载权限。" : "尚未开启知网会话保存；此状态不用于判断账号是否已登录。";
       $("fta-pref-cnki-message").textContent = String(info.message || "");
       $("fta-pref-cnki-message").hidden = !info.message;
-      $("fta-pref-cnki-message").dataset.error = String(state === "error");
-      $("fta-pref-cnki-checked").textContent = info.lastCheckedAt ? "最近检查 " + dateText(info.lastCheckedAt, true) : "";
+      $("fta-pref-cnki-message").dataset.error = String(cnkiFailureStates.has(state));
+      $("fta-pref-cnki-checked").textContent = info.lastCheckedAt ? "最近文献检查 " + dateText(info.lastCheckedAt, true) : "";
       $("fta-pref-cnki-checked").hidden = !info.lastCheckedAt;
       const methods = { login: "openCNKILogin", reset: "resetCNKISession", verify: "verifyCNKI", inspect: "inspectCNKIURL", import: "importCNKIPreview", enrich: "enrichSelectedCNKI" };
       for (const [id, method] of Object.entries(methods)) $("fta-pref-cnki-" + id).disabled = working || typeof app[method] !== "function";
@@ -293,6 +294,7 @@
       const inputValue = String($("fta-pref-cnki-url").value || "").trim(), input = app.normalizeCNKIInput?.(inputValue);
       $("fta-pref-cnki-inspect").textContent = input?.kind === "title" ? "搜索标题" : "解析文献";
       $("fta-pref-cnki-inspect").disabled ||= !input;
+      $("fta-pref-cnki-verify").disabled ||= !!inputValue && !input && typeof app.normalizeCNKIInput === "function";
       $("fta-pref-cnki-input-error").hidden = !inputValue || !!input || typeof app.normalizeCNKIInput !== "function";
       $("fta-pref-cnki-url").setAttribute("aria-invalid", String(!!inputValue && !input));
       $("fta-pref-cnki-import").disabled ||= info.canImport !== true || !info.record?.id || !info.metadata?.title || cnkiPreviewDirty;
@@ -1086,7 +1088,7 @@
       });
     }
     function checkedCNKIResult(result) {
-      if (result?.state === "error") throw new Error(result.message || "知网操作未完成，请重试。");
+      if (cnkiFailureStates.has(result?.state)) throw new Error(result.message || "文献访问检查未完成，请查看状态后重试。");
       return result;
     }
     const cnkiActionOptions = { target: "fta-pref-cnki-action-status" };
@@ -1102,18 +1104,20 @@
       const value = String($("fta-pref-cnki-url").value || "").trim(), revision = cnkiInputRevision;
       selectedCNKIReferences.clear();cnkiReferencePage = 0;cnkiReferenceKey = "";
       run(async () => {
-        const result = checkedCNKIResult(await app.inspectCNKIURL(value));
+        const result = await app.inspectCNKIURL(value);
         if (revision !== cnkiInputRevision || value !== String($("fta-pref-cnki-url").value || "").trim()) { cnkiPreviewDirty = true;return { message: "输入已更改，请先解析新内容，再导入预览文献。" }; }
-        cnkiPreviewDirty = false;return result;
+        checkedCNKIResult(result);cnkiPreviewDirty = false;return result;
       }, result => result?.message || (result?.state === "search_required" ? "请在官网选择文章" : "解析已完成，请核对文献预览。"), false, cnkiActionOptions);
     });
-    for (const [id, method, message] of [["login", "openCNKILogin", "已打开知网网页登录。请自行完成登录或验证。"], ["reset", "resetCNKISession", "知网会话已重置。"], ["verify", "verifyCNKI", "知网检查已完成，请查看访问状态。"], ["import", "importCNKIPreview", "知网条目操作已完成，请查看结果。"], ["enrich", "enrichSelectedCNKI", "知网元数据补全已完成，请查看结果。"]]) {
+    for (const [id, method, message] of [["login", "openCNKILogin", "已打开知网网页登录。完成后请检查具体文献；打开窗口不表示已验证登录。"], ["reset", "resetCNKISession", "知网会话已重置。"], ["verify", "verifyCNKI", "文献访问检查已结束，请查看此文献的结果。"], ["import", "importCNKIPreview", "知网条目操作已完成，请查看结果。"], ["enrich", "enrichSelectedCNKI", "知网元数据补全已完成，请查看结果。"]]) {
       on($("fta-pref-cnki-" + id), "click", () => {
         if ($("fta-pref-cnki-" + id).disabled) return;
-        const revision = cnkiInputRevision;
+        const revision = cnkiInputRevision, value = String($("fta-pref-cnki-url").value || "").trim();
         if (id === "verify" || id === "reset") { selectedCNKIReferences.clear();cnkiReferencePage = 0;cnkiReferenceKey = ""; }
         run(async () => {
-          const result = checkedCNKIResult(await app[method]());
+          const result = id === "verify" ? await app[method](value) : await app[method]();
+          if (id === "verify" && (revision !== cnkiInputRevision || value !== String($("fta-pref-cnki-url").value || "").trim())) { cnkiPreviewDirty = true;return { message: "输入已更改，请先解析新内容，再导入预览文献。" }; }
+          checkedCNKIResult(result);
           if (id === "verify" || id === "reset") cnkiPreviewDirty = revision !== cnkiInputRevision;
           return result;
         }, result => typeof result?.message === "string" && result.message ? result.message : message, false, cnkiActionOptions);

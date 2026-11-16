@@ -98,12 +98,12 @@
         <html:div class="fta-actions fta-save-actions"><html:button id="fta-pref-save-sources" type="submit" class="fta-primary">保存全文来源</html:button><html:span id="fta-pref-source-save-state" class="fta-secondary" role="status" aria-live="polite"></html:span></html:div>
       </html:form>
       <html:section id="fta-pref-cnki" class="fta-settings-group fta-cnki-settings" aria-labelledby="fta-pref-cnki-heading">
-        <html:div class="fta-section-heading"><html:h3 id="fta-pref-cnki-heading">知网</html:h3><html:span id="fta-pref-cnki-state" class="fta-status-badge" role="status" aria-live="polite">尚未验证访问</html:span></html:div>
+        <html:div class="fta-section-heading"><html:h3 id="fta-pref-cnki-heading">知网</html:h3><html:span id="fta-pref-cnki-state" class="fta-status-badge" role="status" aria-live="polite" aria-label="知网文献访问检查状态">尚未检查文献访问</html:span></html:div>
         <html:label class="fta-check" for="fta-pref-cnki-enabled"><html:input id="fta-pref-cnki-enabled" type="checkbox"/><html:span>启用知网来源</html:span></html:label>
         <html:p class="fta-note">更改立即保存。批量获取会尝试知网条目；元数据可读取不代表有 PDF 下载权限。</html:p>
         <html:p id="fta-pref-cnki-session" class="fta-secondary" role="status"></html:p>
-        <html:div class="fta-actions"><html:button id="fta-pref-cnki-login" type="button">网页登录</html:button><html:button id="fta-pref-cnki-verify" type="button">验证访问</html:button><html:button id="fta-pref-cnki-reset" type="button">重置知网会话</html:button></html:div>
-        <html:p class="fta-note">在插件网页中自行完成登录或验证。验证优先检查选中条目的 DOI 或知网文章链接，否则使用文库中的一个知网样本；不会为你购买文献。</html:p>
+        <html:div class="fta-actions"><html:button id="fta-pref-cnki-login" type="button">网页登录</html:button><html:button id="fta-pref-cnki-verify" type="button">检查文献访问</html:button><html:button id="fta-pref-cnki-reset" type="button">重置知网会话</html:button></html:div>
+        <html:p class="fta-note">在网页中自行完成登录或验证。文献访问检查优先使用下方输入；输入为空时使用当前预览或明确的知网条目，不会用其他网站的 DOI 代测登录。</html:p>
         <html:p id="fta-pref-cnki-message" class="fta-note" role="status" aria-live="polite"></html:p>
         <html:p id="fta-pref-cnki-checked" class="fta-note"></html:p>
         <html:form id="fta-pref-cnki-url-form" class="fta-cnki-url-form">

@@ -49,6 +49,79 @@ test('mismatched and unavailable metadata cannot be imported',async()=>{
 test('verify uses selected CNKI entry and no sample is not a failed login',async()=>{
   const e=env();assert.equal((await e.api.verify()).state,'no_sample');const item=await e.add({url:URL_A,title:data.title});e.selected.push(item);assert.equal((await e.api.verify()).state,'metadata_ready');assert.equal(e.calls[0].input,item);await e.api.destroy();
 });
+test('automatic access verification ignores a selected generic DOI and does not test account login',async()=>{
+  const e=env(),item=await e.add({DOI:'10.1234/ordinary.paper',url:'https://other-publisher.test/article',title:'An unrelated article'});e.selected.push(item);
+  await e.api.openLogin();const snapshot=await e.api.verify();
+  assert.equal(snapshot.state,'no_sample');assert.equal(snapshot.sessionRemembered,true);assert.equal(snapshot.lastCheckedAt,null);
+  assert.match(snapshot.message,/明确关联知网/);assert.match(snapshot.message,/不用于判定账号是否已登录/);assert.equal(snapshot.canImport,false);assert.equal(e.calls.length,0);
+  await e.api.destroy();
+});
+test('automatic verification selects explicit CNKI evidence before unrelated selected DOI entries',async()=>{
+  const e=env(),other=await e.add({DOI:'10.1234/ordinary.paper',title:'Another article'}),known=await e.add({url:URL_A,title:data.title});
+  e.selected.push(other);assert.equal((await e.api.verify()).state,'metadata_ready');assert.equal(e.calls.at(-1).input,known);assert.equal(e.calls.at(-1).opts.userInitiated,true);
+  await e.api.destroy();
+});
+test('automatic library samples include CNKI IDs and DOI-only CNKI records',async()=>{
+  for(const fields of [{extra:'CNKI: '+record.id},{extra:'CNKI ID: '+record.id},{extra:'CNKI URL: '+URL_A},{DOI:'10.1234/d.cnki.fixture.2026.000001'}]){
+    const e=env(),known=await e.add({...fields,title:data.title});assert.equal((await e.api.verify()).state,'metadata_ready');assert.equal(e.calls.at(-1).input,known);await e.api.destroy();
+  }
+  for(const DOI of ['10.1234/notcnki.paper','10.1234/paper.cnkiOther']){
+    const e=env(),item=await e.add({DOI,title:data.title});e.selected.push(item);assert.equal((await e.api.verify()).state,'no_sample');assert.equal(e.calls.length,0);await e.api.destroy();
+  }
+});
+test('explicit verification input wins over preview and selection and supports generic valid DOI input',async()=>{
+  const e=env(),selected=await e.add({url:URL_A,title:data.title});e.selected.push(selected);await e.api.inspectURL(URL_A);
+  await e.api.verify(URL_B);assert.equal(e.calls.at(-1).input,URL_B);assert.equal(e.calls.at(-1).opts.userInitiated,true);
+  await e.api.verify(' DOI: 10.1234/ordinary.paper ');assert.equal(e.calls.at(-1).input,'https://doi.org/10.1234/ordinary.paper');assert.equal(e.calls.at(-1).opts.userInitiated,true);
+  const count=e.calls.length;await assert.rejects(e.api.verify('https://other-publisher.test/article'),/有效 DOI/);assert.equal(e.calls.length,count);
+  await e.api.destroy();
+});
+test('empty verification input rechecks the current CNKI preview before a different selection',async()=>{
+  const e=env(),selected=await e.add({url:URL_B,title:data.title});await e.api.inspectURL(URL_A);e.selected.push(selected);
+  await e.api.verify(' ');assert.equal(e.calls.at(-1).input,URL_A);assert.equal(e.calls.at(-1).opts.userInitiated,true);await e.api.destroy();
+});
+test('a mismatched item cannot become a context-free URL preview on the next empty verification',async()=>{
+  const e=env({inspect:async input=>({status:typeof input==='string'?'pdf_available':'article_mismatch',record,metadata:data})});
+  const item=await e.add({url:URL_A,title:'A conflicting item title',DOI:'10.1234/conflicting.item'});e.selected.push(item);
+  assert.equal((await e.api.verify()).state,'article_mismatch');const retry=await e.api.verify(' ');
+  assert.equal(e.calls.length,2);assert(e.calls.every(call=>call.input===item));assert.equal(retry.state,'article_mismatch');assert.equal(retry.canImport,false);
+  assert.throws(()=>e.api.importPreview(),/先解析/);await e.api.destroy();
+});
+test('explicit title verification uses the existing search handoff without requesting arbitrary DOI samples',async()=>{
+  const e=env(),item=await e.add({DOI:'10.1234/ordinary.paper',title:'Unrelated paper'});e.selected.push(item);
+  const result=await e.api.verify('明确输入的中文文献完整标题');assert.equal(result.state,'search_required');assert.equal(e.launches.length,1);assert.equal(e.calls.length,0);await e.api.destroy();
+});
+test('opening login clears a previous check error without claiming authenticated access',async()=>{
+  const e=env({inspect:async()=>({status:'unsupported_url'})});const failed=await e.api.inspectURL(URL_A);assert.equal(failed.state,'unsupported_url');assert(failed.lastCheckedAt);
+  const opened=await e.api.openLogin();assert.equal(opened.state,'idle');assert.equal(opened.lastCheckedAt,null);assert.equal(opened.canImport,false);assert.equal(opened.sessionRemembered,true);
+  assert.match(opened.message,/打开窗口不代表已验证登录/);assert.equal(e.opens.length,1);assert.equal(e.calls.length,1);await e.api.destroy();
+});
+test('CNKI check failures retain distinct causes and never become a login verdict',async()=>{
+  for(const status of ['timeout','network_error','http_error','rate_limited','unsafe_redirect','response_too_large','redirect_limit','article_mismatch','unsupported_url','not_cnki']){
+    const e=env({inspect:async()=>({status,record,metadata:data})}),snapshot=await e.api.inspectURL(URL_A);
+    assert.equal(snapshot.state,status,status);assert.equal(snapshot.canImport,false,status);assert(snapshot.lastCheckedAt,status);
+    assert.doesNotMatch(snapshot.message,/请[^；。]*(?:重新|完成)[^；。]*登录|需要知网登录/,status);assert.throws(()=>e.api.importPreview(),/先解析/);await e.api.destroy();
+  }
+});
+test('unexpected request exceptions distinguish timeout and discard stale preview metadata',async()=>{
+  for(const error of [Object.assign(new Error('private diagnostic'),{code:'timeout'}),new Error('private diagnostic')]){
+    let calls=0;const e=env({inspect:async()=>{if(calls++)throw error;return {status:'metadata_only',record,metadata:data};}});await e.api.inspectURL(URL_A);
+    await assert.rejects(e.api.inspectURL(URL_B),/不能判断账号是否已登录/);const failed=e.api.getSnapshot();
+    assert.equal(failed.state,error.code==='timeout'?'timeout':'network_error');assert.equal(failed.record,null);assert.equal(failed.metadata,null);assert.equal(failed.canImport,false);assert.equal(failed.checking,false);assert.doesNotMatch(failed.message,/private diagnostic/);
+    assert.equal((await e.api.verify()).state,'no_sample');await e.api.destroy();
+  }
+});
+test('explicit checks may retry a solved website challenge while enrichment keeps normal cooldown semantics',async()=>{
+  const e=env(),item=await e.add({url:URL_A,title:data.title});e.selected.push(item);
+  await e.api.inspectURL(URL_A);assert.equal(e.calls.at(-1).opts.userInitiated,true);
+  await e.api.verify();assert.equal(e.calls.at(-1).opts.userInitiated,true);
+  await e.api.enrichSelected();assert.equal(e.calls.at(-1).opts.userInitiated,undefined);await e.api.destroy();
+});
+test('verification does not replace an active check or inspect disabled and invalid inputs',async()=>{
+  const gate=deferred(),e=env({inspect:async()=>{await gate.promise;return {status:'metadata_only',record,metadata:data};}}),pending=e.api.inspectURL(URL_A);
+  await assert.rejects(e.api.verify(),/正在进行/);assert.equal(e.api.getSnapshot().state,'checking');gate.resolve();await pending;
+  await assert.rejects(e.api.verify({url:URL_A}),/有效 DOI/);e.api.saveSettings({enabled:false});await assert.rejects(e.api.verify(),/开启/);assert.equal(e.calls.length,1);await e.api.destroy();
+});
 test('metadata enrichment fills blanks only and leaves existing user fields and creators',async()=>{
   const e=env();const item=await e.add({url:URL_A,title:data.title,publicationTitle:'用户期刊',extra:'My field: retained'});item.creators=[{lastName:'已有作者',fieldMode:1,creatorType:'author'}];e.selected.push(item);
   const result=await e.api.enrichSelected();assert.equal(result.updated,1);assert.equal(item.getField('publicationTitle'),'用户期刊');assert.equal(item.getField('DOI'),data.doi);assert.match(item.getField('extra'),/^My field: retained/);assert.equal(item.creators[0].lastName,'已有作者');await e.api.destroy();
@@ -170,7 +243,7 @@ test('reference extraction respects cancellation and never restores pre-reset ro
   const gate=deferred(),e=env({inspect:async(_,opts)=>{if(opts.includeReferences)await gate.promise;return {status:'metadata_only',record,metadata:data,references:{references:[{id:'r1',title:'引用',canImport:true}]}};}});await e.api.inspectURL(URL_A);const pending=e.api.fetchReferences(),reset=e.api.resetSession();gate.resolve();await assert.rejects(pending,{name:'AbortError'});await reset;assert.equal(e.api.getSnapshot().references.items.length,0);await e.api.destroy();
 });
 test('unknown result codes fail closed despite containing plausible metadata',async()=>{
-  const e=env({inspect:async()=>({status:'network_error',record,metadata:data})});assert.equal((await e.api.inspectURL(URL_A)).canImport,false);assert.throws(()=>e.api.importPreview(),/先解析/);await e.api.destroy();
+  const e=env({inspect:async()=>({status:'unknown_future_result',record,metadata:data})});const snapshot=await e.api.inspectURL(URL_A);assert.equal(snapshot.state,'error');assert.equal(snapshot.canImport,false);assert.throws(()=>e.api.importPreview(),/先解析/);await e.api.destroy();
 });
 test('same generic reference title without author evidence is not declared a duplicate',async()=>{
   const references={references:[{id:'r1',title:'Introduction',year:'2021',canImport:true,raw:'A different author. Introduction.'}]};

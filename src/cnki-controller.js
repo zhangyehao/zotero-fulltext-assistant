@@ -31,6 +31,16 @@
     function normalizeDOI(value) { const text = clean(value).replace(/^https?:\/\/(?:dx\.)?doi\.org\//i, "").replace(/^doi\s*:\s*/i, ""); return /^10\.\d{4,9}\/[^\s<>]+$/i.test(text) ? text.toLowerCase() : ""; }
     const normalizeInput = value => clone(cnki.normalizeInput(value));
     const hasArticleInput = item => !!(cnki.fromItem(item) || cnki.pageURL(item) || cnki.resolverURL(item?.getField?.("url")) || normalizeInput(item?.getField?.("DOI") || item?.getExtraField?.("DOI"))?.kind === "doi");
+    function hasCNKIAssociation(item) {
+      if (cnki.fromItem(item) || cnki.pageURL(item)) return true;
+      const resolver = cnki.resolverURL(item?.getField?.("url"));
+      if (resolver && cnki.isCNKIURL(resolver.url)) return true;
+      const input = normalizeInput(item?.getField?.("DOI") || item?.getExtraField?.("DOI") || resolver?.doi);
+      // A generic DOI is not evidence that this is a CNKI article. Explicit
+      // DOI input is still supported; automatic samples need a CNKI link/ID
+      // or a DOI suffix that identifies CNKI itself.
+      return input?.kind === "doi" && /(?:^|[./_-])cnki(?:[./_-]|$)/i.test(input.doi.split("/").slice(1).join("/"));
+    }
     function safeReferenceURL(value) {
       const page = cnki.pageURL(value); if (!page) return "";
       const url = new URL(page);
@@ -39,7 +49,7 @@
     function resultPatch(result) {
       const record = cnki.normalizeRecord(result?.record), data = metadata(result?.metadata);
       const usable = !!record && !!data?.title && ["pdf_available", "metadata_only", "caj_only", "purchase_required", "access_check_required", "access_denied", "login_required", "human_verification"].includes(result?.status);
-      const statusMap = { pdf_available: "metadata_ready", metadata_only: "metadata_ready", login_required: "login_required", human_verification: "human_verification", purchase_required: "purchase_required", access_check_required: "access_check_required", access_denied: "access_denied", caj_only: "caj_only", article_mismatch: "error", metadata_unavailable: "not_found", record_unavailable: "not_found", unsupported_url: "error", needs_url: "no_sample", disabled: "idle" };
+      const statusMap = { pdf_available: "metadata_ready", metadata_only: "metadata_ready", login_required: "login_required", human_verification: "human_verification", purchase_required: "purchase_required", access_check_required: "access_check_required", access_denied: "access_denied", caj_only: "caj_only", article_mismatch: "article_mismatch", metadata_unavailable: "not_found", record_unavailable: "not_found", unsupported_url: "unsupported_url", not_cnki: "not_cnki", timeout: "timeout", network_error: "network_error", http_error: "http_error", rate_limited: "rate_limited", unsafe_redirect: "unsafe_redirect", response_too_large: "response_too_large", redirect_limit: "redirect_limit", needs_url: "no_sample", disabled: "idle" };
       const messages = {
         pdf_available: "已解析文献元数据并发现 PDF 入口；实际下载和论文身份仍需核对。",
         metadata_only: "已解析文献元数据；此页面尚未提供可确认的 PDF 入口。",
@@ -52,28 +62,40 @@
         article_mismatch: "页面文献与原条目的知网编号、DOI 或标题不一致，未导入。",
         metadata_unavailable: "此页面未提供足够的文献元数据，请核对详情页链接。",
         record_unavailable: "未能确认知网文献编号，请使用具体文献的详情页。",
-        unsupported_url: "请输入有效 DOI、知网官方文章链接或完整标题。",
-        needs_url: "请先选择带 DOI 或知网文章链接的条目，或输入 DOI、知网官方文章链接或完整标题。",
+        unsupported_url: "此链接或解析后的页面暂不支持知网文献检查；请使用知网文章详情页。这不能判断账号是否已登录。",
+        not_cnki: "此 DOI 指向其他网站，不能用于验证知网文献访问；请提供知网文献的 DOI 或详情页链接。",
+        timeout: "知网文献请求超时，请稍后重试；这不能判断账号是否已登录。",
+        network_error: "知网文献请求失败，请检查网络后重试；这不能判断账号是否已登录。",
+        http_error: "知网站点暂未正常返回文献页面，请稍后重试；这不能判断账号是否已登录。",
+        rate_limited: "知网站点暂时限制请求频率，请稍后重试；无需据此重新登录。",
+        unsafe_redirect: "知网文献请求跳转到未获允许的地址，已停止检查；请核对知网详情页链接。",
+        response_too_large: "知网页面响应超过检查大小限制，已停止解析；请在网页中查看文献。",
+        redirect_limit: "知网文献页面跳转次数过多，已停止检查；请提供最终的知网详情页链接。",
+        needs_url: "请在下方输入知网文献的 DOI 或详情页链接，或选择明确关联知网的条目；文献访问检查不用于判定账号是否已登录。",
         disabled: "知网解析已关闭。",
       };
-      return { state: statusMap[result?.status] || "error", message: messages[result?.status] || "知网页面暂时无法解析，请稍后重试。", record, metadata: data, canImport: usable, lastCheckedAt: new Date().toISOString() };
+      return { state: statusMap[result?.status] || "error", message: messages[result?.status] || "知网文献检查未完成，请稍后重试；这不能判断账号是否已登录。", record, metadata: data, canImport: usable, lastCheckedAt: new Date().toISOString() };
     }
-    async function inspect(input) {
+    async function inspect(input, { userInitiated = false } = {}) {
       active(); if (!state.enabled) throw new Error("请先开启知网解析。");
       if (running || mutationRun) throw new Error("知网操作正在进行，请稍候。");
       const ticket = ++epoch;
       previewURL = null;
-      notify({ checking: true, state: "checking", message: "正在解析知网文献…", canImport: false, references: emptyReferences() });
+      notify({ checking: true, state: "checking", message: "正在解析知网文献…", canImport: false, record: null, metadata: null, references: emptyReferences() });
       const operation = (async () => {
         try {
-          const result = await publisher.inspectCNKI(input, { isCancelled: () => stopped || epoch !== ticket });
+          const result = await publisher.inspectCNKI(input, { userInitiated, isCancelled: () => stopped || epoch !== ticket });
           if (stopped || epoch !== ticket) throw abort();
           const patch = resultPatch(result);
-          previewURL = patch.record ? cnki.pageURL(input) || patch.record.url : null;
+          // A rejected item must retain its DOI/title identity checks on retry;
+          // turning its URL into an accepted preview would discard that context.
+          previewURL = patch.canImport ? cnki.pageURL(input) || patch.record.url : null;
           notify(patch); return getSnapshot();
         } catch (error) {
-          if (error.name !== "AbortError" && !stopped && epoch === ticket) notify({ state: "error", message: "知网页面请求失败，请检查网络或完成网页登录后重试。", canImport: false, lastCheckedAt: new Date().toISOString() });
-          throw error.name === "AbortError" ? error : new Error("知网页面请求失败，请检查网络或完成网页登录后重试。");
+          if (error.name === "AbortError") throw error;
+          const patch = resultPatch({ status: error.code === "timeout" || error.name === "TimeoutError" ? "timeout" : "network_error" });
+          if (!stopped && epoch === ticket) notify(patch);
+          throw Object.assign(new Error(patch.message), { code: patch.state });
         } finally { if (epoch === ticket) notify({ checking: false }); }
       })();
       running = operation;
@@ -182,7 +204,7 @@
         const operation = Promise.resolve().then(async () => {
           await publisherSession?.grantHosts(HOSTS); if (stopped || ticket !== epoch) throw abort();
           publisherWindow.open({ url: "https://kns.cnki.net/", purpose: "cnki" });
-          notify({ message: "请在知网窗口完成登录；会话按网站有效期保存，随后可验证所选文献。" }); return getSnapshot();
+          notify({ state: "idle", lastCheckedAt: null, message: "已打开知网网页登录；会话按网站有效期保存。完成后可检查具体文献的访问情况，打开窗口不代表已验证登录。" }); return getSnapshot();
         });
         running = operation; emit();
         try { await operation; } finally { if (running === operation) running = null; if (!stopped) emit(); }
@@ -191,14 +213,31 @@
       inspectURL(value) {
         const input = normalizeInput(value);
         if (!input) throw new Error("请输入有效 DOI、知网官方文章链接或完整标题。");
-        return input.kind === "title" ? searchTitle(input.title) : inspect(input.url || input.value);
+        return input.kind === "title" ? searchTitle(input.title) : inspect(input.url || input.value, { userInitiated: true });
       },
-      async verify() {
-        active(); const ticket = epoch, candidates = selected(); let sample = candidates.find(hasArticleInput);
-        if (!sample) sample = (await search("url", "contains", "cnki.")).find(hasArticleInput);
+      async verify(value) {
+        active();
+        if (!state.enabled) throw new Error("请先开启知网解析。");
+        if (running || mutationRun) throw new Error("知网操作正在进行，请稍候。");
+        if (value != null && typeof value !== "string") throw new Error("请输入有效 DOI、知网官方文章链接或完整标题。");
+        if (typeof value === "string" && value.trim()) {
+          const input = normalizeInput(value);
+          if (!input) throw new Error("请输入有效 DOI、知网官方文章链接或完整标题。");
+          return input.kind === "title" ? searchTitle(input.title) : inspect(input.url || input.value, { userInitiated: true });
+        }
+        if (previewURL) return inspect(previewURL, { userInitiated: true });
+        const ticket = epoch, candidates = selected(); let sample = candidates.find(hasCNKIAssociation);
+        if (!sample) {
+          const matches = await search("url", "contains", "cnki.");
+          for (const [field, text] of [["extra", "CNKI"], ["DOI", "cnki"]]) {
+            active(); if (ticket !== epoch) throw abort();
+            matches.push(...await search(field, "contains", text));
+          }
+          sample = matches.find(hasCNKIAssociation);
+        }
         active(); if (ticket !== epoch) throw abort();
-        if (!sample) { notify({ state: "no_sample", message: "请先选择带 DOI 或知网文章链接的条目，或输入 DOI、知网官方文章链接或完整标题。", canImport: false, record: null, metadata: null }); return getSnapshot(); }
-        return inspect(sample);
+        if (!sample) { const patch = resultPatch({ status: "needs_url" }); notify({ ...patch, lastCheckedAt: null, references: emptyReferences() }); return getSnapshot(); }
+        return inspect(sample, { userInitiated: true });
       },
       importPreview() {
         if (!state.canImport || !state.record || !state.metadata) throw new Error("请先解析并核对知网文献预览。");
